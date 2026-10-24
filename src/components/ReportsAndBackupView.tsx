@@ -69,14 +69,36 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Web Dependencies & Build Production Bundle
+      - name: Normalize Public NPM Versions & Build Production Web App
         run: |
-          npm install
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.dependencies = {
+              "lucide-react": "^0.468.0",
+              "react": "^19.0.0",
+              "react-dom": "^19.0.0",
+              "xlsx": "^0.18.5"
+            };
+            pkg.devDependencies = {
+              "@tailwindcss/vite": "^4.0.0",
+              "@types/node": "^22.0.0",
+              "@types/react": "^19.0.0",
+              "@types/react-dom": "^19.0.0",
+              "@vitejs/plugin-react": "^4.3.4",
+              "tailwindcss": "^4.0.0",
+              "typescript": "~5.7.2",
+              "vite": "^6.0.0"
+            };
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+          '
+          rm -f package-lock.json bun.lock
+          npm install --legacy-peer-deps
           npm run build
 
-      - name: Install Capacitor Android & Sync Web Assets
+      - name: Add Capacitor Android & Sync Web Assets
         run: |
-          npm install --no-save @capacitor/core@^7.0.0 @capacitor/cli@^7.0.0 @capacitor/android@^7.0.0
+          npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
           if [ ! -d "android" ]; then
             npx cap add android
           fi
@@ -166,16 +188,35 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
   const [showHtmlSource, setShowHtmlSource] = useState<boolean>(false);
   const [copiedHtml, setCopiedHtml] = useState<boolean>(false);
 
-  // GitHub Android APK Release state
+  // GitHub Android APK Release state (default configured to vikramgujjar694488-spec/Ujala-Dairy-apk)
   const [githubRepoInput, setGithubRepoInput] = useState<string>(() => {
     try {
-      return localStorage.getItem('ujalaa_dairy_github_repo') || '';
+      return (
+        localStorage.getItem('ujalaa_dairy_github_repo') ||
+        'vikramgujjar694488-spec/Ujala-Dairy-apk'
+      );
     } catch {
-      return '';
+      return 'vikramgujjar694488-spec/Ujala-Dairy-apk';
     }
   });
   const [showWorkflowCode, setShowWorkflowCode] = useState<boolean>(false);
   const [copiedWorkflow, setCopiedWorkflow] = useState<boolean>(false);
+  const [copiedLinkType, setCopiedLinkType] = useState<string | null>(null);
+  const [githubCheckState, setGithubCheckState] = useState<{
+    checking: boolean;
+    repoExists: boolean | null;
+    releaseReady: boolean;
+    apkDownloadUrl: string | null;
+    messageHi: string;
+    messageEn: string;
+  }>({
+    checking: false,
+    repoExists: null,
+    releaseReady: false,
+    apkDownloadUrl: null,
+    messageHi: '',
+    messageEn: '',
+  });
 
   const normalizedGithubRepo = githubRepoInput
     .trim()
@@ -183,15 +224,101 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
     .replace(/\.git$/i, '')
     .replace(/\/+$/, '');
   const hasValidGithubRepo = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(normalizedGithubRepo);
-  const directApkReleaseUrl = hasValidGithubRepo
-    ? `https://github.com/${normalizedGithubRepo}/releases/latest/download/Ujalaa-Dairy-debug.apk`
-    : '';
+  const directApkReleaseUrl =
+    githubCheckState.apkDownloadUrl ||
+    (hasValidGithubRepo
+      ? `https://github.com/${normalizedGithubRepo}/releases/latest/download/Ujalaa-Dairy-debug.apk`
+      : '');
   const githubReleasesPageUrl = hasValidGithubRepo
     ? `https://github.com/${normalizedGithubRepo}/releases`
     : '';
   const githubActionsPageUrl = hasValidGithubRepo
     ? `https://github.com/${normalizedGithubRepo}/actions`
     : '';
+
+  const checkGithubReleaseStatus = React.useCallback(async (repo: string) => {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return;
+    setGithubCheckState((prev) => ({ ...prev, checking: true }));
+    try {
+      const repoRes = await fetch(`https://api.github.com/repos/${repo}`);
+      if (repoRes.status === 404) {
+        setGithubCheckState({
+          checking: false,
+          repoExists: false,
+          releaseReady: false,
+          apkDownloadUrl: null,
+          messageHi: `ध्यान दें: GitHub पर अभी "${repo}" रिपॉजिटरी नहीं मिली (404 Not Found) या यह Private है। इसीलिए GitHub के लिंक अभी काम नहीं कर रहे हैं। पहले AI Studio के सबसे ऊपरी बार में GitHub आइकन (Export/Sync to GitHub) दबाकर इस प्रोजेक्ट को Public रिपॉजिटरी के रूप में GitHub पर भेजें — या नीचे दिए हरे बटन से अभी तुरंत मोबाइल ऐप फ़ाइल डाउनलोड करें!`,
+          messageEn: `Note: Repository "${repo}" was not found on GitHub (404) or is Private. That is why the GitHub links are not working yet. Click the GitHub icon in the top bar of AI Studio to export this project as a Public repo, or use the green button below to download the mobile app file immediately!`,
+        });
+        return;
+      }
+
+      const relRes = await fetch(`https://api.github.com/repos/${repo}/releases/latest`);
+      if (relRes.ok) {
+        const relData = await relRes.json();
+        const apkAsset = Array.isArray(relData.assets)
+          ? relData.assets.find((a: { name?: string; browser_download_url?: string }) =>
+              String(a.name || '').endsWith('.apk')
+            )
+          : null;
+        if (apkAsset?.browser_download_url) {
+          setGithubCheckState({
+            checking: false,
+            repoExists: true,
+            releaseReady: true,
+            apkDownloadUrl: apkAsset.browser_download_url,
+            messageHi: `APK तैयार है! (${relData.tag_name || 'Latest'}) — आप नीचे से सीधा Ujalaa-Dairy-debug.apk डाउनलोड कर सकते हैं।`,
+            messageEn: `APK is ready! (${relData.tag_name || 'Latest'}) — You can download Ujalaa-Dairy-debug.apk directly below.`,
+          });
+          return;
+        }
+      }
+
+      setGithubCheckState({
+        checking: false,
+        repoExists: true,
+        releaseReady: false,
+        apkDownloadUrl: null,
+        messageHi: `GitHub रिपॉजिटरी "${repo}" मिल गई है, लेकिन अभी पहली APK Release तैयार नहीं हुई है। कृपया GitHub के Actions टैब में देखें कि बिल्ड चल रहा है या पूरा हो गया है।`,
+        messageEn: `Repository "${repo}" exists on GitHub, but no APK Release has been published yet. Check the GitHub Actions tab to see the build progress.`,
+      });
+    } catch {
+      setGithubCheckState({
+        checking: false,
+        repoExists: null,
+        releaseReady: false,
+        apkDownloadUrl: null,
+        messageHi: 'GitHub स्थिति की जाँच नहीं हो सकी। आप नीचे दिए बटन से तुरंत मोबाइल ऐप डाउनलोड कर सकते हैं।',
+        messageEn: 'Could not check GitHub status. You can download the standalone mobile app below.',
+      });
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (subTab === 'backup' && hasValidGithubRepo) {
+      checkGithubReleaseStatus(normalizedGithubRepo);
+    }
+  }, [subTab, normalizedGithubRepo, hasValidGithubRepo, checkGithubReleaseStatus]);
+
+  const handleDownloadWorkflowFile = () => {
+    const blob = new Blob([GITHUB_WORKFLOW_YML], { type: 'text/yaml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'build-apk.yml';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCopyText = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedLinkType(key);
+      setTimeout(() => setCopiedLinkType(null), 2200);
+    } catch {
+      // ignore
+    }
+  };
 
   // Settings form state
   const [dName, setDName] = useState<string>(state.dairyName);
@@ -869,88 +996,186 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               </span>
             </div>
 
-            {/* GitHub Repository Link Generator for Direct APK Download */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+            {/* Live Diagnostic & Instant Working Mobile App Download */}
+            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <label
-                  htmlFor="github-repo-input"
-                  className="block text-xs font-bold text-slate-700 mb-1"
-                >
+                <strong className="text-xs sm:text-sm text-emerald-950 block">
                   {lang === 'hi'
-                    ? 'अपना GitHub Repository नाम या URL लिखें (सीधा APK डाउनलोड लिंक पाने के लिए):'
-                    : 'Enter your GitHub Repository (owner/repo or URL) for Direct APK Download:'}
-                </label>
-                <input
-                  id="github-repo-input"
-                  type="text"
-                  placeholder="e.g. username/ujalaa-dairy or https://github.com/username/ujalaa-dairy"
-                  value={githubRepoInput}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setGithubRepoInput(val);
-                    try {
-                      localStorage.setItem('ujalaa_dairy_github_repo', val);
-                    } catch {
-                      // ignore
-                    }
-                  }}
-                  className="w-full min-h-[42px] px-3.5 py-2 text-xs sm:text-sm font-mono bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                />
+                    ? 'विकल्प 1 (तुरंत काम करने वाला — बिना GitHub के अभी फोन में डाउनलोड करें):'
+                    : 'Option 1 (Works Immediately — Download to Mobile Without GitHub):'}
+                </strong>
+                <span className="text-xs text-emerald-800">
+                  {lang === 'hi'
+                    ? 'यह बटन बिना किसी बाहरी लिंक के तुरंत आपके फोन में "Ujalaa_Dairy_Complete_App.html" डाउनलोड करता है जो ऑफलाइन ऐप की तरह चलता है।'
+                    : 'Downloads "Ujalaa_Dairy_Complete_App.html" directly to your phone right now with 1 click.'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleDownloadStandaloneHtml}
+                className="min-h-[44px] px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 shrink-0 shadow-xs"
+              >
+                <Download className="w-4 h-4" />
+                {lang === 'hi'
+                  ? 'अभी मोबाइल ऐप डाउनलोड करें (100% Working)'
+                  : 'Download Mobile App Now'}
+              </button>
+            </div>
+
+            {/* GitHub Repository Link Generator & Live Status Checker */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+              <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+                <div className="flex-1">
+                  <label
+                    htmlFor="github-repo-input"
+                    className="block text-xs font-bold text-slate-700 mb-1"
+                  >
+                    {lang === 'hi'
+                      ? 'विकल्प 2: GitHub Repository नाम (GitHub Actions से .apk के लिए):'
+                      : 'Option 2: GitHub Repository (owner/repo) for .apk:'}
+                  </label>
+                  <input
+                    id="github-repo-input"
+                    type="text"
+                    placeholder="vikramgujjar694488-spec/Ujala-Dairy-apk"
+                    value={githubRepoInput}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setGithubRepoInput(val);
+                      try {
+                        localStorage.setItem('ujalaa_dairy_github_repo', val);
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                    className="w-full min-h-[42px] px-3.5 py-2 text-xs sm:text-sm font-mono bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => checkGithubReleaseStatus(normalizedGithubRepo)}
+                  disabled={!hasValidGithubRepo || githubCheckState.checking}
+                  className="min-h-[42px] px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl shrink-0"
+                >
+                  {githubCheckState.checking
+                    ? lang === 'hi'
+                      ? 'जाँच हो रही है...'
+                      : 'Checking...'
+                    : lang === 'hi'
+                    ? 'APK स्टेटस अभी जाँचें'
+                    : 'Check APK Status'}
+                </button>
               </div>
 
-              {hasValidGithubRepo ? (
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <a
-                    href={directApkReleaseUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="min-h-[44px] px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-xs"
-                  >
-                    <Download className="w-4 h-4" />
-                    {lang === 'hi'
-                      ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (Latest Release)'
-                      : 'Direct Download Ujalaa-Dairy-debug.apk'}
-                  </a>
-
-                  <a
-                    href={githubReleasesPageUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="min-h-[44px] px-3.5 py-2.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold rounded-xl flex items-center gap-1.5"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5 text-blue-600" />
-                    {lang === 'hi' ? 'GitHub Releases खोलें' : 'Open GitHub Releases'}
-                  </a>
-
-                  <a
-                    href={githubActionsPageUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="min-h-[44px] px-3.5 py-2.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold rounded-xl flex items-center gap-1.5"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5 text-emerald-600" />
-                    {lang === 'hi' ? 'GitHub Actions बिल्ड स्टेटस' : 'GitHub Actions Build Status'}
-                  </a>
+              {/* Live GitHub API Status Banner */}
+              {githubCheckState.messageHi && (
+                <div
+                  data-testid="github-live-status-banner"
+                  className={`p-3 rounded-xl border text-xs font-semibold flex items-start gap-2 ${
+                    githubCheckState.releaseReady
+                      ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                      : githubCheckState.repoExists === false
+                      ? 'bg-amber-50 border-amber-300 text-amber-900'
+                      : 'bg-blue-50 border-blue-200 text-blue-900'
+                  }`}
+                >
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    {lang === 'hi' ? githubCheckState.messageHi : githubCheckState.messageEn}
+                  </span>
                 </div>
-              ) : (
-                <p className="text-[11px] text-slate-500">
-                  {lang === 'hi'
-                    ? 'ऊपर अपना GitHub यूज़रनेम/रेपो (जैसे username/ujalaa-dairy) लिखते ही सीधा APK डाउनलोड बटन सक्रिय हो जाएगा।'
-                    : 'Enter your GitHub owner/repo above to activate the 1-click Direct APK Download button.'}
-                </p>
+              )}
+
+              {hasValidGithubRepo && (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {githubCheckState.releaseReady ? (
+                      <a
+                        href={directApkReleaseUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-h-[42px] px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-xs"
+                      >
+                        <Download className="w-4 h-4" />
+                        {lang === 'hi'
+                          ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें'
+                          : 'Direct Download Ujalaa-Dairy-debug.apk'}
+                      </a>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText(directApkReleaseUrl, 'apk')}
+                      className="min-h-[38px] px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-semibold rounded-xl flex items-center gap-1.5"
+                    >
+                      {copiedLinkType === 'apk' ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-slate-600" />
+                      )}
+                      {copiedLinkType === 'apk'
+                        ? lang === 'hi'
+                          ? 'APK लिंक कॉपी हो गया!'
+                          : 'APK URL Copied!'
+                        : lang === 'hi'
+                        ? 'APK डाउनलोड लिंक कॉपी करें'
+                        : 'Copy APK Download Link'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText(githubReleasesPageUrl, 'releases')}
+                      className="min-h-[38px] px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-semibold rounded-xl flex items-center gap-1.5"
+                    >
+                      {copiedLinkType === 'releases' ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-blue-600" />
+                      )}
+                      {copiedLinkType === 'releases'
+                        ? lang === 'hi'
+                          ? 'Releases लिंक कॉपी हो गया!'
+                          : 'Releases URL Copied!'
+                        : lang === 'hi'
+                        ? 'Releases लिंक कॉपी करें'
+                        : 'Copy Releases Link'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText(githubActionsPageUrl, 'actions')}
+                      className="min-h-[38px] px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-semibold rounded-xl flex items-center gap-1.5"
+                    >
+                      {copiedLinkType === 'actions' ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-emerald-600" />
+                      )}
+                      {copiedLinkType === 'actions'
+                        ? lang === 'hi'
+                          ? 'Actions लिंक कॉपी हो गया!'
+                          : 'Actions URL Copied!'
+                        : lang === 'hi'
+                        ? 'Actions लिंक कॉपी करें'
+                        : 'Copy Actions Link'}
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
 
-            {/* 3-Step Guide + Workflow Code View/Copy */}
+            {/* 3-Step Guide + Workflow Code View/Copy/Download */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
               <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-100">
                 <strong className="text-emerald-950 block mb-0.5">
-                  {lang === 'hi' ? 'स्टेप 1: GitHub पर Push करें' : 'Step 1: Push to GitHub'}
+                  {lang === 'hi'
+                    ? 'स्टेप 1: AI Studio से GitHub पर भेजें'
+                    : 'Step 1: Export from AI Studio to GitHub'}
                 </strong>
                 <span className="text-slate-600">
                   {lang === 'hi'
-                    ? 'AI Studio से प्रोजेक्ट को अपने GitHub रेपो (main/master ब्रांच) में एक्सपोर्ट या Push करें।'
-                    : 'Export or push this project to your GitHub repository (main or master branch).'}
+                    ? 'AI Studio के सबसे ऊपरी बार में GitHub आइकन दबाएँ और रिपॉजिटरी को Public रखकर vikramgujjar694488-spec/Ujala-Dairy-apk पर Push करें।'
+                    : 'Click the GitHub icon in the top bar of AI Studio and export to vikramgujjar694488-spec/Ujala-Dairy-apk as a Public repo.'}
                 </span>
               </div>
               <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-100">
@@ -959,23 +1184,34 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                 </strong>
                 <span className="text-slate-600">
                   {lang === 'hi'
-                    ? 'GitHub Actions अपने-आप Capacitor + Gradle से Ujalaa-Dairy-debug.apk तैयार करेगा (~2-3 मिनट)।'
-                    : 'GitHub Actions automatically runs Capacitor & Gradle to build Ujalaa-Dairy-debug.apk.'}
+                    ? 'कोड जाते ही .github/workflows/build-apk.yml अपने-आप चलकर 2-3 मिनट में Ujalaa-Dairy-debug.apk बना देगा।'
+                    : 'Once pushed, .github/workflows/build-apk.yml automatically builds Ujalaa-Dairy-debug.apk in ~2-3 minutes.'}
                 </span>
               </div>
               <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-100">
                 <strong className="text-emerald-950 block mb-0.5">
-                  {lang === 'hi' ? 'स्टेप 3: Releases से सीधा डाउनलोड' : 'Step 3: Direct Release Download'}
+                  {lang === 'hi' ? 'स्टेप 3: APK स्टेटस जाँचें और डाउनलोड करें' : 'Step 3: Check Status & Download'}
                 </strong>
                 <span className="text-slate-600">
                   {lang === 'hi'
-                    ? 'GitHub के Releases सेक्शन में जाकर सीधे Ujalaa-Dairy-debug.apk अपने फोन में डाउनलोड और इंस्टॉल करें।'
-                    : 'Download Ujalaa-Dairy-debug.apk directly from your repository’s GitHub Releases.'}
+                    ? 'ऊपर "APK स्टेटस अभी जाँचें" बटन दबाएँ — हरा होते ही सीधे APK डाउनलोड करें।'
+                    : 'Click "Check APK Status" above to verify the release and download your APK.'}
                 </span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                onClick={handleDownloadWorkflowFile}
+                className="min-h-[40px] px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-xs font-bold rounded-xl flex items-center gap-1.5"
+              >
+                <Download className="w-4 h-4 text-blue-600" />
+                {lang === 'hi'
+                  ? 'build-apk.yml फ़ाइल डाउनलोड करें'
+                  : 'Download build-apk.yml'}
+              </button>
+
               <button
                 type="button"
                 onClick={async () => {

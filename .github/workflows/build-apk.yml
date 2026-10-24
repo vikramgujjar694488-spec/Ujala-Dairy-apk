@@ -35,14 +35,36 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Web Dependencies & Build Production Bundle
+      - name: Normalize Public NPM Versions & Build Production Web App
         run: |
-          npm install
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.dependencies = {
+              "lucide-react": "^0.468.0",
+              "react": "^19.0.0",
+              "react-dom": "^19.0.0",
+              "xlsx": "^0.18.5"
+            };
+            pkg.devDependencies = {
+              "@tailwindcss/vite": "^4.0.0",
+              "@types/node": "^22.0.0",
+              "@types/react": "^19.0.0",
+              "@types/react-dom": "^19.0.0",
+              "@vitejs/plugin-react": "^4.3.4",
+              "tailwindcss": "^4.0.0",
+              "typescript": "~5.7.2",
+              "vite": "^6.0.0"
+            };
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+          '
+          rm -f package-lock.json bun.lock
+          npm install --legacy-peer-deps
           npm run build
 
-      - name: Install Capacitor Android & Sync Web Assets
+      - name: Add Capacitor Android & Sync Web Assets
         run: |
-          npm install --no-save @capacitor/core@^7.0.0 @capacitor/cli@^7.0.0 @capacitor/android@^7.0.0
+          npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
           if [ ! -d "android" ]; then
             npx cap add android
           fi

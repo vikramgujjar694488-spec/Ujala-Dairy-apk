@@ -5,10 +5,13 @@ import {
   Calendar,
   CheckCircle2,
   Clock,
+  Download,
+  ExternalLink,
   FileSpreadsheet,
   Milk,
   Plus,
   Scale,
+  Smartphone,
   Sun,
   Moon,
   TrendingUp,
@@ -28,6 +31,8 @@ import {
   round3,
 } from '../utils/dairyCalculations';
 
+import { generateStandaloneHtmlApp } from '../utils/standaloneHtmlGenerator';
+
 interface DashboardViewProps {
   state: DairyAppState;
   onChangeDate: (date: string) => void;
@@ -45,6 +50,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const lang = state.language;
   const date = state.selectedDate;
   const shift = state.selectedShift;
+
+  const handleInstantMobileAppDownload = () => {
+    const htmlCode = generateStandaloneHtmlApp(state, true);
+    const blob = new Blob([htmlCode], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'Ujalaa_Dairy_Complete_App.html';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   // Filter today's records
   const dayCollections = state.collections.filter((c) => c.date === date);
@@ -181,6 +197,48 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
         </div>
       )}
+
+      {/* Instant Working Mobile App Download + GitHub APK Status Banner */}
+      <div
+        data-testid="dashboard-apk-banner"
+        className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+      >
+        <div className="flex items-start gap-2.5">
+          <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+            <Smartphone className="w-5 h-5" />
+          </div>
+          <div>
+            <p className="text-xs sm:text-sm font-bold text-emerald-950">
+              {lang === 'hi'
+                ? 'Ujalaa Dairy मोबाइल ऐप डाउनलोड एवं Android APK'
+                : 'Ujalaa Dairy Mobile App Download & Android APK'}
+            </p>
+            <p className="text-[11px] text-emerald-800 mt-0.5">
+              {lang === 'hi'
+                ? 'तुरंत ऑफलाइन मोबाइल ऐप फ़ाइल डाउनलोड करें या GitHub APK स्टेटस व डाउनलोड विकल्प खोलें'
+                : 'Download the instant offline mobile app file or open GitHub APK status & download'}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleInstantMobileAppDownload}
+            className="min-h-[38px] px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
+          >
+            <Download className="w-3.5 h-3.5" />
+            {lang === 'hi' ? 'तुरंत मोबाइल ऐप डाउनलोड करें' : 'Instant Mobile App Download'}
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate('backup')}
+            className="min-h-[38px] px-3 py-2 bg-white hover:bg-emerald-100 text-emerald-900 border border-emerald-300 text-xs font-semibold rounded-xl flex items-center gap-1"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            {lang === 'hi' ? 'Android APK और GitHub स्टेटस' : 'Android APK & GitHub Status'}
+          </button>
+        </div>
+      </div>
 
       {/* Date & Live Shift Control Bar */}
       <div className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">

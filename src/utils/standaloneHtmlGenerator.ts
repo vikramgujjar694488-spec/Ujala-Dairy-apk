@@ -728,7 +728,14 @@ export function generateStandaloneHtmlApp(
     }
 
     function renderBackup() {
-      return '<div class="card"><h3>डेटा बैकअप और Restore</h3>' +
+      return '<div class="card" style="border:2px solid #16a34a;"><h3>Android Debug APK डाउनलोड (vikramgujjar694488-spec/Ujala-Dairy-apk)</h3>' +
+        '<p style="margin:6px 0 10px;font-size:0.82rem;">GitHub Releases से सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें:</p>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<a href="https://github.com/vikramgujjar694488-spec/Ujala-Dairy-apk/releases/latest/download/Ujalaa-Dairy-debug.apk" target="_blank" style="text-decoration:none;background:#16a34a;color:#fff;padding:10px 14px;border-radius:9px;font-size:0.84rem;font-weight:700;">सीधा APK डाउनलोड करें (Ujalaa-Dairy-debug.apk)</a>' +
+        '<a href="https://github.com/vikramgujjar694488-spec/Ujala-Dairy-apk/releases" target="_blank" style="text-decoration:none;background:#f1f5f9;color:#1e293b;border:1px solid #cbd5e1;padding:10px 14px;border-radius:9px;font-size:0.84rem;font-weight:700;">GitHub Releases खोलें</a>' +
+        '<a href="https://github.com/vikramgujjar694488-spec/Ujala-Dairy-apk/actions" target="_blank" style="text-decoration:none;background:#f1f5f9;color:#1e293b;border:1px solid #cbd5e1;padding:10px 14px;border-radius:9px;font-size:0.84rem;font-weight:700;">GitHub Actions स्टेटस</a>' +
+        '</div></div>' +
+        '<div class="card"><h3>डेटा बैकअप और Restore</h3>' +
         '<button class="btn-primary" onclick="exportJson()">JSON बैकअप डाउनलोड करें</button></div>';
     }
     function exportJson() {
