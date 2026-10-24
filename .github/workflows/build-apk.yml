@@ -32,8 +32,15 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configure Pre-installed Android SDK
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          if [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
 
       - name: Normalize Public NPM Versions & Build Production Web App
         run: |
@@ -64,18 +71,18 @@ jobs:
 
       - name: Add Capacitor Android & Sync Web Assets
         run: |
-          npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
-          if [ ! -d "android" ]; then
-            npx cap add android
-          fi
+          npm install --no-save --legacy-peer-deps @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+          rm -rf android
+          npx cap add android
           npx cap sync android
 
       - name: Build Debug APK with Gradle
         run: |
           chmod +x android/gradlew
           cd android
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon --stacktrace
           cp app/build/outputs/apk/debug/app-debug.apk ../Ujalaa-Dairy-debug.apk
+          ls -lh ../Ujalaa-Dairy-debug.apk
 
       - name: Upload Debug APK to GitHub Actions Artifacts
         uses: actions/upload-artifact@v4

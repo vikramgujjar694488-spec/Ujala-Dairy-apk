@@ -66,8 +66,15 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configure Pre-installed Android SDK
+        run: |
+          export ANDROID_HOME="\${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="\$ANDROID_HOME"
+          echo "ANDROID_HOME=\$ANDROID_HOME" >> \$GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=\$ANDROID_HOME" >> \$GITHUB_ENV
+          if [ -f "\$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "\$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
 
       - name: Normalize Public NPM Versions & Build Production Web App
         run: |
@@ -98,18 +105,18 @@ jobs:
 
       - name: Add Capacitor Android & Sync Web Assets
         run: |
-          npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
-          if [ ! -d "android" ]; then
-            npx cap add android
-          fi
+          npm install --no-save --legacy-peer-deps @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+          rm -rf android
+          npx cap add android
           npx cap sync android
 
       - name: Build Debug APK with Gradle
         run: |
           chmod +x android/gradlew
           cd android
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon --stacktrace
           cp app/build/outputs/apk/debug/app-debug.apk ../Ujalaa-Dairy-debug.apk
+          ls -lh ../Ujalaa-Dairy-debug.apk
 
       - name: Upload Debug APK to GitHub Actions Artifacts
         uses: actions/upload-artifact@v4
@@ -247,8 +254,8 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
           repoExists: false,
           releaseReady: false,
           apkDownloadUrl: null,
-          messageHi: `ध्यान दें: GitHub पर अभी "${repo}" रिपॉजिटरी नहीं मिली (404 Not Found) या यह Private है। इसीलिए GitHub के लिंक अभी काम नहीं कर रहे हैं। पहले AI Studio के सबसे ऊपरी बार में GitHub आइकन (Export/Sync to GitHub) दबाकर इस प्रोजेक्ट को Public रिपॉजिटरी के रूप में GitHub पर भेजें — या नीचे दिए हरे बटन से अभी तुरंत मोबाइल ऐप फ़ाइल डाउनलोड करें!`,
-          messageEn: `Note: Repository "${repo}" was not found on GitHub (404) or is Private. That is why the GitHub links are not working yet. Click the GitHub icon in the top bar of AI Studio to export this project as a Public repo, or use the green button below to download the mobile app file immediately!`,
+          messageHi: `ध्यान दें: GitHub पर अभी "${repo}" रिपॉजिटरी नहीं मिली (404 Not Found) या यह Private है।`,
+          messageEn: `Note: Repository "${repo}" was not found on GitHub (404) or is Private.`,
         });
         return;
       }
@@ -274,13 +281,43 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
         }
       }
 
+      const runsRes = await fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=1`);
+      if (runsRes.ok) {
+        const runsData = await runsRes.json();
+        const latestRun = runsData?.workflow_runs?.[0];
+        if (latestRun) {
+          if (latestRun.status === 'in_progress' || latestRun.status === 'queued') {
+            setGithubCheckState({
+              checking: false,
+              repoExists: true,
+              releaseReady: false,
+              apkDownloadUrl: null,
+              messageHi: `GitHub Actions पर अभी APK बिल्ड चल रहा है (Run #${latestRun.run_number} — ${latestRun.status})। कृपया 1-2 मिनट बाद "APK स्टेटस अभी जाँचें" दबाएँ।`,
+              messageEn: `GitHub Actions APK build is currently running (Run #${latestRun.run_number}). Please check again in 1-2 minutes.`,
+            });
+            return;
+          }
+          if (latestRun.conclusion === 'failure') {
+            setGithubCheckState({
+              checking: false,
+              repoExists: true,
+              releaseReady: false,
+              apkDownloadUrl: null,
+              messageHi: `पिछला GitHub Actions बिल्ड (Run #${latestRun.run_number}) पुराने Android SDK स्टेप के कारण रुका था। हमने इस प्रोजेक्ट में .github/workflows/build-apk.yml को ठीक कर दिया है! अब ऊपर AI Studio के GitHub आइकन से एक बार दोबारा GitHub पर Sync/Push करें — इस बार APK 100% बन जाएगी!`,
+              messageEn: `Previous GitHub Actions Run #${latestRun.run_number} failed on the old Android SDK step. We have fixed .github/workflows/build-apk.yml! Please push/sync to GitHub once more from AI Studio.`,
+            });
+            return;
+          }
+        }
+      }
+
       setGithubCheckState({
         checking: false,
         repoExists: true,
         releaseReady: false,
         apkDownloadUrl: null,
-        messageHi: `GitHub रिपॉजिटरी "${repo}" मिल गई है, लेकिन अभी पहली APK Release तैयार नहीं हुई है। कृपया GitHub के Actions टैब में देखें कि बिल्ड चल रहा है या पूरा हो गया है।`,
-        messageEn: `Repository "${repo}" exists on GitHub, but no APK Release has been published yet. Check the GitHub Actions tab to see the build progress.`,
+        messageHi: `GitHub रिपॉजिटरी "${repo}" मिल गई है, लेकिन अभी APK Release तैयार नहीं हुई है। कृपया नया कोड GitHub पर Push करें।`,
+        messageEn: `Repository "${repo}" exists on GitHub, but no APK Release has been published yet.`,
       });
     } catch {
       setGithubCheckState({
