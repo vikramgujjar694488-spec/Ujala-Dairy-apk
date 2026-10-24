@@ -1,0 +1,9 @@
+{
+  "appId": "com.ujalaadairy.app",
+  "appName": "Ujalaa Dairy",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}
