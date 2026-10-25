@@ -61,11 +61,25 @@ export interface RateChartMatrix {
   invalidCellCount: number;
 }
 
+export interface Customer {
+  id: string; // internal UUID e.g. "cust_..."
+  code: string; // Customer ID e.g. "C01" or "101"
+  name: string;
+  mobile: string;
+  address: string;
+  defaultMilkType?: MilkType | 'mixed';
+  notes?: string;
+  active: boolean;
+  createdAt: string;
+}
+
 export interface WholesaleSaleEntry {
   id: string;
   date: string; // YYYY-MM-DD
   time: string;
   shift: ShiftType;
+  customerId?: string;
+  customerCode?: string;
   buyerName: string;
   milkType: SaleMilkType;
   liters: number;
@@ -157,6 +171,7 @@ export interface DairyAppState {
   selectedShift: ShiftType;
   expenseCategories: string[];
   farmers: Farmer[];
+  customers: Customer[];
   collections: MilkCollectionEntry[];
   leaves: FarmerLeaveRecord[];
   sales: WholesaleSaleEntry[];

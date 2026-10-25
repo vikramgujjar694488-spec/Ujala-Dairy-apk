@@ -8,6 +8,7 @@ interface ConfirmDialogProps {
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  danger?: boolean;
   variant?: 'danger' | 'primary';
   onConfirm: () => void;
   onCancel: () => void;
@@ -19,11 +20,13 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   message,
   confirmLabel = 'हाँ, पुष्टि करें',
   cancelLabel = 'रद्द करें',
-  variant = 'danger',
+  danger,
+  variant,
   onConfirm,
   onCancel,
 }) => {
   if (!open) return null;
+  const isDanger = danger !== undefined ? danger : variant !== 'primary';
 
   return (
     <div
@@ -70,7 +73,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             type="button"
             onClick={onConfirm}
             className={`min-h-[44px] px-4 py-2 text-sm font-semibold text-white rounded-xl transition-colors ${
-              variant === 'danger'
+              isDanger
                 ? 'bg-red-600 hover:bg-red-700'
                 : 'bg-blue-600 hover:bg-blue-700'
             }`}

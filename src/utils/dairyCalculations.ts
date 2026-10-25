@@ -1799,3 +1799,84 @@ export function parseExcelGridToRateChart(
     warnings,
   };
 }
+
+/**
+ * Pure Milk Profit & Loss Calculation (केवल दूध खरीद एवं बिक्री के अंतर से लाभ-हानि)
+ * इसमें कोई भी अतिरिक्त खर्च (expenses) नहीं जोड़ा जाता।
+ * केवल कुल दूध बिक्री राशि (Sale Amount) - कुल दूध खरीद राशि (Purchase Amount) = लाभ/हानि।
+ */
+export interface PureProfitLossReport {
+  purchasedLiters: number;
+  purchaseAmount: number;
+  avgPurchaseRate: number | null;
+  avgPurchaseFat: number | null;
+  avgPurchaseSnf: number | null;
+
+  soldLiters: number;
+  saleAmount: number;
+  avgSaleRate: number | null;
+  avgSaleFat: number | null;
+  avgSaleSnf: number | null;
+
+  // Pure difference: Sale Amount - Purchase Amount
+  netDifference: number; // +ve = Profit (लाभ), -ve = Loss (हानि)
+  isProfit: boolean;
+  statusLabelHi: string;
+  statusLabelEn: string;
+  marginPerLiter: number | null;
+
+  // Volume difference: Sold Liters - Purchased Liters
+  litersDifference: number;
+
+  entryCountPurchases: number;
+  entryCountSales: number;
+}
+
+export function calculatePureProfitLoss(
+  collections: MilkCollectionEntry[],
+  sales: WholesaleSaleEntry[]
+): PureProfitLossReport {
+  const colSum = calculateCollectionSummary(collections);
+  const saleSum = calculateSaleSummary(sales);
+
+  const purchasedLiters = colSum.totalLiters;
+  const purchaseAmount = colSum.totalAmount;
+  const soldLiters = saleSum.totalLiters;
+  const saleAmount = saleSum.totalNetReceivable;
+
+  const netDifference = round2(saleAmount - purchaseAmount);
+  const isProfit = netDifference >= 0;
+  const marginPerLiter = purchasedLiters > 0 ? round2(netDifference / purchasedLiters) : null;
+  const litersDifference = round3(soldLiters - purchasedLiters);
+
+  let statusLabelHi = 'बराबर (No Profit / No Loss)';
+  let statusLabelEn = 'Breakeven';
+  if (netDifference > 0) {
+    statusLabelHi = 'शुद्ध लाभ (Profit)';
+    statusLabelEn = 'Net Profit';
+  } else if (netDifference < 0) {
+    statusLabelHi = 'शुद्ध हानि (Loss)';
+    statusLabelEn = 'Net Loss';
+  }
+
+  return {
+    purchasedLiters,
+    purchaseAmount,
+    avgPurchaseRate: colSum.avgRate,
+    avgPurchaseFat: colSum.avgFat,
+    avgPurchaseSnf: colSum.avgSnf,
+    soldLiters,
+    saleAmount,
+    avgSaleRate: saleSum.avgRate,
+    avgSaleFat: saleSum.avgFat,
+    avgSaleSnf: saleSum.avgSnf,
+    netDifference,
+    isProfit,
+    statusLabelHi,
+    statusLabelEn,
+    marginPerLiter,
+    litersDifference,
+    entryCountPurchases: colSum.entryCount,
+    entryCountSales: saleSum.entryCount,
+  };
+}

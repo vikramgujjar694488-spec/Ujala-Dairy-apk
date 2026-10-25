@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
   BookOpen,
-  Download,
   FileSpreadsheet,
   FileText,
   Globe,
@@ -14,6 +13,7 @@ import {
 import {
   AdvancePaymentEntry,
   CattleFeedEntry,
+  Customer,
   DairyAppState,
   ExpenseEntry,
   Farmer,
@@ -31,7 +31,6 @@ import {
   loadStateFromIndexedDB,
   saveDairyState,
 } from './utils/storage';
-import { generateStandaloneHtmlApp } from './utils/standaloneHtmlGenerator';
 import { DashboardView } from './components/DashboardView';
 import { CollectionView } from './components/CollectionView';
 import { WholesaleAndReconciliationView } from './components/WholesaleAndReconciliationView';
@@ -207,6 +206,22 @@ export default function App() {
     }));
   };
 
+  const handleSaveCustomer = (customer: Customer, isEdit: boolean) => {
+    setState((prev) => ({
+      ...prev,
+      customers: isEdit
+        ? (prev.customers || []).map((c) => (c.id === customer.id ? customer : c))
+        : [...(prev.customers || []), customer],
+    }));
+  };
+
+  const handleDeleteCustomer = (id: string) => {
+    setState((prev) => ({
+      ...prev,
+      customers: (prev.customers || []).filter((c) => c.id !== id),
+    }));
+  };
+
   const handleSaveFarmer = (farmer: Farmer, isEdit: boolean) => {
     setState((prev) => ({
       ...prev,
@@ -351,17 +366,6 @@ export default function App() {
     }));
   };
 
-  const handleQuickDownloadHtml = () => {
-    const htmlCode = generateStandaloneHtmlApp(state, true);
-    const blob = new Blob([htmlCode], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'Ujalaa_Dairy_Complete_App.html';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 pb-20 lg:pb-8">
       {/* Top Bar Contract: Zone 1 (Wordmark) — Zone 2 (5 Desktop Nav Links) — Zone 3 (Primary Action) */}
@@ -449,16 +453,6 @@ export default function App() {
               <Globe className="w-3.5 h-3.5" />
               <span>{lang === 'hi' ? 'English' : 'हिंदी'}</span>
             </button>
-
-            <button
-              type="button"
-              onClick={handleQuickDownloadHtml}
-              title="Download Single-File Ujalaa_Dairy_Complete_App.html"
-              className="hidden sm:flex min-h-[38px] px-3 py-1.5 text-xs font-bold text-blue-900 bg-white hover:bg-blue-50 rounded-lg transition-colors whitespace-nowrap shrink-0 items-center gap-1.5"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>{lang === 'hi' ? 'HTML ऐप डाउनलोड' : 'Download HTML'}</span>
-            </button>
           </div>
         </div>
       </header>
@@ -493,6 +487,8 @@ export default function App() {
             onChangeShift={handleChangeShift}
             onSaveSale={handleSaveSale}
             onDeleteSale={handleDeleteSale}
+            onSaveCustomer={handleSaveCustomer}
+            onDeleteCustomer={handleDeleteCustomer}
           />
         )}
 

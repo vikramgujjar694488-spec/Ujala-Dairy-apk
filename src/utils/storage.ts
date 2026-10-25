@@ -36,6 +36,7 @@ export function createInitialEmptyState(): DairyAppState {
     ],
     // Rule 1.7: No demo farmers, fake milk entries, fake sales, or fake amounts pre-populated!
     farmers: [],
+    customers: [],
     collections: [],
     leaves: [],
     sales: [],
@@ -154,6 +155,7 @@ export function sanitizeAndMergeState(raw: any): DairyAppState {
         ? Array.from(new Set(raw.expenseCategories.map(String)))
         : base.expenseCategories,
     farmers: dedup(raw.farmers),
+    customers: dedup(raw.customers),
     collections: dedup(raw.collections),
     leaves: dedup(raw.leaves),
     sales: dedup(raw.sales),

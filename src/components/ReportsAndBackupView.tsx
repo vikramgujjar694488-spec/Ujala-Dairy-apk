@@ -23,10 +23,13 @@ import {
 } from '../types/dairy';
 import {
   calculateCollectionSummary,
+  calculatePureProfitLoss,
   calculateReconciliation,
   calculateSaleSummary,
   formatCurrency,
   formatNumber,
+  round2,
+  round3,
 } from '../utils/dairyCalculations';
 import { generateStandaloneHtmlApp } from '../utils/standaloneHtmlGenerator';
 import { validateBackupJson } from '../utils/storage';
@@ -184,6 +187,11 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
   const [shiftFilter, setShiftFilter] = useState<'all' | ShiftType>('all');
   const [milkTypeFilter, setMilkTypeFilter] = useState<'all' | MilkType>('all');
   const [farmerFilter, setFarmerFilter] = useState<string>('all');
+
+  // Dedicated Profit-Loss Horizons: shift | daily | 10days | monthly | custom
+  const [plHorizon, setPlHorizon] = useState<'shift' | 'daily' | '10days' | 'monthly' | 'custom'>('daily');
+  const [pl10DayCycle, setPl10DayCycle] = useState<'c1' | 'c2' | 'c3' | 'last10'>('last10');
+  const [plMonth, setPlMonth] = useState<string>(() => state.selectedDate.slice(0, 7));
 
   // Backup / Restore state
   const [pendingRestoreState, setPendingRestoreState] = useState<DairyAppState | null>(null);
@@ -396,7 +404,59 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
       const ym = today.slice(0, 7);
       setFromDate(`${ym}-01`);
       setToDate(`${ym}-31`);
+    } else if (p === 'profit_loss') {
+      setFromDate(today);
+      setToDate(today);
+      setShiftFilter('all');
+      setMilkTypeFilter('all');
+      setFarmerFilter('all');
+      setPlHorizon('daily');
     }
+  };
+
+  const handleSetPlHorizon = (h: 'shift' | 'daily' | '10days' | 'monthly' | 'custom') => {
+    setPlHorizon(h);
+    const today = state.selectedDate;
+    const ym = today.slice(0, 7);
+    if (h === 'shift') {
+      setFromDate(today);
+      setToDate(today);
+    } else if (h === 'daily') {
+      setFromDate(today);
+      setToDate(today);
+      setShiftFilter('all');
+    } else if (h === '10days') {
+      handleSetPl10DayCycle(pl10DayCycle);
+    } else if (h === 'monthly') {
+      handleSetPlMonth(plMonth || ym);
+    }
+  };
+
+  const handleSetPl10DayCycle = (cycle: 'c1' | 'c2' | 'c3' | 'last10') => {
+    setPl10DayCycle(cycle);
+    const today = state.selectedDate;
+    const ym = today.slice(0, 7);
+    if (cycle === 'c1') {
+      setFromDate(`${ym}-01`);
+      setToDate(`${ym}-10`);
+    } else if (cycle === 'c2') {
+      setFromDate(`${ym}-11`);
+      setToDate(`${ym}-20`);
+    } else if (cycle === 'c3') {
+      setFromDate(`${ym}-21`);
+      setToDate(`${ym}-31`);
+    } else {
+      const d = new Date(today);
+      d.setDate(d.getDate() - 9);
+      setFromDate(d.toISOString().slice(0, 10));
+      setToDate(today);
+    }
+  };
+
+  const handleSetPlMonth = (selectedYearMonth: string) => {
+    setPlMonth(selectedYearMonth);
+    setFromDate(`${selectedYearMonth}-01`);
+    setToDate(`${selectedYearMonth}-31`);
   };
 
   // Filtered Collections for current multi-filter
@@ -419,6 +479,72 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
     return true;
   });
   const saleSummary = calculateSaleSummary(filteredSales);
+
+  // Pure Profit & Loss: केवल कुल बिक्री - कुल खरीद (कोई खर्च नहीं जोड़ा जाता)
+  const purePL = calculatePureProfitLoss(filteredCollections, filteredSales);
+
+  // Build Day/Shift breakdown rows for Profit & Loss
+  interface PlRow {
+    date: string;
+    shift: ShiftType;
+    buyLiters: number;
+    buyAmount: number;
+    buyFat: number | null;
+    buySnf: number | null;
+    buyRate: number | null;
+    saleLiters: number;
+    saleAmount: number;
+    saleFat: number | null;
+    saleSnf: number | null;
+    saleRate: number | null;
+    difference: number;
+    diffLiters: number;
+  }
+
+  const allPlDates = Array.from(
+    new Set([
+      ...filteredCollections.map((c) => c.date),
+      ...filteredSales.map((s) => s.date),
+    ])
+  ).sort();
+
+  const plGroupedRows: PlRow[] = [];
+  for (const dt of allPlDates) {
+    const shiftsToInspect: ShiftType[] =
+      shiftFilter === 'morning'
+        ? ['morning']
+        : shiftFilter === 'evening'
+        ? ['evening']
+        : ['morning', 'evening'];
+
+    for (const sh of shiftsToInspect) {
+      const cList = filteredCollections.filter((c) => c.date === dt && c.shift === sh);
+      const sList = filteredSales.filter((s) => s.date === dt && s.shift === sh);
+      if (cList.length === 0 && sList.length === 0) continue;
+
+      const cSum = calculateCollectionSummary(cList);
+      const sSum = calculateSaleSummary(sList);
+      const diff = round2(sSum.totalNetReceivable - cSum.totalAmount);
+      const diffL = round3(sSum.totalLiters - cSum.totalLiters);
+
+      plGroupedRows.push({
+        date: dt,
+        shift: sh,
+        buyLiters: cSum.totalLiters,
+        buyAmount: cSum.totalAmount,
+        buyFat: cSum.avgFat,
+        buySnf: cSum.avgSnf,
+        buyRate: cSum.avgRate,
+        saleLiters: sSum.totalLiters,
+        saleAmount: sSum.totalNetReceivable,
+        saleFat: sSum.avgFat,
+        saleSnf: sSum.avgSnf,
+        saleRate: sSum.avgRate,
+        difference: diff,
+        diffLiters: diffL,
+      });
+    }
+  }
 
   const filteredExpenses = state.expenses.filter((e) => {
     if (e.date < fromDate || e.date > toDate) return false;
@@ -519,6 +645,63 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
       ]),
     ];
     downloadCsv(`Ujalaa_Dairy_Wholesale_Sales_${fromDate}_to_${toDate}.csv`, rows);
+  };
+
+  const handleExportProfitLossCsv = () => {
+    const rows: (string | number)[][] = [
+      [
+        'तारीख (Date)',
+        'शिफ्ट (Shift)',
+        'खरीद दूध (Liters)',
+        'खरीद औसत FAT',
+        'खरीद औसत SNF',
+        'खरीद औसत दर (Rate/L)',
+        'कुल खरीद रकम (Buy Rs)',
+        'बिक्री दूध (Liters)',
+        'बिक्री औसत FAT',
+        'बिक्री औसत SNF',
+        'बिक्री औसत दर (Rate/L)',
+        'कुल बिक्री रकम (Sale Rs)',
+        'लाभ/हानि अंतर (Sale - Buy Rs)',
+        'मात्रा अंतर (Sale - Buy L)',
+        'स्थिति (Status)',
+      ],
+      ...plGroupedRows.map((r) => [
+        r.date,
+        r.shift === 'morning' ? 'सुबह (AM)' : 'शाम (PM)',
+        r.buyLiters,
+        r.buyFat ?? '',
+        r.buySnf ?? '',
+        r.buyRate ?? '',
+        r.buyAmount,
+        r.saleLiters,
+        r.saleFat ?? '',
+        r.saleSnf ?? '',
+        r.saleRate ?? '',
+        r.saleAmount,
+        r.difference,
+        r.diffLiters,
+        r.difference >= 0 ? 'लाभ (Profit)' : 'हानि (Loss)',
+      ]),
+      [
+        'कुल योग (GRAND TOTAL)',
+        '',
+        purePL.purchasedLiters,
+        purePL.avgPurchaseFat ?? '',
+        purePL.avgPurchaseSnf ?? '',
+        purePL.avgPurchaseRate ?? '',
+        purePL.purchaseAmount,
+        purePL.soldLiters,
+        purePL.avgSaleFat ?? '',
+        purePL.avgSaleSnf ?? '',
+        purePL.avgSaleRate ?? '',
+        purePL.saleAmount,
+        purePL.netDifference,
+        purePL.litersDifference,
+        purePL.isProfit ? 'शुद्ध लाभ' : 'शुद्ध हानि',
+      ],
+    ];
+    downloadCsv(`Ujalaa_Dairy_Profit_Loss_${fromDate}_to_${toDate}.csv`, rows);
   };
 
   const handleExportFullBackupJson = () => {
@@ -674,6 +857,230 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               ))}
             </div>
 
+            {/* Dedicated Profit & Loss Horizon Selector (Shift, Daily, 10-Days, Monthly, Custom) */}
+            {preset === 'profit_loss' && (
+              <div
+                data-testid="pl-horizon-controls"
+                className="bg-emerald-50/80 border-2 border-emerald-400 rounded-xl p-3 space-y-2.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-extrabold text-emerald-950">
+                      {lang === 'hi' ? 'लाभ-हानि अवधि चुनें (Horizon):' : 'Profit-Loss Horizon:'}
+                    </span>
+                    <span className="text-[11px] text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md font-semibold">
+                      {lang === 'hi'
+                        ? 'केवल दूध बिक्री रकम - खरीद रकम (कोई खर्च नहीं)'
+                        : 'Pure Milk Sale Rs - Purchase Rs (No Expenses)'}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1">
+                    {[
+                      { id: 'shift', hi: 'शिफ्ट अनुसार (Shift)', en: 'By Shift' },
+                      { id: 'daily', hi: 'दैनिक (Daily)', en: 'Daily' },
+                      { id: '10days', hi: '10 दिन (10 Days)', en: '10 Days' },
+                      { id: 'monthly', hi: 'मासिक (Monthly)', en: 'Monthly' },
+                      { id: 'custom', hi: 'कस्टम रेंज', en: 'Custom' },
+                    ].map((hz) => (
+                      <button
+                        key={hz.id}
+                        type="button"
+                        onClick={() => handleSetPlHorizon(hz.id as any)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                          plHorizon === hz.id
+                            ? 'bg-emerald-700 text-white shadow-xs'
+                            : 'bg-white text-emerald-900 border border-emerald-300 hover:bg-emerald-100'
+                        }`}
+                      >
+                        {lang === 'hi' ? hz.hi : hz.en}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Horizon Specific Interactive Bar */}
+                {plHorizon === 'shift' && (
+                  <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-emerald-200">
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-xs font-bold text-slate-800">तारीख:</label>
+                      <input
+                        type="date"
+                        value={fromDate}
+                        onChange={(e) => {
+                          setFromDate(e.target.value);
+                          setToDate(e.target.value);
+                        }}
+                        className="px-2.5 py-1 text-xs font-bold bg-white border border-slate-300 rounded-lg tabular-nums"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1 bg-white p-0.5 border border-slate-300 rounded-lg">
+                      <button
+                        type="button"
+                        onClick={() => setShiftFilter('all')}
+                        className={`px-2.5 py-1 rounded text-xs font-bold ${
+                          shiftFilter === 'all'
+                            ? 'bg-blue-600 text-white'
+                            : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        सुबह+शाम दोनों
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShiftFilter('morning')}
+                        className={`px-2.5 py-1 rounded text-xs font-bold ${
+                          shiftFilter === 'morning'
+                            ? 'bg-blue-600 text-white'
+                            : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        केवल सुबह (Morning)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShiftFilter('evening')}
+                        className={`px-2.5 py-1 rounded text-xs font-bold ${
+                          shiftFilter === 'evening'
+                            ? 'bg-blue-600 text-white'
+                            : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        केवल शाम (Evening)
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {plHorizon === 'daily' && (
+                  <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-emerald-200">
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-xs font-bold text-slate-800">तारीख चुनें:</label>
+                      <input
+                        type="date"
+                        value={fromDate}
+                        onChange={(e) => {
+                          setFromDate(e.target.value);
+                          setToDate(e.target.value);
+                        }}
+                        className="px-2.5 py-1 text-xs font-bold bg-white border border-slate-300 rounded-lg tabular-nums"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFromDate(state.selectedDate);
+                        setToDate(state.selectedDate);
+                      }}
+                      className="px-3 py-1 bg-white hover:bg-emerald-100 border border-emerald-300 text-emerald-900 text-xs font-bold rounded-lg"
+                    >
+                      आज की तारीख ({state.selectedDate})
+                    </button>
+                  </div>
+                )}
+
+                {plHorizon === '10days' && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-emerald-200">
+                    <span className="text-xs font-bold text-slate-800">10-दिन साइकल:</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSetPl10DayCycle('c1')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        pl10DayCycle === 'c1'
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white border border-slate-300 text-slate-700'
+                      }`}
+                    >
+                      1 से 10 तारीख (साइकल 1)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSetPl10DayCycle('c2')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        pl10DayCycle === 'c2'
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white border border-slate-300 text-slate-700'
+                      }`}
+                    >
+                      11 से 20 तारीख (साइकल 2)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSetPl10DayCycle('c3')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        pl10DayCycle === 'c3'
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white border border-slate-300 text-slate-700'
+                      }`}
+                    >
+                      21 से माह अंत (साइकल 3)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSetPl10DayCycle('last10')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        pl10DayCycle === 'last10'
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white border border-slate-300 text-slate-700'
+                      }`}
+                    >
+                      पिछले 10 दिन
+                    </button>
+                    <span className="text-xs text-emerald-950 font-bold font-mono ml-2">
+                      अवधि: {fromDate} से {toDate}
+                    </span>
+                  </div>
+                )}
+
+                {plHorizon === 'monthly' && (
+                  <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-emerald-200">
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-xs font-bold text-slate-800">महीना चुनें:</label>
+                      <input
+                        type="month"
+                        value={plMonth}
+                        onChange={(e) => handleSetPlMonth(e.target.value)}
+                        className="px-2.5 py-1 text-xs font-bold bg-white border border-slate-300 rounded-lg tabular-nums"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleSetPlMonth(state.selectedDate.slice(0, 7))}
+                      className="px-3 py-1 bg-white hover:bg-emerald-100 border border-emerald-300 text-emerald-900 text-xs font-bold rounded-lg"
+                    >
+                      चालू महीना
+                    </button>
+                    <span className="text-xs text-emerald-950 font-bold font-mono ml-2">
+                      अवधि: {fromDate} से {toDate}
+                    </span>
+                  </div>
+                )}
+
+                {plHorizon === 'custom' && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-emerald-200">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs font-bold text-slate-700">तारीख से:</span>
+                      <input
+                        type="date"
+                        value={fromDate}
+                        onChange={(e) => setFromDate(e.target.value)}
+                        className="px-2 py-1 text-xs font-bold bg-white border border-slate-300 rounded-lg tabular-nums"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs font-bold text-slate-700">तारीख तक:</span>
+                      <input
+                        type="date"
+                        value={toDate}
+                        onChange={(e) => setToDate(e.target.value)}
+                        className="px-2 py-1 text-xs font-bold bg-white border border-slate-300 rounded-lg tabular-nums"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Combinable Multi-Filter Controls */}
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2 border-t border-slate-100">
               <div>
@@ -772,11 +1179,17 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               <div className="flex items-center gap-2 no-print">
                 <button
                   type="button"
-                  onClick={handleExportCollectionsCsv}
+                  onClick={
+                    preset === 'profit_loss'
+                      ? handleExportProfitLossCsv
+                      : preset === 'wholesale'
+                      ? handleExportSalesCsv
+                      : handleExportCollectionsCsv
+                  }
                   className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  CSV Export
+                  {preset === 'profit_loss' ? 'लाभ-हानि CSV' : 'CSV Export'}
                 </button>
                 <button
                   type="button"
@@ -884,6 +1297,287 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                     </tr>
                   </tfoot>
                 </table>
+              </div>
+            ) : preset === 'profit_loss' ? (
+              /* ========================================================================
+                 DEDICATED PURE PROFIT & LOSS REPORT (दूध खरीद vs बिक्री का सीधा अंतर)
+                 इसमें कोई भी अतिरिक्त खर्च नहीं जोड़ा जाता — केवल बिक्री ₹ - खरीद ₹
+                 ======================================================================== */
+              <div data-testid="pure-profit-loss-report-view" className="space-y-4">
+                {/* 3 Prominent Summary Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {/* Card 1: Total Milk Purchases */}
+                  <div className="bg-blue-50/80 border-2 border-blue-300 rounded-2xl p-4">
+                    <span className="text-xs font-bold text-blue-800 uppercase tracking-wider block">
+                      1. कुल दूध खरीद (Purchases)
+                    </span>
+                    <div className="mt-2 flex items-baseline justify-between">
+                      <span className="text-2xl font-black text-blue-950 tabular-nums">
+                        {formatCurrency(purePL.purchaseAmount)}
+                      </span>
+                      <span className="text-xs font-bold text-blue-700 bg-blue-150 px-2 py-0.5 rounded-md">
+                        {formatNumber(purePL.purchasedLiters, 3)} L
+                      </span>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-blue-200/70 grid grid-cols-2 gap-2 text-xs text-blue-900 tabular-nums">
+                      <div>
+                        <span className="text-blue-600 block text-[11px]">औसत FAT / SNF</span>
+                        <strong className="font-bold">
+                          {formatNumber(purePL.avgPurchaseFat, 2)} / {formatNumber(purePL.avgPurchaseSnf, 2)}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="text-blue-600 block text-[11px]">औसत खरीद दर</span>
+                        <strong className="font-bold">
+                          {purePL.avgPurchaseRate !== null ? `₹${purePL.avgPurchaseRate.toFixed(2)}/L` : '—'}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card 2: Total Milk Sales */}
+                  <div className="bg-purple-50/80 border-2 border-purple-300 rounded-2xl p-4">
+                    <span className="text-xs font-bold text-purple-800 uppercase tracking-wider block">
+                      2. कुल दूध बिक्री (Sales)
+                    </span>
+                    <div className="mt-2 flex items-baseline justify-between">
+                      <span className="text-2xl font-black text-purple-950 tabular-nums">
+                        {formatCurrency(purePL.saleAmount)}
+                      </span>
+                      <span className="text-xs font-bold text-purple-700 bg-purple-150 px-2 py-0.5 rounded-md">
+                        {formatNumber(purePL.soldLiters, 3)} L
+                      </span>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-purple-200/70 grid grid-cols-2 gap-2 text-xs text-purple-900 tabular-nums">
+                      <div>
+                        <span className="text-purple-600 block text-[11px]">औसत FAT / SNF</span>
+                        <strong className="font-bold">
+                          {formatNumber(purePL.avgSaleFat, 2)} / {formatNumber(purePL.avgSaleSnf, 2)}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="text-purple-600 block text-[11px]">औसत बिक्री दर</span>
+                        <strong className="font-bold">
+                          {purePL.avgSaleRate !== null ? `₹${purePL.avgSaleRate.toFixed(2)}/L` : '—'}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card 3: Net Profit or Loss (बिक्री ₹ - खरीद ₹) */}
+                  <div
+                    className={`border-2 rounded-2xl p-4 shadow-xs ${
+                      purePL.isProfit
+                        ? 'bg-emerald-50/90 border-emerald-500'
+                        : 'bg-rose-50/90 border-rose-500'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span
+                        className={`text-xs font-bold uppercase tracking-wider block ${
+                          purePL.isProfit ? 'text-emerald-900' : 'text-rose-900'
+                        }`}
+                      >
+                        3. शुद्ध लाभ / हानि (Profit/Loss)
+                      </span>
+                      <span
+                        className={`text-xs font-extrabold px-2.5 py-0.5 rounded-full ${
+                          purePL.isProfit
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-rose-600 text-white'
+                        }`}
+                      >
+                        {purePL.statusLabelHi}
+                      </span>
+                    </div>
+
+                    <div className="mt-2 flex items-baseline justify-between">
+                      <span
+                        className={`text-2xl font-black tabular-nums ${
+                          purePL.isProfit ? 'text-emerald-950' : 'text-rose-950'
+                        }`}
+                      >
+                        {purePL.netDifference >= 0
+                          ? `+${formatCurrency(purePL.netDifference)}`
+                          : `-${formatCurrency(Math.abs(purePL.netDifference))}`}
+                      </span>
+                      <span
+                        className={`text-xs font-bold px-2 py-0.5 rounded-md tabular-nums ${
+                          purePL.isProfit
+                            ? 'bg-emerald-100 text-emerald-900'
+                            : 'bg-rose-100 text-rose-900'
+                        }`}
+                      >
+                        {purePL.marginPerLiter !== null
+                          ? purePL.marginPerLiter >= 0
+                            ? `+₹${purePL.marginPerLiter.toFixed(2)}/L मार्जिन`
+                            : `-₹${Math.abs(purePL.marginPerLiter).toFixed(2)}/L घाटा`
+                          : '—'}
+                      </span>
+                    </div>
+
+                    <div className="mt-3 pt-2 border-t border-slate-200 text-xs text-slate-700 space-y-1">
+                      <div className="flex items-center justify-between tabular-nums">
+                        <span>दूध मात्रा अंतर (बिक्री L - खरीद L):</span>
+                        <strong
+                          className={
+                            purePL.litersDifference >= 0 ? 'text-emerald-800' : 'text-amber-800'
+                          }
+                        >
+                          {purePL.litersDifference >= 0
+                            ? `+${formatNumber(purePL.litersDifference, 3)} L`
+                            : `${formatNumber(purePL.litersDifference, 3)} L`}
+                        </strong>
+                      </div>
+                      <p className="text-[10px] text-slate-500 italic">
+                        * केवल दूध बिक्री राशि (₹) - दूध खरीद राशि (₹)। कोई खर्च नहीं जोड़ा गया है।
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Day-by-Day & Shift Breakdown Table for Profit-Loss */}
+                <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                  <table className="w-full text-xs border-collapse tabular-nums">
+                    <thead>
+                      <tr className="bg-slate-100 border-b border-slate-200 text-slate-800">
+                        <th className="py-2.5 px-3 text-left">तारीख</th>
+                        <th className="py-2.5 px-2.5 text-center">शिफ्ट</th>
+                        <th className="py-2.5 px-2.5 text-right text-blue-900">खरीद (L)</th>
+                        <th className="py-2.5 px-2.5 text-right text-blue-900">खरीद FAT/SNF</th>
+                        <th className="py-2.5 px-2.5 text-right text-blue-900">खरीद दर/L</th>
+                        <th className="py-2.5 px-2.5 text-right text-blue-900 font-bold">खरीद रकम (₹)</th>
+                        <th className="py-2.5 px-2.5 text-right text-purple-900">बिक्री (L)</th>
+                        <th className="py-2.5 px-2.5 text-right text-purple-900">बिक्री FAT/SNF</th>
+                        <th className="py-2.5 px-2.5 text-right text-purple-900">बिक्री दर/L</th>
+                        <th className="py-2.5 px-2.5 text-right text-purple-900 font-bold">बिक्री रकम (₹)</th>
+                        <th className="py-2.5 px-3 text-right font-bold text-emerald-900">शुद्ध अंतर (लाभ/हानि ₹)</th>
+                        <th className="py-2.5 px-2.5 text-center">स्थिति</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {plGroupedRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={12} className="py-8 text-center text-slate-500">
+                            चयनित अवधि के लिए कोई खरीद या बिक्री रिकॉर्ड उपलब्ध नहीं है
+                          </td>
+                        </tr>
+                      ) : (
+                        plGroupedRows.map((r, idx) => (
+                          <tr key={`${r.date}_${r.shift}_${idx}`} className="hover:bg-slate-50">
+                            <td className="py-2 px-3 font-bold text-slate-900">{r.date}</td>
+                            <td className="py-2 px-2.5 text-center">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                                  r.shift === 'morning'
+                                    ? 'bg-amber-100 text-amber-900'
+                                    : 'bg-indigo-100 text-indigo-900'
+                                }`}
+                              >
+                                {r.shift === 'morning' ? 'सुबह' : 'शाम'}
+                              </span>
+                            </td>
+                            <td className="py-2 px-2.5 text-right font-semibold text-blue-950">
+                              {formatNumber(r.buyLiters, 3)}
+                            </td>
+                            <td className="py-2 px-2.5 text-right text-slate-600">
+                              {r.buyFat !== null ? `${formatNumber(r.buyFat)}/${formatNumber(r.buySnf)}` : '—'}
+                            </td>
+                            <td className="py-2 px-2.5 text-right text-slate-600">
+                              {r.buyRate !== null ? `₹${r.buyRate.toFixed(2)}` : '—'}
+                            </td>
+                            <td className="py-2 px-2.5 text-right font-bold text-blue-900">
+                              {formatCurrency(r.buyAmount)}
+                            </td>
+                            <td className="py-2 px-2.5 text-right font-semibold text-purple-950">
+                              {formatNumber(r.saleLiters, 3)}
+                            </td>
+                            <td className="py-2 px-2.5 text-right text-slate-600">
+                              {r.saleFat !== null ? `${formatNumber(r.saleFat)}/${formatNumber(r.saleSnf)}` : '—'}
+                            </td>
+                            <td className="py-2 px-2.5 text-right text-slate-600">
+                              {r.saleRate !== null ? `₹${r.saleRate.toFixed(2)}` : '—'}
+                            </td>
+                            <td className="py-2 px-2.5 text-right font-bold text-purple-900">
+                              {formatCurrency(r.saleAmount)}
+                            </td>
+                            <td
+                              className={`py-2 px-3 text-right font-black ${
+                                r.difference >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                              }`}
+                            >
+                              {r.difference >= 0 ? `+${formatCurrency(r.difference)}` : formatCurrency(r.difference)}
+                            </td>
+                            <td className="py-2 px-2.5 text-center">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                                  r.difference > 0
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : r.difference < 0
+                                    ? 'bg-rose-100 text-rose-800'
+                                    : 'bg-slate-100 text-slate-700'
+                                }`}
+                              >
+                                {r.difference > 0 ? 'लाभ' : r.difference < 0 ? 'हानि' : 'बराबर'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
+                        <td colSpan={2} className="py-3 px-3">
+                          अवधि का कुल योग ({plGroupedRows.length} शिफ्ट रिकॉर्ड)
+                        </td>
+                        <td className="py-3 px-2.5 text-right text-blue-900">
+                          {formatNumber(purePL.purchasedLiters, 3)} L
+                        </td>
+                        <td className="py-3 px-2.5 text-right">
+                          {formatNumber(purePL.avgPurchaseFat)}/{formatNumber(purePL.avgPurchaseSnf)}
+                        </td>
+                        <td className="py-3 px-2.5 text-right">
+                          {purePL.avgPurchaseRate !== null ? `₹${purePL.avgPurchaseRate.toFixed(2)}` : '—'}
+                        </td>
+                        <td className="py-3 px-2.5 text-right text-blue-950 font-black">
+                          {formatCurrency(purePL.purchaseAmount)}
+                        </td>
+                        <td className="py-3 px-2.5 text-right text-purple-900">
+                          {formatNumber(purePL.soldLiters, 3)} L
+                        </td>
+                        <td className="py-3 px-2.5 text-right">
+                          {formatNumber(purePL.avgSaleFat)}/{formatNumber(purePL.avgSaleSnf)}
+                        </td>
+                        <td className="py-3 px-2.5 text-right">
+                          {purePL.avgSaleRate !== null ? `₹${purePL.avgSaleRate.toFixed(2)}` : '—'}
+                        </td>
+                        <td className="py-3 px-2.5 text-right text-purple-950 font-black">
+                          {formatCurrency(purePL.saleAmount)}
+                        </td>
+                        <td
+                          className={`py-3 px-3 text-right text-sm font-black ${
+                            purePL.isProfit ? 'text-emerald-800' : 'text-rose-800'
+                          }`}
+                        >
+                          {purePL.netDifference >= 0
+                            ? `+${formatCurrency(purePL.netDifference)}`
+                            : formatCurrency(purePL.netDifference)}
+                        </td>
+                        <td className="py-3 px-2.5 text-center">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                              purePL.isProfit
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-rose-600 text-white'
+                            }`}
+                          >
+                            {purePL.isProfit ? 'शुद्ध लाभ' : 'शुद्ध हानि'}
+                          </span>
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
               </div>
             ) : (
               /* Standard Multi-Filtered Collection & Profit-Loss Table */
@@ -1033,30 +1727,30 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               </span>
             </div>
 
-            {/* Live Diagnostic & Instant Working Mobile App Download */}
-            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            {/* Direct In-App APK Download (v1.0.3 - 4.2 MB) */}
+            <div className="bg-emerald-50 border-2 border-emerald-400 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <strong className="text-xs sm:text-sm text-emerald-950 block">
                   {lang === 'hi'
-                    ? 'विकल्प 1 (तुरंत काम करने वाला — बिना GitHub के अभी फोन में डाउनलोड करें):'
-                    : 'Option 1 (Works Immediately — Download to Mobile Without GitHub):'}
+                    ? 'Ujalaa-Dairy-debug.apk तैयार है! (GitHub Release v1.0.3 · 4.2 MB):'
+                    : 'Ujalaa-Dairy-debug.apk is Ready! (GitHub Release v1.0.3 · 4.2 MB):'}
                 </strong>
                 <span className="text-xs text-emerald-800">
                   {lang === 'hi'
-                    ? 'यह बटन बिना किसी बाहरी लिंक के तुरंत आपके फोन में "Ujalaa_Dairy_Complete_App.html" डाउनलोड करता है जो ऑफलाइन ऐप की तरह चलता है।'
-                    : 'Downloads "Ujalaa_Dairy_Complete_App.html" directly to your phone right now with 1 click.'}
+                    ? 'इस हरे बटन को दबाते ही सीधा "Ujalaa-Dairy-debug.apk" (4.2 MB) आपके फोन में डाउनलोड हो जाएगा।'
+                    : 'Click this green button to directly download "Ujalaa-Dairy-debug.apk" (4.2 MB) to your phone.'}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={handleDownloadStandaloneHtml}
-                className="min-h-[44px] px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 shrink-0 shadow-xs"
+              <a
+                href="./Ujalaa-Dairy-debug.apk"
+                download="Ujalaa-Dairy-debug.apk"
+                className="min-h-[44px] px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shrink-0 shadow-xs"
               >
                 <Download className="w-4 h-4" />
                 {lang === 'hi'
-                  ? 'अभी मोबाइल ऐप डाउनलोड करें (100% Working)'
-                  : 'Download Mobile App Now'}
-              </button>
+                  ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (4.2 MB)'
+                  : 'Download Ujalaa-Dairy-debug.apk (4.2 MB)'}
+              </a>
             </div>
 
             {/* GitHub Repository Link Generator & Live Status Checker */}

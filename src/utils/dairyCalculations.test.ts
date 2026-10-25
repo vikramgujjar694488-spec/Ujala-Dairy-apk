@@ -13,6 +13,7 @@ import {
   formatSmartMilkQuantity,
   combineWholeAndDecimalLiters,
   parseExcelWithMode,
+  calculatePureProfitLoss,
 } from './dairyCalculations';
 import {
   Farmer,
@@ -510,4 +511,102 @@ test('TEST 15 & TEST 16: Farmer Ledger and 10-Day Billing accuracy without doubl
   assert.equal(bill.advancesInPeriod, 200);
   assert.equal(bill.feedDeductionsInPeriod, 300);
   assert.equal(bill.netPayable, 750);
+});
+
+test('TEST 18: Pure Profit & Loss report (Sale Amount - Purchase Amount ONLY, no expenses)', () => {
+  const dummyCollections: MilkCollectionEntry[] = [
+    {
+      id: 'c1',
+      date: '2026-10-24',
+      time: '07:00:00',
+      shift: 'morning',
+      farmerId: 'f1',
+      farmerName: 'किसान 1',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 100,
+      fat: 4.0,
+      snf: 8.5,
+      rate: 40.0,
+      totalAmount: 4000.0,
+      deduction: 0,
+      netPayable: 4000.0,
+      notes: '',
+      createdAt: '2026-10-24T07:00:00Z',
+    },
+    {
+      id: 'c2',
+      date: '2026-10-24',
+      time: '18:00:00',
+      shift: 'evening',
+      farmerId: 'f2',
+      farmerName: 'किसान 2',
+      farmerCode: '102',
+      milkType: 'buffalo',
+      liters: 100,
+      fat: 6.5,
+      snf: 9.0,
+      rate: 55.0,
+      totalAmount: 5500.0,
+      deduction: 0,
+      netPayable: 5500.0,
+      notes: '',
+      createdAt: '2026-10-24T18:00:00Z',
+    },
+  ];
+
+  const dummySales: WholesaleSaleEntry[] = [
+    {
+      id: 's1',
+      date: '2026-10-24',
+      time: '08:30:00',
+      shift: 'morning',
+      buyerName: 'राम डेयरी',
+      milkType: 'cow',
+      liters: 100,
+      avgFat: 4.0,
+      avgSnf: 8.5,
+      rate: 45.0,
+      isManualRate: false,
+      grossAmount: 4500.0,
+      otherCharges: 0,
+      netReceivable: 4500.0,
+      notes: '',
+      createdAt: '2026-10-24T08:30:00Z',
+    },
+    {
+      id: 's2',
+      date: '2026-10-24',
+      time: '19:30:00',
+      shift: 'evening',
+      buyerName: 'शर्मा स्वीट्स',
+      milkType: 'buffalo',
+      liters: 100,
+      avgFat: 6.5,
+      avgSnf: 9.0,
+      rate: 62.0,
+      isManualRate: false,
+      grossAmount: 6200.0,
+      otherCharges: 0,
+      netReceivable: 6200.0,
+      notes: '',
+      createdAt: '2026-10-24T19:30:00Z',
+    },
+  ];
+
+  const result = calculatePureProfitLoss(dummyCollections, dummySales);
+
+  // Total purchased: 200 L, Total purchase amount: Rs 9500 (4000 + 5500)
+  assert.equal(result.purchasedLiters, 200);
+  assert.equal(result.purchaseAmount, 9500);
+
+  // Total sold: 200 L, Total sale amount: Rs 10700 (4500 + 6200)
+  assert.equal(result.soldLiters, 200);
+  assert.equal(result.saleAmount, 10700);
+
+  // Pure difference = 10700 - 9500 = +1200
+  assert.equal(result.netDifference, 1200);
+  assert.equal(result.isProfit, true);
+  assert.equal(result.marginPerLiter, 6.0); // 1200 / 200 = 6 Rs/L margin
+  assert.equal(result.litersDifference, 0);
 });
