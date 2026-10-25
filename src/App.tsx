@@ -442,8 +442,16 @@ export default function App() {
             </button>
           </nav>
 
-          {/* Zone 3: Language Switch & HTML Download Action */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Zone 3: Quick Backup/Restore Action & Language Switch */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleNavigate('backup')}
+              data-testid="header-backup-restore-btn"
+              className="min-h-[32px] sm:min-h-[38px] px-2.5 sm:px-3 py-1 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1"
+            >
+              <span>{lang === 'hi' ? 'बैकअप / Restore' : 'Backup / Restore'}</span>
+            </button>
             <button
               type="button"
               onClick={handleToggleLanguage}
@@ -532,7 +540,7 @@ export default function App() {
       {/* Mobile Bottom Navigation Bar (Section 21: डैशबोर्ड, कलेक्शन, बिक्री, किसान, हिसाब, रिपोर्ट, सेटिंग) */}
       <nav
         aria-label="Mobile Bottom Navigation"
-        className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-7 items-center h-16 no-print"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-7 items-center h-16 no-print"
       >
         {[
           {

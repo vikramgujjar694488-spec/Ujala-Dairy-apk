@@ -656,22 +656,86 @@ export function generateStandaloneHtmlApp(
       saveState();
     }
 
+    let saleSubView = 'entry';
+    let saleBillBuyer = 'all';
+    let saleBillMonth = (state.selectedDate || '2026-03-01').slice(0, 7);
+    let saleBillCycle = 1;
+    let backupRestoreMode = 'merge';
+    let backupStatusMsg = '';
+
+    function getTenDayCycleDates(ym, cycle) {
+      const parts = String(ym || '2026-03').split('-');
+      const y = Number(parts[0]) || 2026;
+      const m = Number(parts[1]) || 3;
+      const pad = String(m).padStart(2, '0');
+      if (Number(cycle) === 1) return { start: y + '-' + pad + '-01', end: y + '-' + pad + '-10', label: '1 से 10 (' + ym + ')' };
+      if (Number(cycle) === 2) return { start: y + '-' + pad + '-11', end: y + '-' + pad + '-20', label: '11 से 20 (' + ym + ')' };
+      const lastDay = new Date(y, m, 0).getDate();
+      return { start: y + '-' + pad + '-21', end: y + '-' + pad + '-' + String(lastDay).padStart(2, '0'), label: '21 से ' + lastDay + ' (' + ym + ')' };
+    }
+
     function renderSales() {
       const list = state.sales.filter(x => x.date === state.selectedDate);
-      return '<div class="card" style="padding:10px;border:2px solid var(--blue-600);">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;font-size:0.76rem;margin-bottom:6px;">' +
-        '<b>थोक दूध बिक्री (' + state.selectedDate + ')</b>' +
-        '<span id="liveSaleBar" style="color:var(--green-600);font-weight:700;">कुल रकम: ₹0.00</span></div>' +
-        '<div><label>खरीदार डेयरी का नाम</label><input id="saleBuyer" placeholder="मुख्य चिलिंग प्लांट" /></div>' +
-        '<div class="row-compact-4">' +
-        '<div><label>1. FAT</label><input type="number" step="0.1" id="saleFat" oninput="updateLiveSale()" /></div>' +
-        '<div><label>2. SNF</label><input type="number" step="0.1" id="saleSnf" oninput="updateLiveSale()" /></div>' +
-        '<div><label>3. मात्रा (L)</label><input type="number" step="0.001" id="saleLiters" oninput="updateLiveSale()" /></div>' +
-        '<div><label>4. रेट/L (₹)</label><input type="number" step="0.01" id="saleRate" oninput="updateLiveSale()" /></div>' +
-        '</div><button class="btn-primary" style="width:100%;" onclick="saveSale()">बिक्री सेव करें</button></div>' +
-        '<div class="card table-wrap"><table><thead><tr><th>खरीदार</th><th>शिफ्ट</th><th>लीटर</th><th>रेट</th><th>राशि</th></tr></thead><tbody>' +
-        (list.map(x => '<tr><td>'+x.buyerName+'</td><td>'+x.shift+'</td><td class="num">'+fmtNum(x.liters,3)+'</td><td class="num">'+fmtCur(x.rate)+'</td><td class="num">'+fmtCur(x.netReceivable)+'</td></tr>').join('') || '<tr><td colspan="5">कोई बिक्री रिकॉर्ड नहीं</td></tr>') +
-        '</tbody></table></div>';
+      const buyers = Array.from(new Set((state.sales || []).map(s => (s.buyerName || '').trim()).filter(Boolean)));
+      const cyc = getTenDayCycleDates(saleBillMonth, saleBillCycle);
+      const billSales = (state.sales || []).filter(s => {
+        if (s.date < cyc.start || s.date > cyc.end) return false;
+        if (saleBillBuyer !== 'all' && (s.buyerName || '').trim().toLowerCase() !== saleBillBuyer.toLowerCase()) return false;
+        return true;
+      });
+      const totalBillLiters = round3(billSales.reduce((a, b) => a + (Number(b.liters) || 0), 0));
+      const totalBillNet = round2(billSales.reduce((a, b) => a + (Number(b.netReceivable) || 0), 0));
+      const mornSales = billSales.filter(s => s.shift === 'morning');
+      const eveSales = billSales.filter(s => s.shift === 'evening');
+      const mornLiters = round3(mornSales.reduce((a, b) => a + (Number(b.liters) || 0), 0));
+      const mornNet = round2(mornSales.reduce((a, b) => a + (Number(b.netReceivable) || 0), 0));
+      const eveLiters = round3(eveSales.reduce((a, b) => a + (Number(b.liters) || 0), 0));
+      const eveNet = round2(eveSales.reduce((a, b) => a + (Number(b.netReceivable) || 0), 0));
+
+      return '<div style="display:flex;gap:8px;margin-bottom:10px;">' +
+        '<button class="' + (saleSubView === 'entry' ? 'btn-primary' : 'btn-secondary') + ' btn-sm" onclick="saleSubView=\\'entry\\';render();">थोक बिक्री एंट्री</button>' +
+        '<button class="' + (saleSubView === 'bill10' ? 'btn-primary' : 'btn-secondary') + ' btn-sm" onclick="saleSubView=\\'bill10\\';render();">बिक्री का 10-दिन का बिल</button>' +
+        '</div>' +
+        (saleSubView === 'entry' ? (
+          '<div class="card" style="padding:10px;border:2px solid var(--blue-600);">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;font-size:0.76rem;margin-bottom:6px;">' +
+          '<b>थोक दूध बिक्री (' + state.selectedDate + ')</b>' +
+          '<span id="liveSaleBar" style="color:var(--green-600);font-weight:700;">कुल रकम: ₹0.00</span></div>' +
+          '<div><label>खरीदार डेयरी का नाम</label><input id="saleBuyer" placeholder="मुख्य चिलिंग प्लांट" /></div>' +
+          '<div class="row-compact-4">' +
+          '<div><label>1. FAT</label><input type="number" step="0.1" id="saleFat" oninput="updateLiveSale()" /></div>' +
+          '<div><label>2. SNF</label><input type="number" step="0.1" id="saleSnf" oninput="updateLiveSale()" /></div>' +
+          '<div><label>3. मात्रा (L)</label><input type="number" step="0.001" id="saleLiters" oninput="updateLiveSale()" /></div>' +
+          '<div><label>4. रेट/L (₹)</label><input type="number" step="0.01" id="saleRate" oninput="updateLiveSale()" /></div>' +
+          '</div><button class="btn-primary" style="width:100%;" onclick="saveSale()">बिक्री सेव करें</button></div>' +
+          '<div class="card table-wrap"><table><thead><tr><th>खरीदार</th><th>शिफ्ट</th><th>लीटर</th><th>रेट</th><th>राशि</th></tr></thead><tbody>' +
+          (list.map(x => '<tr><td>'+x.buyerName+'</td><td>'+x.shift+'</td><td class="num">'+fmtNum(x.liters,3)+'</td><td class="num">'+fmtCur(x.rate)+'</td><td class="num">'+fmtCur(x.netReceivable)+'</td></tr>').join('') || '<tr><td colspan="5">कोई बिक्री रिकॉर्ड नहीं</td></tr>') +
+          '</tbody></table></div>'
+        ) : (
+          '<div class="card" style="border:2px solid var(--blue-600);">' +
+          '<h3>बिक्री का 10-दिन का बिल (10-Day Wholesale Sale Bill)</h3>' +
+          '<div class="grid-3" style="margin-top:8px;">' +
+          '<div><label>खरीदार / ग्राहक चुनें</label><select onchange="saleBillBuyer=this.value;render();"><option value="all">सभी खरीदार (All Buyers)</option>' +
+          buyers.map(b => '<option value="'+b+'" '+(saleBillBuyer===b?'selected':'')+'>'+b+'</option>').join('') +
+          '</select></div>' +
+          '<div><label>महीना (Month)</label><input type="month" value="'+saleBillMonth+'" onchange="saleBillMonth=this.value;render();" /></div>' +
+          '<div><label>10-दिन साइकिल</label><select onchange="saleBillCycle=Number(this.value);render();">' +
+          '<option value="1" '+(saleBillCycle===1?'selected':'')+'>1 से 10 तारीख</option>' +
+          '<option value="2" '+(saleBillCycle===2?'selected':'')+'>11 से 20 तारीख</option>' +
+          '<option value="3" '+(saleBillCycle===3?'selected':'')+'>21 से महीने के अंत तक</option>' +
+          '</select></div></div>' +
+          '<div class="grid-3" style="margin-top:8px;">' +
+          '<div class="stat-box"><div class="stat-label">सुबह बिक्री ('+mornSales.length+')</div><div class="stat-val num">'+fmtNum(mornLiters,3)+' L | '+fmtCur(mornNet)+'</div></div>' +
+          '<div class="stat-box"><div class="stat-label">शाम बिक्री ('+eveSales.length+')</div><div class="stat-val num">'+fmtNum(eveLiters,3)+' L | '+fmtCur(eveNet)+'</div></div>' +
+          '<div class="stat-box"><div class="stat-label">10-दिन कुल बिक्री राशि</div><div class="stat-val num" style="color:var(--green-600);">'+fmtNum(totalBillLiters,3)+' L | '+fmtCur(totalBillNet)+'</div></div>' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;margin-top:10px;" class="no-print">' +
+          '<button class="btn-primary btn-sm" onclick="window.print()">प्रिंट / PDF सेव करें</button>' +
+          '</div>' +
+          '<div class="table-wrap" style="margin-top:10px;"><table><thead><tr><th>तारीख</th><th>शिफ्ट</th><th>खरीदार</th><th>लीटर</th><th>FAT/SNF</th><th>रेट</th><th>कुल राशि (₹)</th></tr></thead><tbody>' +
+          (billSales.map(x => '<tr><td>'+x.date+'</td><td>'+(x.shift==='morning'?'सुबह':'शाम')+'</td><td>'+x.buyerName+'</td><td class="num">'+fmtNum(x.liters,3)+'</td><td class="num">'+fmtNum(x.avgFat,1)+'/'+fmtNum(x.avgSnf,1)+'</td><td class="num">'+fmtCur(x.rate)+'</td><td class="num"><b>'+fmtCur(x.netReceivable)+'</b></td></tr>').join('') || '<tr><td colspan="7">इस 10-दिन अवधि में कोई बिक्री रिकॉर्ड नहीं है</td></tr>') +
+          '</tbody><tfoot><tr><td colspan="3">कुल 10-दिन योग ('+cyc.label+')</td><td class="num">'+fmtNum(totalBillLiters,3)+' L</td><td>—</td><td>—</td><td class="num">'+fmtCur(totalBillNet)+'</td></tr></tfoot></table></div></div>'
+        ));
     }
     function updateLiveSale() {
       const l = parseFloat(document.getElementById('saleLiters')?.value) || 0;
@@ -728,22 +792,136 @@ export function generateStandaloneHtmlApp(
     }
 
     function renderBackup() {
-      return '<div class="card" style="border:2px solid #16a34a;"><h3>Android Debug APK डाउनलोड (vikramgujjar694488-spec/Ujala-Dairy-apk)</h3>' +
+      return '<div class="card" style="border:2px solid var(--blue-600);">' +
+        '<h3>ऑल-इन-वन डेटा बैकअप और Restore सेंटर (All-in-One Backup & Restore)</h3>' +
+        '<p style="margin:4px 0 10px;font-size:0.8rem;color:var(--slate-600);">ऐप डाउनलोड या इंस्टॉल करने के बाद भी यहाँ से 100% सुरक्षित बैकअप लें और कभी भी Restore करें।</p>' +
+        (backupStatusMsg ? '<div class="alert alert-info" style="font-weight:700;">' + backupStatusMsg + '</div>' : '') +
+        '<div class="grid-2" style="margin-bottom:12px;">' +
+        '<div style="background:var(--slate-50);padding:12px;border-radius:10px;border:1px solid var(--slate-200);">' +
+        '<h4>1. बैकअप सेव या कॉपी करें (Backup)</h4>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">' +
+        '<button class="btn-primary btn-sm" onclick="exportJson()">JSON बैकअप फाइल डाउनलोड करें</button>' +
+        '<button class="btn-secondary btn-sm" onclick="copyBackupText()">बैकअप कोड कॉपी करें (Copy Code)</button>' +
+        '</div></div>' +
+        '<div style="background:var(--blue-50);padding:12px;border-radius:10px;border:1px solid var(--blue-100);">' +
+        '<h4>2. बैकअप फाइल से Restore करें</h4>' +
+        '<div style="margin:6px 0;font-size:0.78rem;">' +
+        '<label style="display:inline-flex;align-items:center;gap:4px;margin-right:10px;"><input type="radio" name="restMode" value="merge" '+(backupRestoreMode==='merge'?'checked':'')+' onchange="backupRestoreMode=\\'merge\\'" style="width:auto;margin:0;" /> पुराने डेटा में मिलाएं (Merge)</label>' +
+        '<label style="display:inline-flex;align-items:center;gap:4px;"><input type="radio" name="restMode" value="replace" '+(backupRestoreMode==='replace'?'checked':'')+' onchange="backupRestoreMode=\\'replace\\'" style="width:auto;margin:0;" /> पूरा बदलें (Replace)</label>' +
+        '</div>' +
+        '<input type="file" id="standaloneRestoreFile" accept=".json,application/json,text/plain,*/*" style="display:none;" onchange="handleStandaloneFileRestore(event)" />' +
+        '<button class="btn-success btn-sm" style="width:100%;" onclick="document.getElementById(\\'standaloneRestoreFile\\').click()">बैकअप फाइल चुनें और Restore करें</button>' +
+        '</div></div>' +
+        '<div style="background:var(--slate-50);padding:12px;border-radius:10px;border:1px solid var(--slate-200);">' +
+        '<h4>3. बैकअप कोड पेस्ट करके Restore करें (मोबाइल APK के लिए सबसे आसान)</h4>' +
+        '<textarea id="pasteBackupBox" rows="3" placeholder="यहाँ कॉपी किया हुआ JSON बैकअप कोड पेस्ट करें..."></textarea>' +
+        '<button class="btn-primary btn-sm" onclick="restoreFromPastedText()">पेस्ट किए गए कोड से Restore करें</button>' +
+        '</div></div>' +
+        '<div class="card" style="border:2px solid #16a34a;"><h3>Android Debug APK डाउनलोड (vikramgujjar694488-spec/Ujala-Dairy-apk)</h3>' +
         '<p style="margin:6px 0 10px;font-size:0.82rem;">GitHub Releases से सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें:</p>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
         '<a href="https://github.com/vikramgujjar694488-spec/Ujala-Dairy-apk/releases/latest/download/Ujalaa-Dairy-debug.apk" target="_blank" style="text-decoration:none;background:#16a34a;color:#fff;padding:10px 14px;border-radius:9px;font-size:0.84rem;font-weight:700;">सीधा APK डाउनलोड करें (Ujalaa-Dairy-debug.apk)</a>' +
         '<a href="https://github.com/vikramgujjar694488-spec/Ujala-Dairy-apk/releases" target="_blank" style="text-decoration:none;background:#f1f5f9;color:#1e293b;border:1px solid #cbd5e1;padding:10px 14px;border-radius:9px;font-size:0.84rem;font-weight:700;">GitHub Releases खोलें</a>' +
-        '<a href="https://github.com/vikramgujjar694488-spec/Ujala-Dairy-apk/actions" target="_blank" style="text-decoration:none;background:#f1f5f9;color:#1e293b;border:1px solid #cbd5e1;padding:10px 14px;border-radius:9px;font-size:0.84rem;font-weight:700;">GitHub Actions स्टेटस</a>' +
-        '</div></div>' +
-        '<div class="card"><h3>डेटा बैकअप और Restore</h3>' +
-        '<button class="btn-primary" onclick="exportJson()">JSON बैकअप डाउनलोड करें</button></div>';
+        '</div></div>';
     }
     function exportJson() {
-      const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'Ujalaa_Dairy_Backup_' + state.selectedDate + '.json';
-      a.click();
+      const jsonStr = JSON.stringify(state, null, 2);
+      const filename = 'Ujalaa_Dairy_Backup_' + state.selectedDate + '.json';
+      try {
+        const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+        backupStatusMsg = 'बैकअप फाइल डाउनलोड शुरू हो गई है (' + filename + ')';
+        render();
+      } catch (e) {
+        const a = document.createElement('a');
+        a.href = 'data:application/json;charset=utf-8,' + encodeURIComponent(jsonStr);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    }
+    function copyBackupText() {
+      const jsonStr = JSON.stringify(state);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(jsonStr).then(() => {
+          backupStatusMsg = 'बैकअप कोड कॉपी हो गया! इसे WhatsApp या Notes में सेव कर लें।';
+          render();
+        });
+      } else {
+        const box = document.getElementById('pasteBackupBox');
+        if (box) { box.value = jsonStr; box.select(); document.execCommand('copy'); }
+        backupStatusMsg = 'बैकअप कोड बॉक्स में आ गया है और कॉपी हो गया है!';
+        render();
+      }
+    }
+    function applyRestoredObject(parsed) {
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.farmers) || !Array.isArray(parsed.collections)) {
+        backupStatusMsg = 'त्रुटि: यह वैध Ujalaa Dairy बैकअप डेटा नहीं है।';
+        render();
+        return;
+      }
+      if (backupRestoreMode === 'replace') {
+        state = Object.assign({}, INITIAL_SEED, parsed);
+      } else {
+        const mergeArr = (a, b) => {
+          const map = new Map();
+          (a || []).forEach(x => { if (x && x.id) map.set(x.id, x); });
+          (b || []).forEach(x => { if (x && x.id) map.set(x.id, x); });
+          return Array.from(map.values());
+        };
+        state = Object.assign({}, state, {
+          farmers: mergeArr(state.farmers, parsed.farmers),
+          customers: mergeArr(state.customers, parsed.customers),
+          collections: mergeArr(state.collections, parsed.collections),
+          sales: mergeArr(state.sales, parsed.sales),
+          advancesAndPayments: mergeArr(state.advancesAndPayments, parsed.advancesAndPayments),
+          cattleFeed: mergeArr(state.cattleFeed, parsed.cattleFeed),
+          expenses: mergeArr(state.expenses, parsed.expenses),
+          bills: mergeArr(state.bills, parsed.bills)
+        });
+      }
+      backupStatusMsg = 'बैकअप सफलतापूर्वक Restore हो गया! (किसान: ' + state.farmers.length + ', कलेक्शन: ' + state.collections.length + ', बिक्री: ' + (state.sales||[]).length + ')';
+      saveState();
+    }
+    function extractJsonString(rawStr) {
+      const s = String(rawStr || '').trim();
+      const first = s.indexOf('{');
+      const last = s.lastIndexOf('}');
+      if (first !== -1 && last > first) return s.slice(first, last + 1);
+      return s;
+    }
+    function handleStandaloneFileRestore(ev) {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = function() {
+        try {
+          applyRestoredObject(JSON.parse(extractJsonString(reader.result)));
+        } catch (err) {
+          backupStatusMsg = 'फाइल पढ़ने में त्रुटि: सही JSON बैकअप फाइल चुनें।';
+          render();
+        }
+      };
+      reader.readAsText(f);
+      ev.target.value = '';
+    }
+    function restoreFromPastedText() {
+      const raw = (document.getElementById('pasteBackupBox')?.value || '').trim();
+      if (!raw) { backupStatusMsg = 'कृपया पहले बॉक्स में बैकअप कोड पेस्ट करें।'; render(); return; }
+      try {
+        applyRestoredObject(JSON.parse(extractJsonString(raw)));
+      } catch (err) {
+        backupStatusMsg = 'पेस्ट किया गया कोड सही JSON नहीं है। पूरा कोड कॉपी करके पेस्ट करें।';
+        render();
+      }
     }
 
     render();

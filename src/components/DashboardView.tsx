@@ -19,11 +19,13 @@ import { DairyAppState, ShiftType } from '../types/dairy';
 import {
   calculateCollectionSummary,
   calculateFarmerLedger,
+  calculatePureProfitLoss,
   calculateReconciliation,
   calculateSaleSummary,
   calculateShiftAttendance,
   formatCurrency,
   formatNumber,
+  formatWholeCurrency,
   round2,
   round3,
 } from '../utils/dairyCalculations';
@@ -74,6 +76,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const mornRec = calculateReconciliation(morningCollections, morningSales, morningExpenses);
   const eveRec = calculateReconciliation(eveningCollections, eveningSales, eveningExpenses);
 
+  // Pure Milk Profit/Loss (Sale Amount - Purchase Amount, no expenses) for each Shift & Full Day
+  const mornPL = calculatePureProfitLoss(morningCollections, morningSales);
+  const evePL = calculatePureProfitLoss(eveningCollections, eveningSales);
+  const dayPL = calculatePureProfitLoss(dayCollections, daySales);
+
   // Shift Attendance
   const mornAtt = calculateShiftAttendance(
     state.farmers,
@@ -117,6 +124,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const activeShiftColSum = shift === 'morning' ? mornColSum : eveColSum;
   const activeShiftSaleSum = shift === 'morning' ? mornSaleSum : eveSaleSum;
   const activeShiftRec = shift === 'morning' ? mornRec : eveRec;
+  const activeShiftPL = shift === 'morning' ? mornPL : evePL;
   const activeShiftAtt = shift === 'morning' ? mornAtt : eveAtt;
 
   return (
@@ -333,7 +341,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {lang === 'hi' ? '5. कुल खरीद राशि' : '5. Purchase Amt'}
             </span>
             <span className="text-lg font-bold text-blue-800 tabular-nums mt-1 block">
-              {formatCurrency(activeShiftColSum.totalAmount)}
+              {formatWholeCurrency(activeShiftColSum.totalAmount)}
             </span>
           </div>
 
@@ -351,9 +359,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {lang === 'hi' ? '7. कुल बिक्री (लीटर)' : '7. Sold Milk (L)'}
             </span>
             <span className="text-lg font-bold text-slate-900 tabular-nums mt-1 block">
-              {activeShiftSaleSum.entryCount > 0
+              {activeShiftSaleSum.entryCount > 0 || activeShiftColSum.entryCount > 0
                 ? `${formatNumber(activeShiftSaleSum.totalLiters, 3)} L`
-                : '—'}
+                : '0.000 L'}
             </span>
           </div>
 
@@ -362,9 +370,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {lang === 'hi' ? '8. कुल बिक्री राशि' : '8. Sale Amount'}
             </span>
             <span className="text-lg font-bold text-slate-900 tabular-nums mt-1 block">
-              {activeShiftSaleSum.entryCount > 0
-                ? formatCurrency(activeShiftSaleSum.totalNetReceivable)
-                : '—'}
+              {formatCurrency(activeShiftSaleSum.totalNetReceivable)}
             </span>
           </div>
 
@@ -388,24 +394,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
 
-          <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-            <span className="text-xs text-slate-500 block">
+          <div
+            data-testid="dashboard-active-shift-profit-loss"
+            className={`p-3 rounded-xl border-2 ${
+              activeShiftPL.isProfit
+                ? 'bg-emerald-50/90 border-emerald-400'
+                : 'bg-rose-50/90 border-rose-400'
+            }`}
+          >
+            <span className="text-xs font-bold text-slate-700 block">
               {lang === 'hi' ? '11. शिफ्ट का लाभ/हानि' : '11. Shift Profit/Loss'}
             </span>
             <span
-              className={`text-sm font-bold tabular-nums mt-1 block ${
-                activeShiftRec.status === 'calculated'
-                  ? (activeShiftRec.netProfitLoss ?? 0) >= 0
-                    ? 'text-emerald-700'
-                    : 'text-red-600'
-                  : 'text-amber-700'
+              className={`text-base font-extrabold tabular-nums mt-0.5 block ${
+                activeShiftPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
               }`}
             >
-              {activeShiftRec.status === 'calculated'
-                ? formatCurrency(activeShiftRec.netProfitLoss)
-                : lang === 'hi'
-                ? activeShiftRec.statusLabelHi
-                : activeShiftRec.statusLabelEn}
+              {activeShiftPL.netDifference >= 0
+                ? `+${formatCurrency(activeShiftPL.netDifference)}`
+                : formatCurrency(activeShiftPL.netDifference)}{' '}
+              <span className="text-xs font-bold">
+                ({activeShiftPL.netDifference >= 0 ? (lang === 'hi' ? 'लाभ' : 'Profit') : lang === 'hi' ? 'हानि' : 'Loss'})
+              </span>
+            </span>
+            <span className="text-[10px] text-slate-600 tabular-nums block mt-0.5">
+              {lang === 'hi'
+                ? `बिक्री ${formatCurrency(activeShiftPL.saleAmount)} - खरीद ${formatWholeCurrency(activeShiftPL.purchaseAmount)}`
+                : `Sale ${formatCurrency(activeShiftPL.saleAmount)} - Buy ${formatWholeCurrency(activeShiftPL.purchaseAmount)}`}
             </span>
           </div>
 
@@ -418,7 +433,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 ? `${formatNumber(activeShiftRec.remainingStockLiters, 3)} L`
                 : activeShiftColSum.totalLiters > 0
                 ? `${formatNumber(activeShiftColSum.totalLiters, 3)} L (स्टॉक)`
-                : '—'}
+                : '0.000 L'}
             </span>
           </div>
         </div>
@@ -513,7 +528,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-2.5 mt-3 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-3 text-xs">
             <div className="p-2.5 rounded-xl border border-slate-100">
               <span className="text-slate-500 block">
                 {lang === 'hi' ? 'कुल एंट्रियाँ / लीटर' : 'Entries / Liters'}
@@ -524,18 +539,40 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <div className="p-2.5 rounded-xl border border-slate-100">
               <span className="text-slate-500 block">
-                {lang === 'hi' ? 'औसत FAT / SNF' : 'Avg FAT / SNF'}
+                {lang === 'hi' ? 'खरीद राशि (Buy)' : 'Purchase Amt'}
               </span>
-              <span className="font-bold text-slate-900 tabular-nums mt-0.5 block">
-                {formatNumber(mornColSum.avgFat)} / {formatNumber(mornColSum.avgSnf)}
+              <span className="font-bold text-blue-700 tabular-nums mt-0.5 block">
+                {formatWholeCurrency(mornColSum.totalAmount)}
               </span>
             </div>
             <div className="p-2.5 rounded-xl border border-slate-100">
               <span className="text-slate-500 block">
-                {lang === 'hi' ? 'खरीद राशि' : 'Purchase Amt'}
+                {lang === 'hi' ? 'बिक्री राशि (Sale)' : 'Sale Amt'}
               </span>
-              <span className="font-bold text-blue-700 tabular-nums mt-0.5 block">
-                {formatCurrency(mornColSum.totalAmount)}
+              <span className="font-bold text-slate-900 tabular-nums mt-0.5 block">
+                {formatCurrency(mornSaleSum.totalNetReceivable)}
+              </span>
+            </div>
+            <div
+              data-testid="morning-shift-card-profit-loss"
+              className={`p-2.5 rounded-xl border ${
+                mornPL.isProfit
+                  ? 'bg-emerald-50 border-emerald-300'
+                  : 'bg-rose-50 border-rose-300'
+              }`}
+            >
+              <span className="text-slate-700 font-bold block">
+                {lang === 'hi' ? 'सुबह का लाभ/हानि' : 'Morning P/L'}
+              </span>
+              <span
+                className={`font-extrabold tabular-nums mt-0.5 block ${
+                  mornPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                }`}
+              >
+                {mornPL.netDifference >= 0
+                  ? `+${formatCurrency(mornPL.netDifference)}`
+                  : formatCurrency(mornPL.netDifference)}{' '}
+                ({mornPL.netDifference >= 0 ? 'लाभ' : 'हानि'})
               </span>
             </div>
           </div>
@@ -628,7 +665,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-2.5 mt-3 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-3 text-xs">
             <div className="p-2.5 rounded-xl border border-slate-100">
               <span className="text-slate-500 block">
                 {lang === 'hi' ? 'कुल एंट्रियाँ / लीटर' : 'Entries / Liters'}
@@ -639,18 +676,40 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <div className="p-2.5 rounded-xl border border-slate-100">
               <span className="text-slate-500 block">
-                {lang === 'hi' ? 'औसत FAT / SNF' : 'Avg FAT / SNF'}
+                {lang === 'hi' ? 'खरीद राशि (Buy)' : 'Purchase Amt'}
               </span>
-              <span className="font-bold text-slate-900 tabular-nums mt-0.5 block">
-                {formatNumber(eveColSum.avgFat)} / {formatNumber(eveColSum.avgSnf)}
+              <span className="font-bold text-blue-700 tabular-nums mt-0.5 block">
+                {formatWholeCurrency(eveColSum.totalAmount)}
               </span>
             </div>
             <div className="p-2.5 rounded-xl border border-slate-100">
               <span className="text-slate-500 block">
-                {lang === 'hi' ? 'खरीद राशि' : 'Purchase Amt'}
+                {lang === 'hi' ? 'बिक्री राशि (Sale)' : 'Sale Amt'}
               </span>
-              <span className="font-bold text-blue-700 tabular-nums mt-0.5 block">
-                {formatCurrency(eveColSum.totalAmount)}
+              <span className="font-bold text-slate-900 tabular-nums mt-0.5 block">
+                {formatCurrency(eveSaleSum.totalNetReceivable)}
+              </span>
+            </div>
+            <div
+              data-testid="evening-shift-card-profit-loss"
+              className={`p-2.5 rounded-xl border ${
+                evePL.isProfit
+                  ? 'bg-emerald-50 border-emerald-300'
+                  : 'bg-rose-50 border-rose-300'
+              }`}
+            >
+              <span className="text-slate-700 font-bold block">
+                {lang === 'hi' ? 'शाम का लाभ/हानि' : 'Evening P/L'}
+              </span>
+              <span
+                className={`font-extrabold tabular-nums mt-0.5 block ${
+                  evePL.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                }`}
+              >
+                {evePL.netDifference >= 0
+                  ? `+${formatCurrency(evePL.netDifference)}`
+                  : formatCurrency(evePL.netDifference)}{' '}
+                ({evePL.netDifference >= 0 ? 'लाभ' : 'हानि'})
               </span>
             </div>
           </div>
@@ -734,10 +793,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <td className="py-2 px-3 font-medium text-slate-700">
                   {lang === 'hi' ? 'कुल खरीद राशि' : 'Total Purchase Amount'}
                 </td>
-                <td className="py-2 px-3 text-right">{formatCurrency(mornColSum.totalAmount)}</td>
-                <td className="py-2 px-3 text-right">{formatCurrency(eveColSum.totalAmount)}</td>
+                <td className="py-2 px-3 text-right">{formatWholeCurrency(mornColSum.totalAmount)}</td>
+                <td className="py-2 px-3 text-right">{formatWholeCurrency(eveColSum.totalAmount)}</td>
                 <td className="py-2 px-3 text-right font-semibold">
-                  {formatCurrency(dayColSum.totalAmount)}
+                  {formatWholeCurrency(dayColSum.totalAmount)}
                 </td>
               </tr>
               <tr>
@@ -755,23 +814,35 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </td>
               </tr>
               <tr>
-                <td className="py-2 px-3 font-medium text-slate-700">
-                  {lang === 'hi' ? 'शुद्ध लाभ / हानि' : 'Net Profit / Loss'}
+                <td className="py-2 px-3 font-bold text-slate-900">
+                  {lang === 'hi' ? 'शुद्ध लाभ / हानि (बिक्री - खरीद)' : 'Net Profit / Loss (Sale - Buy)'}
                 </td>
-                <td className="py-2 px-3 text-right">
-                  {mornRec.status === 'calculated'
-                    ? formatCurrency(mornRec.netProfitLoss)
-                    : mornRec.statusLabelHi}
+                <td
+                  className={`py-2 px-3 text-right font-bold ${
+                    mornPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {mornPL.netDifference >= 0
+                    ? `+${formatCurrency(mornPL.netDifference)}`
+                    : formatCurrency(mornPL.netDifference)}
                 </td>
-                <td className="py-2 px-3 text-right">
-                  {eveRec.status === 'calculated'
-                    ? formatCurrency(eveRec.netProfitLoss)
-                    : eveRec.statusLabelHi}
+                <td
+                  className={`py-2 px-3 text-right font-bold ${
+                    evePL.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {evePL.netDifference >= 0
+                    ? `+${formatCurrency(evePL.netDifference)}`
+                    : formatCurrency(evePL.netDifference)}
                 </td>
-                <td className="py-2 px-3 text-right font-semibold">
-                  {dayRec.status === 'calculated'
-                    ? formatCurrency(dayRec.netProfitLoss)
-                    : dayRec.statusLabelHi}
+                <td
+                  className={`py-2 px-3 text-right font-extrabold ${
+                    dayPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {dayPL.netDifference >= 0
+                    ? `+${formatCurrency(dayPL.netDifference)}`
+                    : formatCurrency(dayPL.netDifference)}
                 </td>
               </tr>
             </tbody>
@@ -816,7 +887,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {lang === 'hi' ? 'आज की कुल खरीद राशि' : 'Today Milk Purchase'}
             </span>
             <span className="text-lg font-bold text-blue-900 tabular-nums mt-1 block">
-              {formatCurrency(dayColSum.totalAmount)}
+              {formatWholeCurrency(dayColSum.totalAmount)}
             </span>
             <span className="text-[11px] text-slate-500 tabular-nums">
               {lang === 'hi' ? 'औसत खरीद रेट:' : 'Avg Buy Rate:'}{' '}
@@ -841,7 +912,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {lang === 'hi' ? 'आज की कुल बिक्री राशि' : 'Today Wholesale Sale'}
             </span>
             <span className="text-lg font-bold text-slate-900 tabular-nums mt-1 block">
-              {daySaleSum.entryCount > 0 ? formatCurrency(daySaleSum.totalNetReceivable) : '—'}
+              {formatCurrency(daySaleSum.totalNetReceivable)}
             </span>
             <span className="text-[11px] text-slate-500 tabular-nums">
               {lang === 'hi' ? 'औसत बिक्री रेट:' : 'Avg Sale Rate:'}{' '}
@@ -849,28 +920,31 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
-            <span className="text-xs text-slate-600 block">
+          <div
+            data-testid="dashboard-today-profit-loss"
+            className={`p-3.5 rounded-xl border-2 ${
+              dayPL.isProfit
+                ? 'bg-emerald-50/90 border-emerald-400'
+                : 'bg-rose-50/90 border-rose-400'
+            }`}
+          >
+            <span className="text-xs font-bold text-slate-700 block">
               {lang === 'hi' ? 'आज का लाभ या हानि' : "Today's Profit / Loss"}
             </span>
             <span
-              className={`text-base font-bold tabular-nums mt-1 block ${
-                dayRec.status === 'calculated'
-                  ? (dayRec.netProfitLoss ?? 0) >= 0
-                    ? 'text-emerald-700'
-                    : 'text-red-600'
-                  : 'text-amber-700'
+              className={`text-base font-extrabold tabular-nums mt-1 block ${
+                dayPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
               }`}
             >
-              {dayRec.status === 'calculated'
-                ? formatCurrency(dayRec.netProfitLoss)
-                : lang === 'hi'
-                ? dayRec.statusLabelHi
-                : dayRec.statusLabelEn}
+              {dayPL.netDifference >= 0
+                ? `+${formatCurrency(dayPL.netDifference)}`
+                : formatCurrency(dayPL.netDifference)}{' '}
+              ({dayPL.netDifference >= 0 ? (lang === 'hi' ? 'लाभ' : 'Profit') : lang === 'hi' ? 'हानि' : 'Loss'})
             </span>
-            <span className="text-[11px] text-slate-500 tabular-nums">
-              {lang === 'hi' ? 'आज का कुल खर्च:' : 'Today Expense:'}{' '}
-              {formatCurrency(dayRec.expensesAmount)}
+            <span className="text-[10px] text-slate-600 tabular-nums block">
+              {lang === 'hi'
+                ? `सुबह: ${mornPL.netDifference >= 0 ? '+' : ''}${formatCurrency(mornPL.netDifference)} | शाम: ${evePL.netDifference >= 0 ? '+' : ''}${formatCurrency(evePL.netDifference)}`
+                : `AM: ${formatCurrency(mornPL.netDifference)} | PM: ${formatCurrency(evePL.netDifference)}`}
             </span>
           </div>
 
@@ -897,7 +971,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {lang === 'hi' ? 'किसानों की कुल बकाया राशि' : 'Total Farmer Payable'}
             </span>
             <span className="text-base font-bold text-blue-800 tabular-nums mt-1 block">
-              {formatCurrency(totalFarmerPayableBalance)}
+              {formatWholeCurrency(totalFarmerPayableBalance)}
             </span>
           </div>
 
@@ -980,7 +1054,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     </td>
                     <td className="py-2 px-3 text-right">{formatNumber(c.liters, 3)} L</td>
                     <td className="py-2 px-3 text-right font-semibold">
-                      {formatCurrency(c.totalAmount)}
+                      {formatWholeCurrency(c.totalAmount)}
                     </td>
                   </tr>
                 ))}

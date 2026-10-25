@@ -4,6 +4,7 @@ import {
   classifyMilkType,
   lookupRateFromChart,
   calculateCollectionSummary,
+  calculateSaleSummary,
   calculateShiftAttendance,
   calculateReconciliation,
   calculateFarmerLedger,
@@ -14,7 +15,17 @@ import {
   combineWholeAndDecimalLiters,
   parseExcelWithMode,
   calculatePureProfitLoss,
+  truncatePurchaseAmount,
+  formatWholeCurrency,
+  parseMilkSlipTextToRows,
+  buildCollectionEntriesFromScannedSlip,
+  generateTenDaySaleBillData,
 } from './dairyCalculations';
+import {
+  createInitialEmptyState,
+  mergeDairyStates,
+  validateBackupJson,
+} from './storage';
 import {
   Farmer,
   MilkCollectionEntry,
@@ -610,3 +621,307 @@ test('TEST 18: Pure Profit & Loss report (Sale Amount - Purchase Amount ONLY, no
   assert.equal(result.marginPerLiter, 6.0); // 1200 / 200 = 6 Rs/L margin
   assert.equal(result.litersDifference, 0);
 });
+
+test('NEW FEATURE TEST 19: Farmer purchase truncates decimals (253.85 -> 253), 10-day bills sum whole numbers only, while Sales keep decimals', () => {
+  // 1. Direct truncation check: 253.85 -> 253
+  assert.equal(truncatePurchaseAmount(253.85), 253);
+  assert.equal(truncatePurchaseAmount(253.99), 253);
+  assert.equal(formatWholeCurrency(253.85), '₹253');
+
+  const farmer: Farmer = {
+    id: 'f101',
+    code: '101',
+    name: 'रामलाल गुर्जर',
+    mobile: '9876543210',
+    village: 'रामपुरा',
+    shiftSchedule: 'both',
+    openingBalance: 0,
+    notes: '',
+    active: true,
+    createdAt: '2026-10-01T00:00:00Z',
+  };
+
+  // Two entries whose raw calculation would be 253.85 each:
+  // In farmer milk purchase, .85 is dropped -> 253 each -> 10-day bill total must be 253 + 253 = 506 (NOT 507.70)
+  const collections: MilkCollectionEntry[] = [
+    {
+      id: 'c_morn',
+      date: '2026-10-02',
+      time: '07:00:00',
+      shift: 'morning',
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 6.955,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 36.5,
+      totalAmount: 253.85,
+      deduction: 0,
+      netPayable: 253.85,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 'c_eve',
+      date: '2026-10-02',
+      time: '18:00:00',
+      shift: 'evening',
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 6.955,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 36.5,
+      totalAmount: 253.85,
+      deduction: 0,
+      netPayable: 253.85,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+
+  const colSum = calculateCollectionSummary(collections);
+  assert.equal(colSum.totalAmount, 506); // 253 + 253 = 506 (no decimal addition)
+  assert.equal(colSum.totalNetPayable, 506);
+
+  const bill = generateTenDayBillData(farmer, '2026-10', 1, collections, [], []);
+  assert.equal(bill.morningAmount, 253);
+  assert.equal(bill.eveningAmount, 253);
+  assert.equal(bill.totalMilkAmount, 506);
+  assert.equal(bill.netPayable, 506);
+
+  // Meanwhile, Wholesale Milk Sales MUST retain decimal points (253.85 + 253.85 = 507.70)
+  const sales: WholesaleSaleEntry[] = [
+    {
+      id: 's1',
+      date: '2026-10-02',
+      time: '08:00:00',
+      shift: 'morning',
+      buyerName: 'शर्मा डेयरी',
+      milkType: 'cow',
+      liters: 6.955,
+      avgFat: 4.5,
+      avgSnf: 8.5,
+      rate: 36.5,
+      isManualRate: false,
+      grossAmount: 253.85,
+      otherCharges: 0,
+      netReceivable: 253.85,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 's2',
+      date: '2026-10-02',
+      time: '19:00:00',
+      shift: 'evening',
+      buyerName: 'शर्मा डेयरी',
+      milkType: 'cow',
+      liters: 6.955,
+      avgFat: 4.5,
+      avgSnf: 8.5,
+      rate: 36.5,
+      isManualRate: false,
+      grossAmount: 253.85,
+      otherCharges: 0,
+      netReceivable: 253.85,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+  const saleSum = calculateSaleSummary(sales);
+  assert.equal(saleSum.totalGrossAmount, 507.7);
+  assert.equal(saleSum.totalNetReceivable, 507.7);
+});
+
+test('NEW FEATURE TEST 20: Camera / Written Slip OCR parser & auto-entry builder truncates purchase amount to integer', () => {
+  const rawSlip = '101 6.955 4.5 8.5';
+  const rows = parseMilkSlipTextToRows(rawSlip);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].farmerCode, '101');
+  assert.equal(rows[0].liters, 6.955);
+  assert.equal(rows[0].fat, 4.5);
+  assert.equal(rows[0].snf, 8.5);
+
+  const cowGrid = [
+    ['SNF / FAT', '4.0', '4.5', '5.0'],
+    ['8.5', '34.00', '36.50', '40.00'],
+  ];
+  const cowChart = parseExcelGridToRateChart(cowGrid, 'cow', 'cow.xlsx', 'Sheet1').chart;
+
+  const farmers: Farmer[] = [
+    {
+      id: 'f101',
+      code: '101',
+      name: 'रामलाल गुर्जर',
+      mobile: '9876543210',
+      village: 'रामपुरा',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  // 6.955 L * 36.50 Rs/L = 253.8575 -> round2 = 253.86 -> truncated integer = 253
+  const built = buildCollectionEntriesFromScannedSlip(
+    rows,
+    farmers,
+    { cow: cowChart, buffalo: null },
+    '2026-10-24',
+    'morning'
+  );
+  assert.equal(built.entries.length, 1);
+  assert.equal(built.entries[0].farmerCode, '101');
+  assert.equal(built.entries[0].rate, 36.5);
+  assert.equal(built.entries[0].totalAmount, 253);
+  assert.equal(built.entries[0].netPayable, 253);
+});
+
+test('NEW FEATURE TEST 21: 10-Day Wholesale Milk Sale Bill (बिक्री का 10-दिन का बिल) calculates exact decimal totals by cycle and customer', () => {
+  const customers = [
+    {
+      id: 'cust1',
+      code: 'C01',
+      name: 'शर्मा डेयरी प्लांट',
+      mobile: '9876543210',
+      address: 'जयपुर रोड',
+      defaultMilkType: 'cow' as const,
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  const sales: WholesaleSaleEntry[] = [
+    {
+      id: 's_oct2_m',
+      date: '2026-10-02',
+      time: '08:00:00',
+      shift: 'morning',
+      customerId: 'cust1',
+      customerCode: 'C01',
+      buyerName: 'शर्मा डेयरी प्लांट',
+      milkType: 'cow',
+      liters: 10.5,
+      avgFat: 4.5,
+      avgSnf: 8.5,
+      rate: 42.35,
+      isManualRate: false,
+      grossAmount: 444.68,
+      otherCharges: 0,
+      netReceivable: 444.68,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 's_oct5_e',
+      date: '2026-10-05',
+      time: '19:00:00',
+      shift: 'evening',
+      customerId: 'cust1',
+      customerCode: 'C01',
+      buyerName: 'शर्मा डेयरी प्लांट',
+      milkType: 'buffalo',
+      liters: 15.25,
+      avgFat: 6.2,
+      avgSnf: 9.0,
+      rate: 56.5,
+      isManualRate: true,
+      grossAmount: 861.63,
+      otherCharges: 0,
+      netReceivable: 861.63,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 's_oct15_m',
+      date: '2026-10-15',
+      time: '08:00:00',
+      shift: 'morning',
+      customerId: 'cust1',
+      customerCode: 'C01',
+      buyerName: 'शर्मा डेयरी प्लांट',
+      milkType: 'cow',
+      liters: 20,
+      avgFat: 4.5,
+      avgSnf: 8.5,
+      rate: 40,
+      isManualRate: true,
+      grossAmount: 800,
+      otherCharges: 0,
+      netReceivable: 800,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+
+  // Cycle 1: Oct 1 to Oct 10 for cust1 -> should include Oct 2 and Oct 5, exclude Oct 15
+  const saleBillC1 = generateTenDaySaleBillData(sales, customers, {
+    customerFilter: 'cust1',
+    yearMonth: '2026-10',
+    cycle: 1,
+    dairyName: 'Ujalaa Dairy',
+  });
+
+  assert.equal(saleBillC1.fromDate, '2026-10-01');
+  assert.equal(saleBillC1.toDate, '2026-10-10');
+  assert.equal(saleBillC1.entries.length, 2);
+  assert.equal(saleBillC1.dayWiseRows.length, 2);
+  assert.equal(saleBillC1.morningSummary.totalLiters, 10.5);
+  assert.equal(saleBillC1.morningSummary.totalNetReceivable, 444.68);
+  assert.equal(saleBillC1.eveningSummary.totalLiters, 15.25);
+  assert.equal(saleBillC1.eveningSummary.totalNetReceivable, 861.63);
+  assert.equal(saleBillC1.totalSummary.totalLiters, 25.75);
+  // Exact decimal sum: 444.68 + 861.63 = 1306.31
+  assert.equal(saleBillC1.totalSummary.totalNetReceivable, 1306.31);
+  assert.ok(saleBillC1.whatsAppMessageHi.includes('₹1306.31'));
+});
+
+test('NEW FEATURE TEST 22: Backup JSON validation & Merge/Replace Restore works even with pasted WhatsApp/Code-Fenced text', () => {
+  const stateA = createInitialEmptyState();
+  stateA.farmers.push({
+    id: 'f1',
+    code: '101',
+    name: 'रामलाल',
+    mobile: '9876543210',
+    village: '',
+    shiftSchedule: 'both',
+    openingBalance: 0,
+    notes: '',
+    active: true,
+    createdAt: '',
+  });
+
+  const stateB = createInitialEmptyState();
+  stateB.farmers.push({
+    id: 'f2',
+    code: '102',
+    name: 'मोहनलाल',
+    mobile: '9876543211',
+    village: '',
+    shiftSchedule: 'morning',
+    openingBalance: 0,
+    notes: '',
+    active: true,
+    createdAt: '',
+  });
+
+  // Simulate user copying backup JSON inside markdown or with leading text
+  const wrappedBackupText = 'यहाँ आपका बैकअप कोड है:\n```json\n' + JSON.stringify({ app: 'Ujalaa Dairy', data: stateB }) + '\n```';
+  const validated = validateBackupJson(wrappedBackupText);
+  assert.equal(validated.valid, true);
+  assert.ok(validated.state);
+  assert.equal(validated.state.farmers.length, 1);
+  assert.equal(validated.state.farmers[0].name, 'मोहनलाल');
+
+  // Merge stateA and validated.state -> both farmers preserved
+  const merged = mergeDairyStates(stateA, validated.state);
+  assert.equal(merged.farmers.length, 2);
+});
+
+

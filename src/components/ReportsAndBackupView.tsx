@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ClipboardPaste,
   Code,
   Copy,
   Download,
@@ -10,9 +11,13 @@ import {
   FileSpreadsheet,
   FileText,
   Filter,
+  History,
+  MessageSquare,
   Printer,
   Settings,
+  Share2,
   Smartphone,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import {
@@ -28,12 +33,24 @@ import {
   calculateSaleSummary,
   formatCurrency,
   formatNumber,
+  formatWholeCurrency,
+  generateTenDaySaleBillData,
+  getTenDayCycleDates,
   round2,
   round3,
 } from '../utils/dairyCalculations';
 import { generateStandaloneHtmlApp } from '../utils/standaloneHtmlGenerator';
-import { validateBackupJson } from '../utils/storage';
-import { ConfirmDialog } from './Modals';
+import {
+  deleteBackupSnapshot,
+  loadBackupSnapshots,
+  LocalBackupSnapshot,
+  mergeDairyStates,
+  saveBackupSnapshot,
+  serializeBackupPayload,
+  triggerReliableFileDownload,
+  validateBackupJson,
+} from '../utils/storage';
+import { ConfirmDialog, WhatsAppPreviewModal } from './Modals';
 
 const GITHUB_WORKFLOW_YML = `name: Build Android Debug APK & Publish Release
 
@@ -193,13 +210,35 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
   const [pl10DayCycle, setPl10DayCycle] = useState<'c1' | 'c2' | 'c3' | 'last10'>('last10');
   const [plMonth, setPlMonth] = useState<string>(() => state.selectedDate.slice(0, 7));
 
-  // Backup / Restore state
+  // 10-Day Side-by-Side & Wholesale Sale Bill Report State
+  const [tenDayReportMode, setTenDayReportMode] = useState<'collection' | 'sale'>('collection');
+  const [saleCustomerFilter, setSaleCustomerFilter] = useState<string>('all');
+  const [saleReportCycle, setSaleReportCycle] = useState<1 | 2 | 3 | 'custom'>(() => {
+    const dy = Number(state.selectedDate.slice(8, 10)) || 1;
+    return dy <= 10 ? 1 : dy <= 20 ? 2 : 3;
+  });
+  const [saleReportMonth, setSaleReportMonth] = useState<string>(() =>
+    state.selectedDate.slice(0, 7)
+  );
+  const [saleWaModal, setSaleWaModal] = useState<{ open: boolean; phone: string; message: string }>({
+    open: false,
+    phone: '',
+    message: '',
+  });
+
+  // Backup / Restore state (works across Web, Installed PWA, Standalone HTML & Android APK)
+  const restoreFileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingRestoreState, setPendingRestoreState] = useState<DairyAppState | null>(null);
+  const [restoreMode, setRestoreMode] = useState<'merge' | 'replace'>('merge');
+  const [instantRestoreOnSelect, setInstantRestoreOnSelect] = useState<boolean>(true);
+  const [pasteBackupText, setPasteBackupText] = useState<string>('');
+  const [copiedBackupJson, setCopiedBackupJson] = useState<boolean>(false);
+  const [snapshots, setSnapshots] = useState<LocalBackupSnapshot[]>(() => loadBackupSnapshots());
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreSuccess, setRestoreSuccess] = useState<string | null>(null);
 
   // Single-File HTML Export state
-  const [includeDataInHtml, setIncludeDataInHtml] = useState<boolean>(false);
+  const [includeDataInHtml, setIncludeDataInHtml] = useState<boolean>(true);
   const [showHtmlSource, setShowHtmlSource] = useState<boolean>(false);
   const [copiedHtml, setCopiedHtml] = useState<boolean>(false);
 
@@ -396,10 +435,24 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
     } else if (p === 'combined') {
       setMilkTypeFilter('all');
     } else if (p === 'ten_day_side_by_side') {
-      const d = new Date(today);
-      d.setDate(d.getDate() - 9);
-      setFromDate(d.toISOString().slice(0, 10));
-      setToDate(today);
+      const ym = today.slice(0, 7);
+      const dy = Number(today.slice(8, 10)) || 1;
+      const cyc: 1 | 2 | 3 = dy <= 10 ? 1 : dy <= 20 ? 2 : 3;
+      const range = getTenDayCycleDates(ym, cyc);
+      setSaleReportMonth(ym);
+      setSaleReportCycle(cyc);
+      setFromDate(range.fromDate);
+      setToDate(range.toDate);
+    } else if (p === 'wholesale') {
+      const ym = today.slice(0, 7);
+      const dy = Number(today.slice(8, 10)) || 1;
+      const cyc: 1 | 2 | 3 = dy <= 10 ? 1 : dy <= 20 ? 2 : 3;
+      const range = getTenDayCycleDates(ym, cyc);
+      setSaleReportMonth(ym);
+      setSaleReportCycle(cyc);
+      setFromDate(range.fromDate);
+      setToDate(range.toDate);
+      setTenDayReportMode('sale');
     } else if (p === 'monthly') {
       const ym = today.slice(0, 7);
       setFromDate(`${ym}-01`);
@@ -704,21 +757,93 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
     downloadCsv(`Ujalaa_Dairy_Profit_Loss_${fromDate}_to_${toDate}.csv`, rows);
   };
 
+  const applyIncomingRestoreState = (incomingState: DairyAppState) => {
+    // Save an automatic safety snapshot of existing data if non-empty before restoring
+    if (
+      state.farmers.length > 0 ||
+      state.collections.length > 0 ||
+      state.sales.length > 0 ||
+      (state.customers || []).length > 0
+    ) {
+      const updatedSnaps = saveBackupSnapshot(
+        state,
+        lang === 'hi' ? 'Restore से पहले ऑटो-सेव' : 'Auto-saved before Restore'
+      );
+      setSnapshots(updatedSnaps);
+    }
+
+    const finalState =
+      restoreMode === 'merge' ? mergeDairyStates(state, incomingState) : incomingState;
+    onRestoreState(finalState);
+    setRestoreError(null);
+    setRestoreSuccess(
+      lang === 'hi'
+        ? `डेटा सफलतापूर्वक Restore हो गया! (किसान: ${finalState.farmers.length}, दूध खरीद: ${finalState.collections.length}, बिक्री: ${finalState.sales.length})`
+        : `Backup restored successfully! (Farmers: ${finalState.farmers.length}, Collections: ${finalState.collections.length}, Sales: ${finalState.sales.length})`
+    );
+  };
+
   const handleExportFullBackupJson = () => {
-    const payload = {
-      app: 'Ujalaa Dairy',
-      exportedAt: new Date().toISOString(),
-      data: state,
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Ujalaa_Dairy_Backup_${state.selectedDate}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const jsonStr = serializeBackupPayload(state);
+    const filename = `Ujalaa_Dairy_Backup_${state.selectedDate}.json`;
+    const ok = triggerReliableFileDownload(filename, jsonStr, 'application/json;charset=utf-8');
+    if (ok) {
+      setRestoreError(null);
+      setRestoreSuccess(
+        lang === 'hi'
+          ? `बैकअप फ़ाइल (${filename}) डाउनलोड हो गई है!`
+          : `Backup file (${filename}) downloaded!`
+      );
+    }
+  };
+
+  const handleShareBackupFile = async () => {
+    const jsonStr = serializeBackupPayload(state);
+    const filename = `Ujalaa_Dairy_Backup_${state.selectedDate}.json`;
+    try {
+      const nav = window.navigator as any;
+      if (nav && typeof nav.share === 'function') {
+        const file = new File([jsonStr], filename, { type: 'application/json' });
+        if (nav.canShare && nav.canShare({ files: [file] })) {
+          await nav.share({
+            title: `${state.dairyName || 'Ujalaa Dairy'} Backup`,
+            text: `Ujalaa Dairy डेटा बैकअप (${state.selectedDate})`,
+            files: [file],
+          });
+          return;
+        }
+        await nav.share({
+          title: `${state.dairyName || 'Ujalaa Dairy'} Backup`,
+          text: jsonStr,
+        });
+        return;
+      }
+    } catch {
+      // Fallback to copy + download
+    }
+    handleExportFullBackupJson();
+  };
+
+  const handleCopyBackupCode = async () => {
+    const jsonStr = serializeBackupPayload(state);
+    try {
+      await navigator.clipboard.writeText(jsonStr);
+      setCopiedBackupJson(true);
+      setRestoreError(null);
+      setRestoreSuccess(
+        lang === 'hi'
+          ? 'पूरा बैकअप कोड Copy हो गया है! आप इसे WhatsApp/Notes में सुरक्षित रख सकते हैं या नीचे पेस्ट करके Restore कर सकते हैं।'
+          : 'Backup code copied to clipboard!'
+      );
+      setTimeout(() => setCopiedBackupJson(false), 3000);
+    } catch {
+      setPasteBackupText(jsonStr);
+      setRestoreSuccess(
+        lang === 'hi'
+          ? 'बैकअप कोड नीचे बॉक्स में डाल दिया गया है — आप इसे कॉपी कर सकते हैं।'
+          : 'Backup code placed in the text box below.'
+      );
+    }
   };
 
   const handleRestoreFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -733,23 +858,53 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
       const res = validateBackupJson(text);
       if (!res.valid || !res.state) {
         setRestoreError(lang === 'hi' ? res.errorHi : res.errorEn);
+      } else if (instantRestoreOnSelect) {
+        applyIncomingRestoreState(res.state);
       } else {
         setPendingRestoreState(res.state);
       }
+    };
+    reader.onerror = () => {
+      setRestoreError(
+        lang === 'hi'
+          ? 'फ़ाइल पढ़ने में समस्या आई। कृपया नीचे बैकअप कोड पेस्ट करके Restore करें।'
+          : 'Failed to read file. Please paste backup code below to restore.'
+      );
     };
     reader.readAsText(file);
     e.target.value = '';
   };
 
+  const handleRestoreFromPastedText = () => {
+    setRestoreError(null);
+    setRestoreSuccess(null);
+    const res = validateBackupJson(pasteBackupText);
+    if (!res.valid || !res.state) {
+      setRestoreError(lang === 'hi' ? res.errorHi : res.errorEn);
+      return;
+    }
+    applyIncomingRestoreState(res.state);
+    setPasteBackupText('');
+  };
+
+  const handleSaveLocalSnapshot = () => {
+    const updated = saveBackupSnapshot(state);
+    setSnapshots(updated);
+    setRestoreError(null);
+    setRestoreSuccess(
+      lang === 'hi'
+        ? 'लोकल बैकअप स्नैपशॉट ऐप में सुरक्षित कर लिया गया है! आप जब चाहें 1-Click में Restore कर सकते हैं।'
+        : 'Local backup snapshot saved! You can restore it anytime with 1 click.'
+    );
+  };
+
   const handleDownloadStandaloneHtml = () => {
     const htmlCode = generateStandaloneHtmlApp(state, includeDataInHtml);
-    const blob = new Blob([htmlCode], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'Ujalaa_Dairy_Complete_App.html';
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerReliableFileDownload(
+      'Ujalaa_Dairy_Complete_App.html',
+      htmlCode,
+      'text/html;charset=utf-8'
+    );
   };
 
   const handleCopyStandaloneHtml = async () => {
@@ -834,10 +989,10 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                 { id: 'combined', hi: 'गाय+भैंस संयुक्त', en: 'Combined' },
                 {
                   id: 'ten_day_side_by_side',
-                  hi: '10-दिन की रिपोर्ट (सुबह/शाम अलग-अलग)',
+                  hi: '10-दिन की रिपोर्ट (खरीद व बिक्री)',
                   en: '10-Day Side-by-Side',
                 },
-                { id: 'wholesale', hi: 'थोक बिक्री रिपोर्ट', en: 'Wholesale Sales' },
+                { id: 'wholesale', hi: 'बिक्री का 10-दिन का बिल / रिपोर्ट', en: '10-Day Sale Bill / Wholesale' },
                 { id: 'expenses', hi: 'खर्च की रिपोर्ट', en: 'Expense Report' },
                 { id: 'profit_loss', hi: 'लाभ-हानि रिपोर्ट', en: 'Profit-Loss Report' },
                 { id: 'monthly', hi: 'मासिक रिपोर्ट', en: 'Monthly Report' },
@@ -845,6 +1000,7 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                 <button
                   key={btn.id}
                   type="button"
+                  data-testid={`report-preset-${btn.id}`}
                   onClick={() => handleSelectPreset(btn.id as ReportPreset)}
                   className={`min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
                     preset === btn.id
@@ -856,6 +1012,136 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                 </button>
               ))}
             </div>
+
+            {/* 10-Day Cycle & Sale/Collection Mode Controls when ten_day_side_by_side or wholesale is selected */}
+            {(preset === 'ten_day_side_by_side' || preset === 'wholesale') && (
+              <div
+                data-testid="ten-day-report-controls"
+                className="bg-blue-50/80 border-2 border-blue-300 rounded-xl p-3.5 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 bg-white p-1 rounded-xl border border-blue-200">
+                    <button
+                      type="button"
+                      data-testid="ten-day-mode-collection"
+                      onClick={() => {
+                        setTenDayReportMode('collection');
+                        if (preset === 'wholesale') setPreset('ten_day_side_by_side');
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                        tenDayReportMode === 'collection' && preset !== 'wholesale'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      {lang === 'hi' ? 'किसान दूध खरीद (10-दिन)' : 'Farmer Purchase (10-Day)'}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="ten-day-mode-sale"
+                      onClick={() => setTenDayReportMode('sale')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                        tenDayReportMode === 'sale' || preset === 'wholesale'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      {lang === 'hi'
+                        ? 'बिक्री का 10-दिन का बिल (Wholesale Sale Bill)'
+                        : '10-Day Wholesale Sale Bill'}
+                    </button>
+                  </div>
+
+                  {/* 10-Day Cycle Selector Pills */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <input
+                      type="month"
+                      value={saleReportMonth}
+                      onChange={(e) => {
+                        const ym = e.target.value;
+                        setSaleReportMonth(ym);
+                        if (saleReportCycle !== 'custom') {
+                          const r = getTenDayCycleDates(ym, saleReportCycle);
+                          setFromDate(r.fromDate);
+                          setToDate(r.toDate);
+                        }
+                      }}
+                      className="px-2.5 py-1 text-xs font-bold bg-white border border-blue-300 rounded-lg tabular-nums"
+                    />
+                    {[
+                      { id: 1 as const, hi: '1 से 10 तारीख (चक्र 1)', en: '1–10 (Cycle 1)' },
+                      { id: 2 as const, hi: '11 से 20 तारीख (चक्र 2)', en: '11–20 (Cycle 2)' },
+                      { id: 3 as const, hi: '21 से माह अंत (चक्र 3)', en: '21–End (Cycle 3)' },
+                    ].map((cBtn) => (
+                      <button
+                        key={cBtn.id}
+                        type="button"
+                        onClick={() => {
+                          setSaleReportCycle(cBtn.id);
+                          const r = getTenDayCycleDates(saleReportMonth, cBtn.id);
+                          setFromDate(r.fromDate);
+                          setToDate(r.toDate);
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                          saleReportCycle === cBtn.id
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white border border-blue-200 text-slate-700 hover:bg-blue-100'
+                        }`}
+                      >
+                        {lang === 'hi' ? cBtn.hi : cBtn.en}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {(tenDayReportMode === 'sale' || preset === 'wholesale') && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-blue-200">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-bold text-blue-950">
+                        {lang === 'hi' ? 'ग्राहक / खरीदार चुनें:' : 'Select Customer / Buyer:'}
+                      </label>
+                      <select
+                        value={saleCustomerFilter}
+                        onChange={(e) => setSaleCustomerFilter(e.target.value)}
+                        className="px-3 py-1.5 text-xs font-bold bg-white border border-blue-300 rounded-lg"
+                      >
+                        <option value="all">
+                          {lang === 'hi' ? 'सभी ग्राहक (All Buyers)' : 'All Customers / Buyers'}
+                        </option>
+                        {(state.customers || []).map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.code} — {c.name}
+                          </option>
+                        ))}
+                        {Array.from(
+                          new Set(
+                            state.sales
+                              .map((s) => s.buyerName.trim())
+                              .filter(
+                                (b) =>
+                                  b &&
+                                  !(state.customers || []).some(
+                                    (c) => c.name.trim().toLowerCase() === b.toLowerCase()
+                                  )
+                              )
+                          )
+                        ).map((bName) => (
+                          <option key={`buyer:${bName}`} value={`buyer:${bName}`}>
+                            {bName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <span className="text-xs font-bold text-emerald-900 bg-emerald-100 px-2.5 py-1 rounded-lg tabular-nums">
+                      {lang === 'hi'
+                        ? `बिक्री 10-दिन अवधि: ${fromDate} से ${toDate}`
+                        : `Sale Bill Period: ${fromDate} to ${toDate}`}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Dedicated Profit & Loss Horizon Selector (Shift, Daily, 10-Days, Monthly, Custom) */}
             {preset === 'profit_loss' && (
@@ -1202,8 +1488,180 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               </div>
             </div>
 
-            {/* Section 14: 10-Day Side-by-Side Morning & Evening Table */}
-            {preset === 'ten_day_side_by_side' ? (
+            {/* Section 14: 10-Day Wholesale Sale Bill OR 10-Day Collection Side-by-Side Table */}
+            {preset === 'wholesale' ||
+            (preset === 'ten_day_side_by_side' && tenDayReportMode === 'sale') ? (
+              (() => {
+                const saleBill = generateTenDaySaleBillData(
+                  filteredSales,
+                  state.customers || [],
+                  {
+                    customerFilter: saleCustomerFilter,
+                    yearMonth: saleReportMonth,
+                    cycle: 'custom',
+                    customFromDate: fromDate,
+                    customToDate: toDate,
+                    dairyName: state.dairyName || 'Ujalaa Dairy',
+                  }
+                );
+
+                return (
+                  <div data-testid="report-10day-sale-bill-view" className="space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 bg-emerald-50/70 border border-emerald-200 rounded-xl p-3">
+                      <div>
+                        <span className="text-xs font-bold text-emerald-900 block">
+                          {lang === 'hi'
+                            ? `ग्राहक: ${saleBill.buyerLabelHi} · बिल नं: ${saleBill.billNumber}`
+                            : `Customer: ${saleBill.buyerLabelEn} · Bill No: ${saleBill.billNumber}`}
+                        </span>
+                        <span className="text-[11px] text-slate-600">
+                          {lang === 'hi'
+                            ? `अवधि: ${fromDate} से ${toDate} (सभी बिक्री राशियाँ दशमलव/प्वाइंट के साथ)`
+                            : `Period: ${fromDate} to ${toDate} (All sale amounts with exact decimals)`}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSaleWaModal({
+                            open: true,
+                            phone: saleBill.customerMobile || '',
+                            message:
+                              lang === 'hi'
+                                ? saleBill.whatsAppMessageHi
+                                : saleBill.whatsAppMessageEn,
+                          })
+                        }
+                        className="min-h-[36px] px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 no-print"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        {lang === 'hi' ? 'WhatsApp पर बिक्री बिल भेजें' : 'Share Sale Bill on WhatsApp'}
+                      </button>
+                    </div>
+
+                    {/* 4 Summary Cards for 10-Day Sale Bill */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums">
+                      <div className="p-3 bg-amber-50/80 rounded-xl border border-amber-200">
+                        <span className="text-amber-900 font-bold block">सुबह की बिक्री (Morning)</span>
+                        <span className="text-base font-extrabold text-slate-900 mt-0.5 block">
+                          {formatNumber(saleBill.morningSummary.totalLiters, 3)} L ·{' '}
+                          {formatCurrency(saleBill.morningSummary.totalNetReceivable)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-indigo-50/80 rounded-xl border border-indigo-200">
+                        <span className="text-indigo-900 font-bold block">शाम की बिक्री (Evening)</span>
+                        <span className="text-base font-extrabold text-slate-900 mt-0.5 block">
+                          {formatNumber(saleBill.eveningSummary.totalLiters, 3)} L ·{' '}
+                          {formatCurrency(saleBill.eveningSummary.totalNetReceivable)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-blue-50/80 rounded-xl border border-blue-200">
+                        <span className="text-blue-900 font-bold block">कुल बेचा दूध · औसत FAT/SNF</span>
+                        <span className="text-base font-extrabold text-blue-950 mt-0.5 block">
+                          {formatNumber(saleBill.totalSummary.totalLiters, 3)} L ·{' '}
+                          {formatNumber(saleBill.totalSummary.avgFat)}/
+                          {formatNumber(saleBill.totalSummary.avgSnf)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-emerald-50 rounded-xl border-2 border-emerald-400">
+                        <span className="text-emerald-900 font-bold block">
+                          10-दिन का कुल बिक्री बिल (₹)
+                        </span>
+                        <span className="text-lg font-black text-emerald-800 mt-0.5 block">
+                          {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* 10-Day Side-by-Side Morning & Evening Sale Table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs border-collapse tabular-nums">
+                        <thead>
+                          <tr className="bg-emerald-50 text-emerald-950 border-b border-emerald-200">
+                            <th className="py-2 px-2.5 text-left">तारीख</th>
+                            <th className="py-2 px-2.5 text-right">सुबह बिक्री L</th>
+                            <th className="py-2 px-2.5 text-right">सुबह FAT/SNF</th>
+                            <th className="py-2 px-2.5 text-right">सुबह रेट</th>
+                            <th className="py-2 px-2.5 text-right">सुबह राशि (₹)</th>
+                            <th className="py-2 px-2.5 text-right">शाम बिक्री L</th>
+                            <th className="py-2 px-2.5 text-right">शाम FAT/SNF</th>
+                            <th className="py-2 px-2.5 text-right">शाम रेट</th>
+                            <th className="py-2 px-2.5 text-right">शाम राशि (₹)</th>
+                            <th className="py-2 px-2.5 text-right font-bold">कुल बिक्री L</th>
+                            <th className="py-2 px-2.5 text-right font-bold">कुल बिक्री राशि (₹)</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {saleBill.dayWiseRows.length === 0 ? (
+                            <tr>
+                              <td colSpan={11} className="py-8 text-center text-slate-500">
+                                {lang === 'hi'
+                                  ? 'चयनित 10-दिन की अवधि में कोई दूध बिक्री रिकॉर्ड नहीं है'
+                                  : 'No wholesale milk sales in the selected period'}
+                              </td>
+                            </tr>
+                          ) : (
+                            saleBill.dayWiseRows.map((r) => (
+                              <tr key={r.date} className="hover:bg-slate-50">
+                                <td className="py-2 px-2.5 font-bold">{r.date}</td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.morningLiters > 0 ? formatNumber(r.morningLiters, 3) : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.morningFat !== null
+                                    ? `${formatNumber(r.morningFat)}/${formatNumber(r.morningSnf)}`
+                                    : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.morningRate !== null ? formatCurrency(r.morningRate) : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.morningAmount > 0 ? formatCurrency(r.morningAmount) : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.eveningLiters > 0 ? formatNumber(r.eveningLiters, 3) : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.eveningFat !== null
+                                    ? `${formatNumber(r.eveningFat)}/${formatNumber(r.eveningSnf)}`
+                                    : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.eveningRate !== null ? formatCurrency(r.eveningRate) : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right">
+                                  {r.eveningAmount > 0 ? formatCurrency(r.eveningAmount) : '—'}
+                                </td>
+                                <td className="py-2 px-2.5 text-right font-bold text-blue-800">
+                                  {formatNumber(r.totalLiters, 3)} L
+                                </td>
+                                <td className="py-2 px-2.5 text-right font-bold text-emerald-700">
+                                  {formatCurrency(r.totalAmount)}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
+                            <td colSpan={9} className="py-3 px-2.5">
+                              बिक्री का कुल योग ({saleBill.totalSummary.entryCount} एंट्री)
+                            </td>
+                            <td className="py-3 px-2.5 text-right text-blue-800">
+                              {formatNumber(saleBill.totalSummary.totalLiters, 3)} L
+                            </td>
+                            <td className="py-3 px-2.5 text-right text-emerald-800 font-black">
+                              {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : preset === 'ten_day_side_by_side' ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs border-collapse tabular-nums">
                   <thead>
@@ -1252,7 +1710,7 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                               {mSum.avgRate !== null ? formatCurrency(mSum.avgRate) : '—'}
                             </td>
                             <td className="py-2 px-2.5 text-right">
-                              {formatCurrency(mSum.totalAmount)}
+                              {formatWholeCurrency(mSum.totalAmount)}
                             </td>
                             <td className="py-2 px-2.5 text-right">
                               {formatNumber(eSum.totalLiters, 3)}
@@ -1264,13 +1722,13 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                               {eSum.avgRate !== null ? formatCurrency(eSum.avgRate) : '—'}
                             </td>
                             <td className="py-2 px-2.5 text-right">
-                              {formatCurrency(eSum.totalAmount)}
+                              {formatWholeCurrency(eSum.totalAmount)}
                             </td>
                             <td className="py-2 px-2.5 text-right font-bold text-blue-800">
                               {formatNumber(tSum.totalLiters, 3)} L
                             </td>
                             <td className="py-2 px-2.5 text-right font-bold text-blue-800">
-                              {formatCurrency(tSum.totalAmount)}
+                              {formatWholeCurrency(tSum.totalAmount)}
                             </td>
                             <td className="py-2 px-2.5 text-right">
                               {formatNumber(tSum.avgFat)}/{formatNumber(tSum.avgSnf)}
@@ -1289,7 +1747,7 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                         {formatNumber(colSummary.totalLiters, 3)} L
                       </td>
                       <td className="py-3 px-2.5 text-right text-blue-800">
-                        {formatCurrency(colSummary.totalAmount)}
+                        {formatWholeCurrency(colSummary.totalAmount)}
                       </td>
                       <td className="py-3 px-2.5 text-right">
                         {formatNumber(colSummary.avgFat)}/{formatNumber(colSummary.avgSnf)}
@@ -1592,7 +2050,7 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                   <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-100">
                     <span className="text-slate-600 block">कुल खरीद राशि</span>
                     <span className="text-base font-bold text-blue-900 mt-0.5 block">
-                      {formatCurrency(colSummary.totalAmount)}
+                      {formatWholeCurrency(colSummary.totalAmount)}
                     </span>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -1610,9 +2068,9 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                     <span className="text-slate-500 block">अवधि का लाभ/हानि</span>
                     <span className="text-sm font-bold text-slate-900 mt-0.5 block">
-                      {rangeRec.status === 'calculated'
-                        ? formatCurrency(rangeRec.netProfitLoss)
-                        : rangeRec.statusLabelHi}
+                      {purePL.netDifference >= 0
+                        ? `+${formatCurrency(purePL.netDifference)}`
+                        : formatCurrency(purePL.netDifference)}
                     </span>
                   </div>
                 </div>
@@ -1657,7 +2115,7 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                             <td className="py-2 px-3 text-right">{formatNumber(c.snf)}</td>
                             <td className="py-2 px-3 text-right">{formatCurrency(c.rate)}</td>
                             <td className="py-2 px-3 text-right font-bold text-blue-800">
-                              {formatCurrency(c.totalAmount)}
+                              {formatWholeCurrency(c.totalAmount)}
                             </td>
                           </tr>
                         ))
@@ -1677,7 +2135,7 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                           {colSummary.avgRate !== null ? formatCurrency(colSummary.avgRate) : '—'}
                         </td>
                         <td className="py-3 px-3 text-right text-blue-800">
-                          {formatCurrency(colSummary.totalAmount)}
+                          {formatWholeCurrency(colSummary.totalAmount)}
                         </td>
                       </tr>
                     </tfoot>
@@ -1692,6 +2150,371 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
       {/* SUBTAB 2: BACKUP, RESTORE, ANDROID APK & SINGLE-FILE HTML DOWNLOAD */}
       {subTab === 'backup' && (
         <div className="space-y-5">
+          {/* ========================================================================
+              UPGRADED ALL-DEVICE BACKUP & RESTORE SYSTEM (Section 19)
+              Works in Web Browser, Installed PWA, Standalone HTML App & Android APK
+             ======================================================================== */}
+          <div
+            data-testid="backup-restore-master-card"
+            className="bg-white border-2 border-blue-600 rounded-2xl p-5 space-y-5 shadow-xs"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <span className="text-xs font-bold text-blue-600 block">
+                  {lang === 'hi'
+                    ? 'ऑल-इन-वन सुरक्षित बैकअप एवं Restore सिस्टम (Web + Installed App + APK)'
+                    : 'All-in-One Reliable Backup & Restore System (Web + Installed App + APK)'}
+                </span>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  {lang === 'hi'
+                    ? 'पूरा डेटा बैकअप लें और कभी भी 1-Click में Restore करें'
+                    : 'Full Data Backup & 1-Click Restore'}
+                </h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  {lang === 'hi'
+                    ? 'ऐप डाउनलोड या इंस्टॉल करने के बाद भी यह सिस्टम 4 तरीकों से काम करता है: (1) JSON फ़ाइल डाउनलोड/Restore, (2) WhatsApp/Drive पर Share, (3) बैकअप कोड Copy/Paste, और (4) लोकल ऑटो-स्नैपशॉट।'
+                    : 'Works even inside downloaded/installed apps via 4 methods: File Download/Upload, Native Share, Copy/Paste Backup Code, and Local Snapshots.'}
+                </p>
+              </div>
+
+              {/* Current Data Summary Badge */}
+              <div className="bg-blue-50 border border-blue-200 rounded-xl px-3.5 py-2 text-xs tabular-nums shrink-0">
+                <span className="text-slate-600 block font-semibold">
+                  {lang === 'hi' ? 'वर्तमान सेव डेटा:' : 'Current Saved Data:'}
+                </span>
+                <strong className="text-blue-950 font-bold">
+                  {state.farmers.length} किसान · {state.collections.length} खरीद · {state.sales.length} बिक्री
+                </strong>
+              </div>
+            </div>
+
+            {restoreError && (
+              <div
+                data-testid="restore-error-banner"
+                className="p-3.5 bg-red-50 border-2 border-red-300 rounded-xl text-xs font-bold text-red-800 flex items-center gap-2"
+              >
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
+                <span>{restoreError}</span>
+              </div>
+            )}
+
+            {restoreSuccess && (
+              <div
+                data-testid="restore-success-banner"
+                className="p-3.5 bg-emerald-50 border-2 border-emerald-400 rounded-xl text-xs font-bold text-emerald-900 flex items-center gap-2"
+              >
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                <span>{restoreSuccess}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* LEFT BOX: STEP 1 - TAKE BACKUP (Download + Share + Copy Code + Local Snapshot) */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+                <h4 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                  <Download className="w-4 h-4 text-blue-600" />
+                  {lang === 'hi'
+                    ? '1. बैकअप सुरक्षित करें (Backup Data)'
+                    : '1. Save / Export Backup'}
+                </h4>
+                <p className="text-xs text-slate-600">
+                  {lang === 'hi'
+                    ? 'मोबाइल, कंप्यूटर या इंस्टॉल किए गए ऐप में अपना पूरा डेटा सुरक्षित करने के लिए नीचे दिए किसी भी बटन का उपयोग करें:'
+                    : 'Save your complete dairy data on mobile, desktop, or installed APK:'}
+                </p>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    data-testid="export-json-backup-btn"
+                    onClick={handleExportFullBackupJson}
+                    className="min-h-[42px] px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
+                  >
+                    <Download className="w-4 h-4" />
+                    {lang === 'hi'
+                      ? 'JSON बैकअप फ़ाइल डाउनलोड करें'
+                      : 'Download JSON Backup'}
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="share-backup-btn"
+                    onClick={handleShareBackupFile}
+                    className="min-h-[42px] px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
+                  >
+                    <Share2 className="w-4 h-4" />
+                    {lang === 'hi'
+                      ? 'WhatsApp / Drive पर बैकअप भेजें'
+                      : 'Share Backup (WhatsApp/Drive)'}
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="copy-backup-code-btn"
+                    onClick={handleCopyBackupCode}
+                    className="min-h-[42px] px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold rounded-xl flex items-center gap-1.5"
+                  >
+                    {copiedBackupJson ? (
+                      <Check className="w-4 h-4 text-emerald-600" />
+                    ) : (
+                      <Copy className="w-4 h-4 text-blue-600" />
+                    )}
+                    {copiedBackupJson
+                      ? lang === 'hi'
+                        ? 'बैकअप कोड कॉपी हो गया!'
+                        : 'Backup Code Copied!'
+                      : lang === 'hi'
+                      ? 'बैकअप कोड कॉपी करें (Copy Code)'
+                      : 'Copy Backup Code'}
+                  </button>
+                </div>
+
+                {/* Local Auto-Backup Snapshot Creator */}
+                <div className="pt-2 border-t border-slate-200 flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-slate-600">
+                    {lang === 'hi'
+                      ? 'बिना किसी फ़ाइल के ऐप के अंदर तुरंत रिस्टोर पॉइंट बनाएँ:'
+                      : 'Create an instant restore point inside the app:'}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="save-snapshot-btn"
+                    onClick={handleSaveLocalSnapshot}
+                    className="min-h-[36px] px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl flex items-center gap-1 shrink-0"
+                  >
+                    <History className="w-3.5 h-3.5" />
+                    {lang === 'hi' ? '+ लोकल स्नैपशॉट सेव करें' : '+ Save Snapshot'}
+                  </button>
+                </div>
+              </div>
+
+              {/* RIGHT BOX: STEP 2 - RESTORE DATA (File Upload + Paste Code + Merge/Replace Mode) */}
+              <div className="bg-emerald-50/50 border-2 border-emerald-300 rounded-2xl p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                    <Upload className="w-4 h-4 text-emerald-700" />
+                    {lang === 'hi'
+                      ? '2. बैकअप Restore करें (फ़ाइल या कोड से)'
+                      : '2. Restore Backup (File or Code)'}
+                  </h4>
+
+                  {/* Restore Mode Selector: Merge vs Replace */}
+                  <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-emerald-200 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setRestoreMode('merge')}
+                      className={`px-2 py-1 rounded font-bold ${
+                        restoreMode === 'merge'
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {lang === 'hi' ? 'मिलाएँ (Merge)' : 'Merge'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRestoreMode('replace')}
+                      className={`px-2 py-1 rounded font-bold ${
+                        restoreMode === 'replace'
+                          ? 'bg-amber-600 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {lang === 'hi' ? 'पूरा बदलें (Replace)' : 'Replace'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Method A: Direct Button to Open File Picker (Works in Android APK & Installed PWA) */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="select-restore-file-btn"
+                    onClick={() => restoreFileInputRef.current?.click()}
+                    className="min-h-[44px] px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-xs"
+                  >
+                    <Upload className="w-4 h-4" />
+                    {lang === 'hi'
+                      ? 'JSON बैकअप फ़ाइल चुनें और Restore करें'
+                      : 'Select Backup File & Restore'}
+                  </button>
+
+                  <input
+                    ref={restoreFileInputRef}
+                    data-testid="restore-file-input"
+                    type="file"
+                    accept=".json,application/json,text/plain,*/*"
+                    onChange={handleRestoreFileChange}
+                    className="hidden"
+                  />
+
+                  <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={instantRestoreOnSelect}
+                      onChange={(e) => setInstantRestoreOnSelect(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded text-emerald-600"
+                    />
+                    <span>
+                      {lang === 'hi'
+                        ? 'फ़ाइल चुनते ही तुरंत Restore करें'
+                        : 'Instant restore on file select'}
+                    </span>
+                  </label>
+                </div>
+
+                {/* Method B: Paste Backup Code / JSON Text to Restore (Works 100% even if WebView blocks file picker) */}
+                <div className="pt-2 border-t border-emerald-200/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="paste-backup-textarea"
+                      className="text-xs font-bold text-slate-800"
+                    >
+                      {lang === 'hi'
+                        ? 'या बैकअप कोड यहाँ पेस्ट करके Restore करें (ऐप/मोबाइल के लिए सबसे आसान):'
+                        : 'Or Paste Backup Code Here to Restore:'}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const clip = await navigator.clipboard.readText();
+                          if (clip) setPasteBackupText(clip);
+                        } catch {
+                          // user can manually long-press paste
+                        }
+                      }}
+                      className="text-[11px] font-bold text-blue-700 hover:underline flex items-center gap-1"
+                    >
+                      <ClipboardPaste className="w-3 h-3" />
+                      {lang === 'hi' ? 'Clipboard से पेस्ट करें' : 'Paste from Clipboard'}
+                    </button>
+                  </div>
+
+                  <textarea
+                    id="paste-backup-textarea"
+                    data-testid="paste-backup-textarea"
+                    rows={3}
+                    placeholder={
+                      lang === 'hi'
+                        ? 'यहाँ कॉपी किया हुआ JSON बैकअप कोड पेस्ट करें...'
+                        : 'Paste copied JSON backup code here...'
+                    }
+                    value={pasteBackupText}
+                    onChange={(e) => setPasteBackupText(e.target.value)}
+                    className="w-full p-2.5 text-xs font-mono bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+
+                  <button
+                    type="button"
+                    data-testid="paste-restore-submit-btn"
+                    onClick={handleRestoreFromPastedText}
+                    disabled={!pasteBackupText.trim()}
+                    className="w-full min-h-[40px] px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"
+                  >
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    {lang === 'hi'
+                      ? 'पेस्ट किए गए कोड से डेटा अभी Restore करें'
+                      : 'Restore Data from Pasted Code'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Saved Local Auto-Backup Snapshots List (1-Click Restore inside installed app) */}
+            {snapshots.length > 0 && (
+              <div
+                data-testid="local-snapshots-section"
+                className="bg-indigo-50/60 border border-indigo-200 rounded-2xl p-4 space-y-2.5"
+              >
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs sm:text-sm font-bold text-indigo-950 flex items-center gap-1.5">
+                    <History className="w-4 h-4 text-indigo-600" />
+                    {lang === 'hi'
+                      ? `सेव किए गए लोकल बैकअप स्नैपशॉट (${snapshots.length}) — बिना फ़ाइल के 1-Click Restore`
+                      : `Saved Local Backup Snapshots (${snapshots.length}) — 1-Click Restore`}
+                  </h4>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {snapshots.map((snap) => (
+                    <div
+                      key={snap.id}
+                      className="bg-white border border-indigo-100 rounded-xl p-2.5 flex items-center justify-between gap-2 text-xs"
+                    >
+                      <div>
+                        <strong className="font-bold text-slate-900 block">{snap.label}</strong>
+                        <span className="text-[11px] text-slate-500 tabular-nums">
+                          {snap.farmersCount} किसान · {snap.collectionsCount} खरीद · {snap.salesCount} बिक्री
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          data-testid="restore-snapshot-btn"
+                          onClick={() => applyIncomingRestoreState(snap.state)}
+                          className="min-h-[34px] px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs"
+                        >
+                          Restore करें
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSnapshots(deleteBackupSnapshot(snap.id))}
+                          className="min-h-[34px] px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg"
+                          title="हटाएँ"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Excel-Compatible CSV Exports */}
+            <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h4 className="text-xs sm:text-sm font-bold text-slate-900">
+                  {lang === 'hi'
+                    ? 'Excel-Compatible CSV रिपोर्ट डाउनलोड'
+                    : 'Excel-Compatible CSV Exports'}
+                </h4>
+                <p className="text-[11px] text-slate-500">
+                  {lang === 'hi'
+                    ? 'किसान सूची, दूध खरीद और थोक बिक्री को सीधे Excel में खोलने योग्य CSV में डाउनलोड करें'
+                    : 'Export Farmers, Milk Purchases, and Wholesale Sales as UTF-8 CSV files'}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportFarmersCsv}
+                  className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                  {lang === 'hi' ? 'किसान सूची CSV' : 'Farmers CSV'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportCollectionsCsv}
+                  className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-blue-600" />
+                  {lang === 'hi' ? 'दूध खरीद रिपोर्ट CSV' : 'Milk Purchase CSV'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportSalesCsv}
+                  className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-indigo-600" />
+                  {lang === 'hi' ? 'थोक बिक्री रिपोर्ट CSV' : 'Sales CSV'}
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Android Debug APK via GitHub Actions & GitHub Releases Card */}
           <div
             data-testid="android-apk-github-card"
@@ -1727,29 +2550,29 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               </span>
             </div>
 
-            {/* Direct In-App APK Download (v1.0.3 - 4.2 MB) */}
+            {/* Direct In-App APK Download (v1.0.4 - Build #4 - 4.2 MB) */}
             <div className="bg-emerald-50 border-2 border-emerald-400 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <strong className="text-xs sm:text-sm text-emerald-950 block">
                   {lang === 'hi'
-                    ? 'Ujalaa-Dairy-debug.apk तैयार है! (GitHub Release v1.0.3 · 4.2 MB):'
-                    : 'Ujalaa-Dairy-debug.apk is Ready! (GitHub Release v1.0.3 · 4.2 MB):'}
+                    ? 'नया Ujalaa-Dairy-debug.apk तैयार है! (GitHub Release v1.0.4 · Build #4 · 4.2 MB):'
+                    : 'New Ujalaa-Dairy-debug.apk is Ready! (GitHub Release v1.0.4 · Build #4 · 4.2 MB):'}
                 </strong>
                 <span className="text-xs text-emerald-800">
                   {lang === 'hi'
-                    ? 'इस हरे बटन को दबाते ही सीधा "Ujalaa-Dairy-debug.apk" (4.2 MB) आपके फोन में डाउनलोड हो जाएगा।'
-                    : 'Click this green button to directly download "Ujalaa-Dairy-debug.apk" (4.2 MB) to your phone.'}
+                    ? 'आपके सभी नए बदलावों (डैशबोर्ड क्लीनअप, शुद्ध दूध लाभ-हानि रिपोर्ट और बिक्री ग्राहक + रेट चार्ट) वाला नया APK (v1.0.4) तैयार हो चुका है। इस हरे बटन को दबाकर तुरंत डाउनलोड करें।'
+                    : 'Your updated APK (v1.0.4 Build #4) with all recent changes is ready. Click the green button to download Ujalaa-Dairy-debug.apk (4.2 MB).'}
                 </span>
               </div>
               <a
-                href="./Ujalaa-Dairy-debug.apk"
+                href="/Ujalaa-Dairy-debug.apk"
                 download="Ujalaa-Dairy-debug.apk"
                 className="min-h-[44px] px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shrink-0 shadow-xs"
               >
                 <Download className="w-4 h-4" />
                 {lang === 'hi'
-                  ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (4.2 MB)'
-                  : 'Download Ujalaa-Dairy-debug.apk (4.2 MB)'}
+                  ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (v1.0.4 · 4.2 MB)'
+                  : 'Download Ujalaa-Dairy-debug.apk (v1.0.4 · 4.2 MB)'}
               </a>
             </div>
 
@@ -2084,95 +2907,6 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               />
             )}
           </div>
-
-          {/* JSON Backup & Restore + CSV Exports (Section 19) */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
-              <h3 className="text-base font-bold text-slate-900">
-                {lang === 'hi'
-                  ? 'पूरा डेटा JSON बैकअप और Restore'
-                  : 'Full JSON Backup & Restore'}
-              </h3>
-              <p className="text-xs text-slate-600">
-                {lang === 'hi'
-                  ? 'सलाह: नया बैकअप Restore करने से पहले अपने मौजूदा डेटा का JSON बैकअप अवश्य डाउनलोड कर लें। Restore करने पर डुप्लिकेट एंट्रियाँ नहीं बनतीं।'
-                  : 'Tip: Download a backup of your existing data before restoring. Restore deduplicates all records.'}
-              </p>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleExportFullBackupJson}
-                  className="min-h-[44px] px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl flex items-center gap-2"
-                >
-                  <Download className="w-4 h-4" />
-                  {lang === 'hi' ? 'पूरा डेटा JSON में Export करें' : 'Export Full JSON Backup'}
-                </button>
-
-                <label className="min-h-[44px] px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl cursor-pointer flex items-center gap-2 border border-slate-300">
-                  <Upload className="w-4 h-4" />
-                  <span>{lang === 'hi' ? 'JSON बैकअप से Restore करें' : 'Restore from JSON'}</span>
-                  <input
-                    type="file"
-                    accept=".json"
-                    onChange={handleRestoreFileChange}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-
-              {restoreError && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs font-bold text-red-700">
-                  {restoreError}
-                </div>
-              )}
-              {restoreSuccess && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-bold text-emerald-700">
-                  {restoreSuccess}
-                </div>
-              )}
-            </div>
-
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
-              <h3 className="text-base font-bold text-slate-900">
-                {lang === 'hi'
-                  ? 'Excel-Compatible CSV रिपोर्ट Export'
-                  : 'Excel-Compatible CSV Exports'}
-              </h3>
-              <p className="text-xs text-slate-600">
-                {lang === 'hi'
-                  ? 'किसानों की सूची, दूध खरीद और थोक बिक्री को सीधे Excel में खोलने योग्य CSV में डाउनलोड करें'
-                  : 'Export Farmers, Milk Purchases, and Wholesale Sales as UTF-8 CSV files'}
-              </p>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleExportFarmersCsv}
-                  className="min-h-[42px] px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                  {lang === 'hi' ? 'किसान सूची CSV' : 'Farmers CSV'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportCollectionsCsv}
-                  className="min-h-[42px] px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-blue-600" />
-                  {lang === 'hi' ? 'दूध खरीद रिपोर्ट CSV' : 'Milk Purchase CSV'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportSalesCsv}
-                  className="min-h-[42px] px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-indigo-600" />
-                  {lang === 'hi' ? 'थोक बिक्री रिपोर्ट CSV' : 'Sales CSV'}
-                </button>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
@@ -2263,26 +2997,35 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
         title={lang === 'hi' ? 'JSON बैकअप से डेटा Restore करें?' : 'Restore Data from JSON Backup?'}
         message={
           lang === 'hi'
-            ? `इस बैकअप फ़ाइल में ${pendingRestoreState?.farmers.length || 0} किसान और ${
+            ? `इस बैकअप फ़ाइल में ${pendingRestoreState?.farmers.length || 0} किसान, ${
                 pendingRestoreState?.collections.length || 0
-              } दूध एंट्रियाँ हैं। सलाह: Restore करने से पहले मौजूदा डेटा का बैकअप ले लें। क्या आप Restore की पुष्टि करते हैं?`
-            : `This backup contains ${pendingRestoreState?.farmers.length || 0} farmers and ${
+              } दूध खरीद और ${pendingRestoreState?.sales.length || 0} बिक्री एंट्रियाँ हैं। क्या आप Restore की पुष्टि करते हैं?`
+            : `This backup contains ${pendingRestoreState?.farmers.length || 0} farmers, ${
                 pendingRestoreState?.collections.length || 0
-              } milk entries. Proceed with restore?`
+              } milk entries, and ${pendingRestoreState?.sales.length || 0} sales. Proceed with restore?`
         }
         confirmLabel={lang === 'hi' ? 'हाँ, डेटा Restore करें' : 'Restore Now'}
         onCancel={() => setPendingRestoreState(null)}
         onConfirm={() => {
           if (pendingRestoreState) {
-            onRestoreState(pendingRestoreState);
-            setRestoreSuccess(
-              lang === 'hi'
-                ? 'डेटा सफलतापूर्वक Restore कर दिया गया है!'
-                : 'Backup restored successfully!'
-            );
+            applyIncomingRestoreState(pendingRestoreState);
           }
           setPendingRestoreState(null);
         }}
+      />
+
+      {/* WhatsApp Share Modal for 10-Day Sale Bill in Reports */}
+      <WhatsAppPreviewModal
+        open={saleWaModal.open}
+        title={
+          lang === 'hi'
+            ? '10-दिन का बिक्री बिल WhatsApp पर भेजें'
+            : 'Share 10-Day Sale Bill on WhatsApp'
+        }
+        phone={saleWaModal.phone}
+        message={saleWaModal.message}
+        lang={lang}
+        onClose={() => setSaleWaModal((prev) => ({ ...prev, open: false }))}
       />
     </div>
   );

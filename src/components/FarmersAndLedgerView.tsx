@@ -31,8 +31,10 @@ import {
   computeBillSnapshotHash,
   formatCurrency,
   formatNumber,
+  formatWholeCurrency,
   generateTenDayBillData,
   round2,
+  truncatePurchaseAmount,
 } from '../utils/dairyCalculations';
 import { ConfirmDialog, WhatsAppPreviewModal } from './Modals';
 
@@ -199,7 +201,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
       village: fVillage.trim(),
       defaultMilkType: fMilkType,
       shiftSchedule: fSchedule,
-      openingBalance: round2(Number(fOpeningBal) || 0),
+      openingBalance: truncatePurchaseAmount(Number(fOpeningBal) || 0),
       notes: fNotes.trim(),
       active: existing ? existing.active : true,
       createdAt: existing ? existing.createdAt : new Date().toISOString(),
@@ -364,17 +366,17 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
       `किसान: ${bill.farmerCode} - ${bill.farmerName}`,
       `अवधि: ${bill.fromDate} से ${bill.toDate}`,
       `--------------------------------`,
-      `सुबह का दूध: ${formatNumber(bill.morningLiters, 3)} L (${formatCurrency(bill.morningAmount)})`,
-      `शाम का दूध: ${formatNumber(bill.eveningLiters, 3)} L (${formatCurrency(bill.eveningAmount)})`,
+      `सुबह का दूध: ${formatNumber(bill.morningLiters, 3)} L (${formatWholeCurrency(bill.morningAmount)})`,
+      `शाम का दूध: ${formatNumber(bill.eveningLiters, 3)} L (${formatWholeCurrency(bill.eveningAmount)})`,
       `कुल दूध: ${formatNumber(bill.totalLiters, 3)} L`,
       `औसत FAT: ${formatNumber(bill.avgFat)} | औसत SNF: ${formatNumber(bill.avgSnf)}`,
-      `कुल दूध राशि: ${formatCurrency(bill.totalMilkAmount)}`,
-      `पिछला बकाया: ${formatCurrency(bill.previousBalance)}`,
-      `एडवांस कटौती: ${formatCurrency(bill.advancesInPeriod)}`,
-      `दाना/पशु-आहार कटौती: ${formatCurrency(bill.feedDeductionsInPeriod)}`,
-      `अन्य कटौती/भुगतान: ${formatCurrency(bill.inlineDeductions + bill.paymentsInPeriod)}`,
+      `कुल दूध राशि: ${formatWholeCurrency(bill.totalMilkAmount)}`,
+      `पिछला बकाया: ${formatWholeCurrency(bill.previousBalance)}`,
+      `एडवांस कटौती: ${formatWholeCurrency(bill.advancesInPeriod)}`,
+      `दाना/पशु-आहार कटौती: ${formatWholeCurrency(bill.feedDeductionsInPeriod)}`,
+      `अन्य कटौती/भुगतान: ${formatWholeCurrency(bill.inlineDeductions + bill.paymentsInPeriod)}`,
       `--------------------------------`,
-      `*अंतिम देय राशि (Net Payable): ${formatCurrency(bill.netPayable)}*`,
+      `*अंतिम देय राशि (Net Payable): ${formatWholeCurrency(bill.netPayable)}*`,
     ].join('\n');
 
     setWaModal({
@@ -716,7 +718,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                           {formatNumber(ledger.totalLiters, 3)} L
                         </td>
                         <td className="py-2.5 px-3 text-right font-bold text-blue-900">
-                          {formatCurrency(ledger.closingBalance)}
+                          {formatWholeCurrency(ledger.closingBalance)}
                         </td>
                         <td className="py-2.5 px-3 text-center">
                           <button
@@ -867,7 +869,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     {lang === 'hi' ? 'कुल दूध राशि' : 'Milk Amount'}
                   </span>
                   <span className="font-bold text-blue-800 text-sm tabular-nums mt-0.5 block">
-                    {formatCurrency(ledgerData.totalMilkAmount)}
+                    {formatWholeCurrency(ledgerData.totalMilkAmount)}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -875,7 +877,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     {lang === 'hi' ? 'कुल एडवांस' : 'Total Advance'}
                   </span>
                   <span className="font-bold text-amber-700 text-sm tabular-nums mt-0.5 block">
-                    {formatCurrency(ledgerData.totalAdvances)}
+                    {formatWholeCurrency(ledgerData.totalAdvances)}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -883,7 +885,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     {lang === 'hi' ? 'दाना/अन्य कटौती' : 'Feed/Deductions'}
                   </span>
                   <span className="font-bold text-red-600 text-sm tabular-nums mt-0.5 block">
-                    {formatCurrency(
+                    {formatWholeCurrency(
                       ledgerData.totalFeedDeductions + ledgerData.totalInlineDeductions
                     )}
                   </span>
@@ -893,7 +895,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     {lang === 'hi' ? 'कुल भुगतान किया' : 'Total Paid'}
                   </span>
                   <span className="font-bold text-slate-900 text-sm tabular-nums mt-0.5 block">
-                    {formatCurrency(ledgerData.totalPayments)}
+                    {formatWholeCurrency(ledgerData.totalPayments)}
                   </span>
                 </div>
                 <div className="p-3 bg-emerald-50 border border-emerald-200">
@@ -901,7 +903,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     {lang === 'hi' ? 'शेष बकाया (Balance)' : 'Closing Balance'}
                   </span>
                   <span className="font-bold text-emerald-800 text-sm tabular-nums mt-0.5 block">
-                    {formatCurrency(ledgerData.closingBalance)}
+                    {formatWholeCurrency(ledgerData.closingBalance)}
                   </span>
                 </div>
               </div>
@@ -963,13 +965,13 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                                 : '—'}
                             </td>
                             <td className="py-2 px-3 text-right font-semibold text-blue-700">
-                              {row.milkAmount > 0 ? formatCurrency(row.milkAmount) : '—'}
+                              {row.milkAmount > 0 ? formatWholeCurrency(row.milkAmount) : '—'}
                             </td>
                             <td className="py-2 px-3 text-right font-semibold text-red-600">
-                              {debitTotal > 0 ? formatCurrency(debitTotal) : '—'}
+                              {debitTotal > 0 ? formatWholeCurrency(debitTotal) : '—'}
                             </td>
                             <td className="py-2 px-3 text-right font-bold text-slate-900">
-                              {formatCurrency(row.runningBalance)}
+                              {formatWholeCurrency(row.runningBalance)}
                             </td>
                           </tr>
                         );
@@ -1526,20 +1528,23 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 </div>
               </div>
 
-              {/* Morning vs Evening Summary & Final Net Payable */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums">
+              {/* Morning vs Evening Summary & Final Net Payable (Whole Integer Only) */}
+              <div
+                data-testid="ten-day-bill-summary"
+                className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums"
+              >
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <span className="text-slate-500 block">सुबह का दूध / राशि</span>
                   <span className="font-bold text-slate-900 mt-0.5 block">
                     {formatNumber(activeBill.morningLiters, 3)} L ·{' '}
-                    {formatCurrency(activeBill.morningAmount)}
+                    {formatWholeCurrency(activeBill.morningAmount)}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <span className="text-slate-500 block">शाम का दूध / राशि</span>
                   <span className="font-bold text-slate-900 mt-0.5 block">
                     {formatNumber(activeBill.eveningLiters, 3)} L ·{' '}
-                    {formatCurrency(activeBill.eveningAmount)}
+                    {formatWholeCurrency(activeBill.eveningAmount)}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
@@ -1550,9 +1555,12 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   </span>
                 </div>
                 <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">
-                  <span className="text-blue-900 font-semibold block">कुल दूध राशि</span>
-                  <span className="font-bold text-blue-900 text-sm mt-0.5 block">
-                    {formatCurrency(activeBill.totalMilkAmount)}
+                  <span className="text-blue-900 font-semibold block">कुल दूध राशि (पूर्णांक)</span>
+                  <span
+                    data-testid="bill-total-milk-amount"
+                    className="font-bold text-blue-900 text-sm mt-0.5 block"
+                  >
+                    {formatWholeCurrency(activeBill.totalMilkAmount)}
                   </span>
                 </div>
               </div>
@@ -1561,31 +1569,34 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <span className="text-slate-500 block">पिछला बकाया (+)</span>
                   <span className="font-bold text-slate-900 mt-0.5 block">
-                    {formatCurrency(activeBill.previousBalance)}
+                    {formatWholeCurrency(activeBill.previousBalance)}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <span className="text-slate-500 block">एडवांस (-)</span>
                   <span className="font-bold text-red-600 mt-0.5 block">
-                    {formatCurrency(activeBill.advancesInPeriod)}
+                    {formatWholeCurrency(activeBill.advancesInPeriod)}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <span className="text-slate-500 block">दाना/पशु-आहार (-)</span>
                   <span className="font-bold text-red-600 mt-0.5 block">
-                    {formatCurrency(activeBill.feedDeductionsInPeriod)}
+                    {formatWholeCurrency(activeBill.feedDeductionsInPeriod)}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <span className="text-slate-500 block">अन्य कटौती/भुगतान (-)</span>
                   <span className="font-bold text-red-600 mt-0.5 block">
-                    {formatCurrency(activeBill.inlineDeductions + activeBill.paymentsInPeriod)}
+                    {formatWholeCurrency(activeBill.inlineDeductions + activeBill.paymentsInPeriod)}
                   </span>
                 </div>
                 <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-300">
                   <span className="text-emerald-900 font-bold block">अंतिम देय राशि</span>
-                  <span className="font-bold text-emerald-800 text-base mt-0.5 block">
-                    {formatCurrency(activeBill.netPayable)}
+                  <span
+                    data-testid="bill-net-payable"
+                    className="font-bold text-emerald-800 text-base mt-0.5 block"
+                  >
+                    {formatWholeCurrency(activeBill.netPayable)}
                   </span>
                 </div>
               </div>
@@ -1629,9 +1640,9 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                         {b.fromDate} से {b.toDate}
                       </td>
                       <td className="py-2 px-3 text-right">{formatNumber(b.totalLiters, 3)} L</td>
-                      <td className="py-2 px-3 text-right">{formatCurrency(b.totalMilkAmount)}</td>
+                      <td className="py-2 px-3 text-right">{formatWholeCurrency(b.totalMilkAmount)}</td>
                       <td className="py-2 px-3 text-right font-bold text-emerald-700">
-                        {formatCurrency(b.netPayable)}
+                        {formatWholeCurrency(b.netPayable)}
                       </td>
                       <td className="py-2 px-3 text-center">
                         <button

@@ -173,6 +173,175 @@ export function sanitizeAndMergeState(raw: any): DairyAppState {
   };
 }
 
+export interface LocalBackupSnapshot {
+  id: string;
+  label: string;
+  createdAt: string;
+  farmersCount: number;
+  customersCount: number;
+  collectionsCount: number;
+  salesCount: number;
+  state: DairyAppState;
+}
+
+const SNAPSHOTS_KEY = 'ujalaa_dairy_snapshots_v1';
+
+export function mergeDairyStates(
+  current: DairyAppState,
+  incoming: DairyAppState
+): DairyAppState {
+  const mergeById = <T extends { id: string }>(a: T[], b: T[]): T[] => {
+    const map = new Map<string, T>();
+    for (const item of a || []) {
+      if (item && item.id) map.set(item.id, item);
+    }
+    for (const item of b || []) {
+      if (item && item.id) map.set(item.id, item);
+    }
+    return Array.from(map.values());
+  };
+
+  return {
+    ...current,
+    dairyName:
+      incoming.dairyName && incoming.dairyName !== 'Ujalaa Dairy'
+        ? incoming.dairyName
+        : current.dairyName || incoming.dairyName,
+    dairyPhone: incoming.dairyPhone || current.dairyPhone,
+    dairyAddress: incoming.dairyAddress || current.dairyAddress,
+    expenseCategories: Array.from(
+      new Set([...(current.expenseCategories || []), ...(incoming.expenseCategories || [])])
+    ),
+    farmers: mergeById(current.farmers, incoming.farmers),
+    customers: mergeById(current.customers || [], incoming.customers || []),
+    collections: mergeById(current.collections, incoming.collections),
+    leaves: mergeById(current.leaves, incoming.leaves),
+    sales: mergeById(current.sales, incoming.sales),
+    advancesAndPayments: mergeById(current.advancesAndPayments, incoming.advancesAndPayments),
+    cattleFeed: mergeById(current.cattleFeed, incoming.cattleFeed),
+    expenses: mergeById(current.expenses, incoming.expenses),
+    rateCharts: {
+      cow: incoming.rateCharts?.cow || current.rateCharts?.cow || null,
+      buffalo: incoming.rateCharts?.buffalo || current.rateCharts?.buffalo || null,
+    },
+    bills: mergeById(current.bills, incoming.bills),
+  };
+}
+
+export function loadBackupSnapshots(): LocalBackupSnapshot[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(SNAPSHOTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item === 'object' && item.id && item.state)
+      .map((item) => ({
+        ...item,
+        state: sanitizeAndMergeState(item.state),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export function saveBackupSnapshot(
+  state: DairyAppState,
+  customLabel?: string
+): LocalBackupSnapshot[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const existing = loadBackupSnapshots();
+    const now = new Date();
+    const snap: LocalBackupSnapshot = {
+      id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      label:
+        customLabel?.trim() ||
+        `बैकअप ${now.toLocaleDateString('hi-IN')} ${now.toTimeString().slice(0, 5)}`,
+      createdAt: now.toISOString(),
+      farmersCount: state.farmers.length,
+      customersCount: (state.customers || []).length,
+      collectionsCount: state.collections.length,
+      salesCount: state.sales.length,
+      state: sanitizeAndMergeState(state),
+    };
+    const updated = [snap, ...existing].slice(0, 8);
+    window.localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(updated));
+    return updated;
+  } catch {
+    return loadBackupSnapshots();
+  }
+}
+
+export function deleteBackupSnapshot(snapshotId: string): LocalBackupSnapshot[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const updated = loadBackupSnapshots().filter((s) => s.id !== snapshotId);
+    window.localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(updated));
+    return updated;
+  } catch {
+    return [];
+  }
+}
+
+export function serializeBackupPayload(state: DairyAppState): string {
+  const payload = {
+    app: 'Ujalaa Dairy',
+    version: '1.1',
+    exportedAt: new Date().toISOString(),
+    data: state,
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+export function triggerReliableFileDownload(
+  filename: string,
+  content: string,
+  mimeType = 'application/json;charset=utf-8'
+): boolean {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+  try {
+    const blob = new Blob([content], { type: mimeType });
+    const nav = window.navigator as any;
+    if (nav && typeof nav.msSaveOrOpenBlob === 'function') {
+      nav.msSaveOrOpenBlob(blob, filename);
+      return true;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch {
+        // ignore cleanup error
+      }
+    }, 1500);
+    return true;
+  } catch {
+    try {
+      // Fallback to Data URI for strict mobile WebViews / installed PWAs
+      const dataUri = `data:${mimeType},${encodeURIComponent(content)}`;
+      const a = document.createElement('a');
+      a.href = dataUri;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 export function validateBackupJson(jsonString: string): {
   valid: boolean;
   state: DairyAppState | null;
@@ -180,7 +349,25 @@ export function validateBackupJson(jsonString: string): {
   errorEn: string | null;
 } {
   try {
-    const parsed = JSON.parse(jsonString);
+    let cleaned = (jsonString || '').trim();
+    if (!cleaned) {
+      return {
+        valid: false,
+        state: null,
+        errorHi: 'बैकअप डेटा खाली है। कृपया वैध JSON फ़ाइल चुनें या कोड पेस्ट करें।',
+        errorEn: 'Backup data is empty. Please select a valid JSON file or paste backup code.',
+      };
+    }
+
+    // Strip BOM or markdown code fences if user copied from WhatsApp/chat
+    cleaned = cleaned.replace(/^\uFEFF/, '');
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+
+    const parsed = JSON.parse(cleaned);
     if (!parsed || typeof parsed !== 'object') {
       return {
         valid: false,
@@ -190,12 +377,19 @@ export function validateBackupJson(jsonString: string): {
       };
     }
     const payload = parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
-    if (!Array.isArray(payload.farmers) || !Array.isArray(payload.collections)) {
+    const hasRecognizedArrays =
+      Array.isArray(payload.farmers) ||
+      Array.isArray(payload.collections) ||
+      Array.isArray(payload.sales) ||
+      Array.isArray(payload.customers) ||
+      (payload.rateCharts && typeof payload.rateCharts === 'object');
+
+    if (!hasRecognizedArrays) {
       return {
         valid: false,
         state: null,
-        errorHi: 'अमान्य बैकअप फ़ाइल: इसमें किसान या दूध कलेक्शन संरचना मौजूद नहीं है।',
-        errorEn: 'Invalid backup file: Missing farmers or collections structure.',
+        errorHi: 'अमान्य बैकअप फ़ाइल: इसमें डेयरी डेटा (किसान, दूध कलेक्शन या बिक्री) नहीं मिला।',
+        errorEn: 'Invalid backup file: Missing dairy data structure.',
       };
     }
     return {
@@ -208,8 +402,9 @@ export function validateBackupJson(jsonString: string): {
     return {
       valid: false,
       state: null,
-      errorHi: 'अमान्य JSON फ़ाइल: फ़ाइल पढ़ने में त्रुटि हुई।',
-      errorEn: 'Invalid JSON file: Failed to parse JSON.',
+      errorHi: 'अमान्य JSON डेटा: फ़ाइल या पेस्ट किए गए कोड को पढ़ने में त्रुटि हुई।',
+      errorEn: 'Invalid JSON data: Failed to parse backup JSON.',
     };
   }
 }
+

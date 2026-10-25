@@ -1,6 +1,7 @@
 import {
   AdvancePaymentEntry,
   CattleFeedEntry,
+  Customer,
   ExpenseEntry,
   Farmer,
   FarmerLeaveRecord,
@@ -22,6 +23,16 @@ export function round3(val: number): number {
   return Math.round((val + Number.EPSILON) * 1000) / 1000;
 }
 
+/**
+ * Farmer Milk Purchase Rule:
+ * Drops all decimal digits after the point so 253.85 becomes 253 (whole integer).
+ * Sales keep decimals via round2, whereas farmer purchases & 10-day bills use whole integers only.
+ */
+export function truncatePurchaseAmount(val: number): number {
+  if (!Number.isFinite(val)) return 0;
+  return Math.trunc(round2(val));
+}
+
 export function formatNumber(val: number | null | undefined, decimals = 2): string {
   if (val === null || val === undefined || !Number.isFinite(val)) {
     return '—';
@@ -38,6 +49,19 @@ export function formatCurrency(val: number | null | undefined): string {
   return `${sign}₹${abs.toLocaleString('en-IN', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
+  })}`;
+}
+
+export function formatWholeCurrency(val: number | null | undefined): string {
+  if (val === null || val === undefined || !Number.isFinite(val)) {
+    return '—';
+  }
+  const intVal = truncatePurchaseAmount(val);
+  const sign = intVal < 0 ? '-' : '';
+  const abs = Math.abs(intVal);
+  return `${sign}₹${abs.toLocaleString('en-IN', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   })}`;
 }
 
@@ -307,9 +331,11 @@ export function calculateCollectionSummary(entries: MilkCollectionEntry[]): Coll
     const l = Number(e.liters) || 0;
     const f = Number(e.fat) || 0;
     const s = Number(e.snf) || 0;
-    const amt = Number(e.totalAmount) || 0;
-    const ded = Number(e.deduction) || 0;
-    const net = Number(e.netPayable) || 0;
+    const amt = truncatePurchaseAmount(Number(e.totalAmount) || 0);
+    const ded = truncatePurchaseAmount(Number(e.deduction) || 0);
+    const net = truncatePurchaseAmount(
+      e.netPayable !== undefined && e.netPayable !== null ? Number(e.netPayable) : amt - ded
+    );
 
     if (e.farmerId) farmerSet.add(e.farmerId);
     totalLiters += l;
@@ -321,9 +347,9 @@ export function calculateCollectionSummary(entries: MilkCollectionEntry[]): Coll
   }
 
   totalLiters = round3(totalLiters);
-  totalAmount = round2(totalAmount);
-  totalDeductions = round2(totalDeductions);
-  totalNetPayable = round2(totalNetPayable);
+  totalAmount = truncatePurchaseAmount(totalAmount);
+  totalDeductions = truncatePurchaseAmount(totalDeductions);
+  totalNetPayable = truncatePurchaseAmount(totalNetPayable);
 
   if (totalLiters <= 0) {
     return {
@@ -491,7 +517,9 @@ export function calculateShiftAttendance(
 
     if (farmerEntries.length > 0) {
       const totalLiters = round3(farmerEntries.reduce((s, e) => s + e.liters, 0));
-      const totalAmount = round2(farmerEntries.reduce((s, e) => s + e.totalAmount, 0));
+      const totalAmount = truncatePurchaseAmount(
+        farmerEntries.reduce((s, e) => s + truncatePurchaseAmount(e.totalAmount), 0)
+      );
       const latestTime = farmerEntries[farmerEntries.length - 1].time;
       presentFarmers.push({
         farmer,
@@ -526,7 +554,9 @@ export function calculateShiftAttendance(
         createdAt: '',
       };
       const totalLiters = round3(farmerEntries.reduce((s, e) => s + e.liters, 0));
-      const totalAmount = round2(farmerEntries.reduce((s, e) => s + e.totalAmount, 0));
+      const totalAmount = truncatePurchaseAmount(
+        farmerEntries.reduce((s, e) => s + truncatePurchaseAmount(e.totalAmount), 0)
+      );
       presentFarmers.push({
         farmer: f,
         entries: farmerEntries,
@@ -777,7 +807,9 @@ export function calculateFarmerLedger(
     const shiftEn = c.shift === 'morning' ? 'Morning' : 'Evening';
     const typeHi = c.milkType === 'cow' ? 'गाय' : 'भैंस';
     const typeEn = c.milkType === 'cow' ? 'Cow' : 'Buffalo';
-    const delta = round2(c.totalAmount - (c.deduction || 0));
+    const milkAmt = truncatePurchaseAmount(c.totalAmount);
+    const dedAmt = truncatePurchaseAmount(c.deduction || 0);
+    const delta = milkAmt - dedAmt;
     events.push({
       sortKey: `${c.date}_1_${c.shift === 'morning' ? '1' : '2'}_${c.time}_${c.id}`,
       delta,
@@ -792,10 +824,10 @@ export function calculateFarmerLedger(
         fat: c.fat,
         snf: c.snf,
         rate: c.rate,
-        milkAmount: c.totalAmount,
+        milkAmount: milkAmt,
         advanceAmount: 0,
         feedAmount: 0,
-        otherDeduction: c.deduction || 0,
+        otherDeduction: dedAmt,
         paymentAmount: 0,
       },
     });
@@ -803,9 +835,10 @@ export function calculateFarmerLedger(
 
   for (const ap of farmerAdvPay) {
     const isAdv = ap.type === 'advance';
+    const amt = truncatePurchaseAmount(ap.amount);
     events.push({
       sortKey: `${ap.date}_2_${ap.createdAt}_${ap.id}`,
-      delta: -round2(ap.amount),
+      delta: -amt,
       row: {
         id: ap.id,
         date: ap.date,
@@ -817,19 +850,20 @@ export function calculateFarmerLedger(
           ? `Advance Given (${ap.txnCode}) ${ap.notes ? '- ' + ap.notes : ''}`
           : `Payment Made (${ap.txnCode}) ${ap.notes ? '- ' + ap.notes : ''}`,
         milkAmount: 0,
-        advanceAmount: isAdv ? ap.amount : 0,
+        advanceAmount: isAdv ? amt : 0,
         feedAmount: 0,
         otherDeduction: 0,
-        paymentAmount: isAdv ? 0 : ap.amount,
+        paymentAmount: isAdv ? 0 : amt,
       },
     });
   }
 
   for (const cf of farmerFeed) {
     const isDeducted = cf.paymentMode === 'deduct_from_milk';
+    const fAmt = truncatePurchaseAmount(cf.totalAmount);
     events.push({
       sortKey: `${cf.date}_3_${cf.createdAt}_${cf.id}`,
-      delta: isDeducted ? -round2(cf.totalAmount) : 0,
+      delta: isDeducted ? -fAmt : 0,
       row: {
         id: cf.id,
         date: cf.date,
@@ -842,7 +876,7 @@ export function calculateFarmerLedger(
         }`,
         milkAmount: 0,
         advanceAmount: 0,
-        feedAmount: isDeducted ? cf.totalAmount : 0,
+        feedAmount: isDeducted ? fAmt : 0,
         otherDeduction: 0,
         paymentAmount: 0,
       },
@@ -852,7 +886,7 @@ export function calculateFarmerLedger(
   events.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
   const rows: FarmerLedgerRow[] = [];
-  let runningBalance = round2(farmer.openingBalance || 0);
+  let runningBalance = truncatePurchaseAmount(farmer.openingBalance || 0);
 
   if (farmer.openingBalance !== 0) {
     rows.push({
@@ -871,23 +905,27 @@ export function calculateFarmerLedger(
   }
 
   for (const ev of events) {
-    runningBalance = round2(runningBalance + ev.delta);
+    runningBalance = truncatePurchaseAmount(runningBalance + ev.delta);
     rows.push({
       ...ev.row,
       runningBalance,
     });
   }
 
-  const totalAdvances = round2(
-    farmerAdvPay.filter((a) => a.type === 'advance').reduce((s, a) => s + a.amount, 0)
+  const totalAdvances = truncatePurchaseAmount(
+    farmerAdvPay
+      .filter((a) => a.type === 'advance')
+      .reduce((s, a) => s + truncatePurchaseAmount(a.amount), 0)
   );
-  const totalPayments = round2(
-    farmerAdvPay.filter((a) => a.type === 'payment').reduce((s, a) => s + a.amount, 0)
+  const totalPayments = truncatePurchaseAmount(
+    farmerAdvPay
+      .filter((a) => a.type === 'payment')
+      .reduce((s, a) => s + truncatePurchaseAmount(a.amount), 0)
   );
-  const totalFeedDeductions = round2(
+  const totalFeedDeductions = truncatePurchaseAmount(
     farmerFeed
       .filter((f) => f.paymentMode === 'deduct_from_milk')
-      .reduce((s, f) => s + f.totalAmount, 0)
+      .reduce((s, f) => s + truncatePurchaseAmount(f.totalAmount), 0)
   );
 
   return {
@@ -902,7 +940,7 @@ export function calculateFarmerLedger(
     totalFeedDeductions,
     totalInlineDeductions: colSummary.totalDeductions,
     totalPayments,
-    openingBalance: round2(farmer.openingBalance || 0),
+    openingBalance: truncatePurchaseAmount(farmer.openingBalance || 0),
     closingBalance: runningBalance,
   };
 }
@@ -944,17 +982,17 @@ export function computeBillSnapshotHash(
 ): string {
   const cPart = collections
     .filter((c) => c.farmerId === farmer.id && c.date <= toDate)
-    .map((c) => `${c.id}:${c.liters}:${c.totalAmount}:${c.deduction}`)
+    .map((c) => `${c.id}:${c.liters}:${truncatePurchaseAmount(c.totalAmount)}:${truncatePurchaseAmount(c.deduction || 0)}`)
     .join('|');
   const aPart = advancesAndPayments
     .filter((a) => a.farmerId === farmer.id && a.date <= toDate)
-    .map((a) => `${a.id}:${a.type}:${a.amount}`)
+    .map((a) => `${a.id}:${a.type}:${truncatePurchaseAmount(a.amount)}`)
     .join('|');
   const fPart = cattleFeed
     .filter((f) => f.farmerId === farmer.id && f.date <= toDate)
-    .map((f) => `${f.id}:${f.paymentMode}:${f.totalAmount}`)
+    .map((f) => `${f.id}:${f.paymentMode}:${truncatePurchaseAmount(f.totalAmount)}`)
     .join('|');
-  return `${farmer.openingBalance}#${cPart}#${aPart}#${fPart}`;
+  return `${truncatePurchaseAmount(farmer.openingBalance || 0)}#${cPart}#${aPart}#${fPart}`;
 }
 
 export function generateTenDayBillData(
@@ -978,13 +1016,23 @@ export function generateTenDayBillData(
   );
 
   const prevMilkNet = prevCollections.reduce(
-    (s, c) => s + (c.totalAmount - (c.deduction || 0)),
+    (s, c) =>
+      s + (truncatePurchaseAmount(c.totalAmount) - truncatePurchaseAmount(c.deduction || 0)),
     0
   );
-  const prevAdvAndPaymentsTotal = prevAdvPay.reduce((s, a) => s + a.amount, 0);
-  const prevFeedTotal = prevFeed.reduce((s, f) => s + f.totalAmount, 0);
-  const previousBalance = round2(
-    (farmer.openingBalance || 0) + prevMilkNet - prevAdvAndPaymentsTotal - prevFeedTotal
+  const prevAdvAndPaymentsTotal = prevAdvPay.reduce(
+    (s, a) => s + truncatePurchaseAmount(a.amount),
+    0
+  );
+  const prevFeedTotal = prevFeed.reduce(
+    (s, f) => s + truncatePurchaseAmount(f.totalAmount),
+    0
+  );
+  const previousBalance = truncatePurchaseAmount(
+    truncatePurchaseAmount(farmer.openingBalance || 0) +
+      prevMilkNet -
+      prevAdvAndPaymentsTotal -
+      prevFeedTotal
   );
 
   const periodCollections = collections.filter(
@@ -997,7 +1045,7 @@ export function generateTenDayBillData(
   const morningSummary = calculateCollectionSummary(morningEntries);
   const eveningSummary = calculateCollectionSummary(eveningEntries);
 
-  const periodAdvances = round2(
+  const periodAdvances = truncatePurchaseAmount(
     advancesAndPayments
       .filter(
         (a) =>
@@ -1006,10 +1054,10 @@ export function generateTenDayBillData(
           a.date >= fromDate &&
           a.date <= toDate
       )
-      .reduce((s, a) => s + a.amount, 0)
+      .reduce((s, a) => s + truncatePurchaseAmount(a.amount), 0)
   );
 
-  const periodPayments = round2(
+  const periodPayments = truncatePurchaseAmount(
     advancesAndPayments
       .filter(
         (a) =>
@@ -1018,10 +1066,10 @@ export function generateTenDayBillData(
           a.date >= fromDate &&
           a.date <= toDate
       )
-      .reduce((s, a) => s + a.amount, 0)
+      .reduce((s, a) => s + truncatePurchaseAmount(a.amount), 0)
   );
 
-  const periodFeed = round2(
+  const periodFeed = truncatePurchaseAmount(
     cattleFeed
       .filter(
         (f) =>
@@ -1030,10 +1078,10 @@ export function generateTenDayBillData(
           f.date >= fromDate &&
           f.date <= toDate
       )
-      .reduce((s, f) => s + f.totalAmount, 0)
+      .reduce((s, f) => s + truncatePurchaseAmount(f.totalAmount), 0)
   );
 
-  const netPayable = round2(
+  const netPayable = truncatePurchaseAmount(
     previousBalance +
       periodSummary.totalAmount -
       periodSummary.totalDeductions -
@@ -1880,3 +1928,493 @@ export function calculatePureProfitLoss(
     entryCountSales: saleSum.entryCount,
   };
 }
+
+// ============================================================================
+// Camera / Photo Slip OCR Entry Parser & Auto-Save Builder
+// ============================================================================
+
+export interface ScannedSlipRawRow {
+  farmerCode?: string;
+  farmerName?: string;
+  liters: number;
+  fat: number;
+  snf: number;
+  rate?: number;
+}
+
+/**
+ * Parses handwritten/printed text lines from a milk slip into ScannedSlipRawRow items.
+ * Supports formats like:
+ * - "101 रामलाल 5.250 4.5 8.5"
+ * - "101 FAT 4.5 SNF 8.5 L 5.25"
+ * - "4.5 8.5 5.250" (when farmer is already selected)
+ * - "45 85 5.25" (shorthand 2-digit FAT/SNF)
+ */
+export function parseMilkSlipTextToRows(rawText: string): ScannedSlipRawRow[] {
+  if (!rawText || !rawText.trim()) return [];
+  const lines = rawText
+    .split(/\r?\n|;/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const results: ScannedSlipRawRow[] = [];
+
+  for (const line of lines) {
+    // Extract labeled values first if present
+    const fatMatch = line.match(/(?:fat|फैट|फेट|f)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+    const snfMatch = line.match(/(?:snf|एसएनएफ|डिग्री|s)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+    const litMatch = line.match(/(?:liters?|ltr|qty|मात्रा|लीटर|वजन|दूध|l)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+    const rateMatch = line.match(/(?:rate|रेट|दर|भाव)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+    const codeMatch = line.match(/(?:id|code|कोड|क्र\.?|किसान)\s*[:=-]?\s*([A-Za-z0-9]+)/i);
+
+    const normalizeFat = (v: number): number => {
+      if (v >= 25 && v <= 99 && Number.isInteger(v)) return round2(v / 10);
+      return round2(v);
+    };
+    const normalizeSnf = (v: number): number => {
+      if (v >= 70 && v <= 105 && Number.isInteger(v)) return round2(v / 10);
+      return round2(v);
+    };
+    const normalizeLiters = (v: number): number => {
+      if (v >= 1000 && v <= 9999 && Number.isInteger(v)) return round3(v / 1000);
+      return round3(v);
+    };
+
+    if (fatMatch && snfMatch && litMatch) {
+      const fat = normalizeFat(Number(fatMatch[1]));
+      const snf = normalizeSnf(Number(snfMatch[1]));
+      const liters = normalizeLiters(Number(litMatch[1]));
+      const rate = rateMatch ? round2(Number(rateMatch[1])) : undefined;
+      if (fat > 0 && snf > 0 && liters > 0) {
+        results.push({
+          farmerCode: codeMatch ? codeMatch[1] : undefined,
+          liters,
+          fat,
+          snf,
+          rate,
+        });
+        continue;
+      }
+    }
+
+    // Otherwise extract all numbers from the line
+    const tokens = line.split(/[\s,|/]+/).filter(Boolean);
+    const numbers: number[] = [];
+    const textWords: string[] = [];
+
+    for (const tok of tokens) {
+      const cleanedNum = tok.replace(/[^0-9.]/g, '');
+      const numVal = Number(cleanedNum);
+      if (cleanedNum !== '' && Number.isFinite(numVal) && numVal > 0 && /^[0-9.]+$/.test(tok.replace(/[L₹l]/g, ''))) {
+        numbers.push(numVal);
+      } else {
+        textWords.push(tok);
+      }
+    }
+
+    if (numbers.length >= 3) {
+      let farmerCode: string | undefined;
+      let nums = [...numbers];
+
+      // If 4+ numbers and first is an integer (e.g. 101, 1, 2), treat first as farmerCode
+      if (nums.length >= 4 && Number.isInteger(nums[0])) {
+        farmerCode = String(nums[0]);
+        nums = nums.slice(1);
+      }
+
+      // Now find FAT (typically 2.5 - 11.0 with 1 decimal place), SNF (7.0 - 10.5 with 1 decimal place), and Liters
+      const isOneDecimal = (val: number) =>
+        Math.abs(val * 10 - Math.round(val * 10)) < 0.001;
+
+      const converted = nums.map((n) => ({
+        raw: n,
+        asFat: normalizeFat(n),
+        asSnf: normalizeSnf(n),
+        asLiters: normalizeLiters(n),
+      }));
+
+      // Prefer 1-decimal-place numbers in 7.0..10.5 for SNF, and 1-decimal-place numbers in 2.5..11.0 for FAT
+      let snfIdx = converted.findIndex(
+        (c) => c.asSnf >= 7.0 && c.asSnf <= 10.5 && isOneDecimal(c.asSnf)
+      );
+      if (snfIdx === -1) {
+        snfIdx = converted.findIndex((c) => c.asSnf >= 7.0 && c.asSnf <= 10.5);
+      }
+
+      let fatIdx = converted.findIndex(
+        (c, idx) =>
+          idx !== snfIdx && c.asFat >= 2.5 && c.asFat <= 11.0 && isOneDecimal(c.asFat)
+      );
+      if (fatIdx === -1) {
+        fatIdx = converted.findIndex(
+          (c, idx) => idx !== snfIdx && c.asFat >= 2.5 && c.asFat <= 11.0
+        );
+      }
+
+      if (snfIdx === -1) snfIdx = 1;
+      if (fatIdx === -1) fatIdx = 0;
+
+      const litIdx = converted.findIndex((_, idx) => idx !== snfIdx && idx !== fatIdx);
+      if (litIdx !== -1) {
+        const fat = converted[fatIdx].asFat;
+        const snf = converted[snfIdx].asSnf;
+        const liters = converted[litIdx].asLiters;
+        const remainingIdx = converted.findIndex(
+          (_, idx) => idx !== snfIdx && idx !== fatIdx && idx !== litIdx
+        );
+        const rate =
+          remainingIdx !== -1 && converted[remainingIdx].raw >= 15
+            ? round2(converted[remainingIdx].raw)
+            : undefined;
+
+        if (fat > 0 && snf > 0 && liters > 0) {
+          results.push({
+            farmerCode,
+            farmerName: textWords.join(' ').trim() || undefined,
+            liters,
+            fat,
+            snf,
+            rate,
+          });
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Matches scanned slip rows to registered farmers, looks up rate chart (or fallback rate),
+ * truncates totalAmount to a whole integer (e.g., 253.85 -> 253), and builds MilkCollectionEntry items.
+ */
+export function buildCollectionEntriesFromScannedSlip(
+  scannedRows: ScannedSlipRawRow[],
+  farmers: Farmer[],
+  rateCharts: { cow: RateChartMatrix | null; buffalo: RateChartMatrix | null },
+  date: string,
+  shift: ShiftType,
+  fallbackFarmerId?: string
+): {
+  entries: MilkCollectionEntry[];
+  savedEntries: MilkCollectionEntry[];
+  warningsHi: string[];
+  errors: string[];
+} {
+  const savedEntries: MilkCollectionEntry[] = [];
+  const errors: string[] = [];
+  const activeFarmers = farmers.filter((f) => f.active);
+
+  for (let i = 0; i < scannedRows.length; i++) {
+    const row = scannedRows[i];
+    const fat = row.fat >= 25 && row.fat <= 99 && Number.isInteger(row.fat) ? round2(row.fat / 10) : round2(row.fat);
+    const snf = row.snf >= 70 && row.snf <= 105 && Number.isInteger(row.snf) ? round2(row.snf / 10) : round2(row.snf);
+    const liters =
+      row.liters >= 1000 && row.liters <= 9999 && Number.isInteger(row.liters)
+        ? round3(row.liters / 1000)
+        : round3(row.liters);
+
+    if (!Number.isFinite(fat) || fat <= 0 || !Number.isFinite(snf) || snf <= 0 || !Number.isFinite(liters) || liters <= 0) {
+      errors.push(`पंक्ति ${i + 1}: अमान्य FAT (${row.fat}), SNF (${row.snf}) या मात्रा (${row.liters})`);
+      continue;
+    }
+
+    // Match Farmer:
+    // 1. Exact farmer code match
+    // 2. Farmer name match
+    // 3. Fallback selected farmer in form
+    // 4. First active farmer if only 1 farmer exists
+    let matchedFarmer: Farmer | undefined;
+    if (row.farmerCode) {
+      const cleanCode = row.farmerCode.trim().toLowerCase();
+      matchedFarmer = farmers.find(
+        (f) =>
+          f.code.toLowerCase() === cleanCode ||
+          f.code.replace(/^0+/, '').toLowerCase() === cleanCode.replace(/^0+/, '')
+      );
+    }
+    if (!matchedFarmer && row.farmerName) {
+      const cleanName = row.farmerName.trim().toLowerCase();
+      matchedFarmer = farmers.find(
+        (f) =>
+          f.name.toLowerCase().includes(cleanName) ||
+          cleanName.includes(f.name.toLowerCase())
+      );
+    }
+    if (!matchedFarmer && fallbackFarmerId) {
+      matchedFarmer = farmers.find((f) => f.id === fallbackFarmerId);
+    }
+    if (!matchedFarmer && activeFarmers.length > 0) {
+      matchedFarmer = activeFarmers[0];
+    }
+
+    if (!matchedFarmer) {
+      errors.push(`पंक्ति ${i + 1}: कोई पंजीकृत किसान नहीं मिला। कृपया पहले किसान जोड़ें या चुनें।`);
+      continue;
+    }
+
+    const milkType = classifyMilkType(fat);
+    const chart = rateCharts[milkType];
+    const lookup = lookupRateFromChart(chart, fat, snf);
+
+    const rate =
+      lookup.found && lookup.rate !== null
+        ? lookup.rate
+        : row.rate && Number.isFinite(row.rate) && row.rate > 0
+        ? round2(row.rate)
+        : null;
+
+    if (rate === null) {
+      errors.push(
+        `पंक्ति ${i + 1} (${matchedFarmer.code} - ${matchedFarmer.name}): FAT ${fat} / SNF ${snf} का रेट चार्ट में रेट नहीं मिला।`
+      );
+      continue;
+    }
+
+    // Whole-integer truncation for farmer milk purchase: 253.85 -> 253
+    const totalAmount = truncatePurchaseAmount(liters * rate);
+    const now = new Date();
+    const timeStr = now.toTimeString().slice(0, 8);
+
+    savedEntries.push({
+      id: `col_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
+      date,
+      time: timeStr,
+      shift,
+      farmerId: matchedFarmer.id,
+      farmerName: matchedFarmer.name,
+      farmerCode: matchedFarmer.code,
+      milkType,
+      liters,
+      fat,
+      snf,
+      rate,
+      totalAmount,
+      deduction: 0,
+      netPayable: totalAmount,
+      notes: 'फोटो/कैमरा से ऑटो-सेव',
+      createdAt: now.toISOString(),
+    });
+  }
+
+  return {
+    entries: savedEntries,
+    savedEntries,
+    warningsHi: errors,
+    errors,
+  };
+}
+
+// ============================================================================
+// 10-Day Wholesale Milk Sale Billing System ("बिक्री का 10-दिन का बिल")
+// All wholesale sale rates, shift totals, and 10-day bill totals retain exact
+// 2-decimal precision (round2) as required.
+// ============================================================================
+
+export interface TenDaySaleDayRow {
+  date: string;
+  morningLiters: number;
+  morningFat: number | null;
+  morningSnf: number | null;
+  morningRate: number | null;
+  morningAmount: number;
+  eveningLiters: number;
+  eveningFat: number | null;
+  eveningSnf: number | null;
+  eveningRate: number | null;
+  eveningAmount: number;
+  totalLiters: number;
+  totalAmount: number;
+  avgFat: number | null;
+  avgSnf: number | null;
+}
+
+export interface TenDaySaleBillReport {
+  billNumber: string;
+  fromDate: string;
+  toDate: string;
+  cycle: 1 | 2 | 3 | 'custom';
+  yearMonth: string;
+  buyerFilter: string;
+  buyerLabelHi: string;
+  buyerLabelEn: string;
+  customerCode?: string;
+  customerMobile?: string;
+  morningSummary: SaleSummary;
+  eveningSummary: SaleSummary;
+  totalSummary: SaleSummary;
+  dayWiseRows: TenDaySaleDayRow[];
+  entries: WholesaleSaleEntry[];
+  whatsAppMessageHi: string;
+  whatsAppMessageEn: string;
+}
+
+export function generateTenDaySaleBillData(
+  sales: WholesaleSaleEntry[],
+  customers: Customer[],
+  options: {
+    customerFilter?: string; // 'all' | customer.id | 'buyer:Name'
+    yearMonth: string; // YYYY-MM
+    cycle: 1 | 2 | 3 | 'custom';
+    customFromDate?: string;
+    customToDate?: string;
+    dairyName?: string;
+  }
+): TenDaySaleBillReport {
+  const {
+    customerFilter = 'all',
+    yearMonth,
+    cycle,
+    customFromDate,
+    customToDate,
+    dairyName = 'Ujalaa Dairy',
+  } = options;
+
+  let fromDate = customFromDate || `${yearMonth}-01`;
+  let toDate = customToDate || `${yearMonth}-10`;
+
+  if (cycle !== 'custom') {
+    const range = getTenDayCycleDates(yearMonth, cycle);
+    fromDate = range.fromDate;
+    toDate = range.toDate;
+  }
+
+  // Resolve buyer / customer filter
+  let buyerLabelHi = 'सभी ग्राहक (All Buyers)';
+  let buyerLabelEn = 'All Buyers / Customers';
+  let customerCode: string | undefined;
+  let customerMobile: string | undefined;
+
+  const matchedCustomer =
+    customerFilter && customerFilter !== 'all' && !customerFilter.startsWith('buyer:')
+      ? customers.find((c) => c.id === customerFilter)
+      : undefined;
+
+  const matchedBuyerName =
+    customerFilter && customerFilter.startsWith('buyer:')
+      ? customerFilter.slice('buyer:'.length).trim()
+      : undefined;
+
+  if (matchedCustomer) {
+    buyerLabelHi = `${matchedCustomer.code} — ${matchedCustomer.name}`;
+    buyerLabelEn = `${matchedCustomer.code} — ${matchedCustomer.name}`;
+    customerCode = matchedCustomer.code;
+    customerMobile = matchedCustomer.mobile || '';
+  } else if (matchedBuyerName) {
+    buyerLabelHi = matchedBuyerName;
+    buyerLabelEn = matchedBuyerName;
+  }
+
+  // Filter sales in date range and matching customer/buyer
+  const periodSales = (sales || [])
+    .filter((s) => {
+      if (s.date < fromDate || s.date > toDate) return false;
+      if (!customerFilter || customerFilter === 'all') return true;
+      if (matchedCustomer) {
+        return (
+          s.customerId === matchedCustomer.id ||
+          s.buyerName.trim().toLowerCase() === matchedCustomer.name.trim().toLowerCase()
+        );
+      }
+      if (matchedBuyerName) {
+        return s.buyerName.trim().toLowerCase() === matchedBuyerName.toLowerCase();
+      }
+      return true;
+    })
+    .sort((a, b) => a.date.localeCompare(b.date) || a.shift.localeCompare(b.shift));
+
+  const morningEntries = periodSales.filter((s) => s.shift === 'morning');
+  const eveningEntries = periodSales.filter((s) => s.shift === 'evening');
+
+  const morningSummary = calculateSaleSummary(morningEntries);
+  const eveningSummary = calculateSaleSummary(eveningEntries);
+  const totalSummary = calculateSaleSummary(periodSales);
+
+  // Build day-wise rows
+  const uniqueDates = Array.from(new Set(periodSales.map((s) => s.date))).sort();
+  const dayWiseRows: TenDaySaleDayRow[] = uniqueDates.map((dt) => {
+    const dtAll = periodSales.filter((s) => s.date === dt);
+    const mSum = calculateSaleSummary(dtAll.filter((s) => s.shift === 'morning'));
+    const eSum = calculateSaleSummary(dtAll.filter((s) => s.shift === 'evening'));
+    const tSum = calculateSaleSummary(dtAll);
+    return {
+      date: dt,
+      morningLiters: mSum.totalLiters,
+      morningFat: mSum.avgFat,
+      morningSnf: mSum.avgSnf,
+      morningRate: mSum.avgRate,
+      morningAmount: mSum.totalNetReceivable,
+      eveningLiters: eSum.totalLiters,
+      eveningFat: eSum.avgFat,
+      eveningSnf: eSum.avgSnf,
+      eveningRate: eSum.avgRate,
+      eveningAmount: eSum.totalNetReceivable,
+      totalLiters: tSum.totalLiters,
+      totalAmount: tSum.totalNetReceivable,
+      avgFat: tSum.avgFat,
+      avgSnf: tSum.avgSnf,
+    };
+  });
+
+  const cycleSuffix = cycle === 'custom' ? 'CUSTOM' : `C${cycle}`;
+  const codeSuffix = customerCode || (matchedBuyerName ? matchedBuyerName.slice(0, 4).toUpperCase() : 'ALL');
+  const billNumber = `SB-${yearMonth.replace('-', '')}-${cycleSuffix}-${codeSuffix}`;
+
+  const whatsAppMessageHi = [
+    `*${dairyName} — 10-दिन का दूध बिक्री बिल*`,
+    `बिल नं: ${billNumber}`,
+    `ग्राहक: *${buyerLabelHi}*`,
+    `अवधि: ${fromDate} से ${toDate}`,
+    `------------------------`,
+    `सुबह की बिक्री: ${morningSummary.totalLiters.toFixed(3)} L (₹${morningSummary.totalNetReceivable.toFixed(2)})`,
+    `शाम की बिक्री: ${eveningSummary.totalLiters.toFixed(3)} L (₹${eveningSummary.totalNetReceivable.toFixed(2)})`,
+    `------------------------`,
+    `*कुल दूध मात्रा:* ${totalSummary.totalLiters.toFixed(3)} L`,
+    `औसत FAT / SNF: ${totalSummary.avgFat !== null ? totalSummary.avgFat.toFixed(2) : '—'} / ${totalSummary.avgSnf !== null ? totalSummary.avgSnf.toFixed(2) : '—'}`,
+    `औसत दर (Rate/L): ${totalSummary.avgRate !== null ? `₹${totalSummary.avgRate.toFixed(2)}` : '—'}`,
+    totalSummary.totalCharges > 0 ? `अन्य शुल्क/छूट: ₹${totalSummary.totalCharges.toFixed(2)}` : null,
+    `*कुल देय बिक्री बिल राशि: ₹${totalSummary.totalNetReceivable.toFixed(2)}*`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const whatsAppMessageEn = [
+    `*${dairyName} — 10-Day Milk Sale Bill*`,
+    `Bill No: ${billNumber}`,
+    `Customer: *${buyerLabelEn}*`,
+    `Period: ${fromDate} to ${toDate}`,
+    `------------------------`,
+    `Morning Sale: ${morningSummary.totalLiters.toFixed(3)} L (₹${morningSummary.totalNetReceivable.toFixed(2)})`,
+    `Evening Sale: ${eveningSummary.totalLiters.toFixed(3)} L (₹${eveningSummary.totalNetReceivable.toFixed(2)})`,
+    `------------------------`,
+    `*Total Milk Sold:* ${totalSummary.totalLiters.toFixed(3)} L`,
+    `Avg FAT / SNF: ${totalSummary.avgFat !== null ? totalSummary.avgFat.toFixed(2) : '—'} / ${totalSummary.avgSnf !== null ? totalSummary.avgSnf.toFixed(2) : '—'}`,
+    `Avg Rate/L: ${totalSummary.avgRate !== null ? `₹${totalSummary.avgRate.toFixed(2)}` : '—'}`,
+    totalSummary.totalCharges > 0 ? `Other Charges: ₹${totalSummary.totalCharges.toFixed(2)}` : null,
+    `*Total Net Sale Bill Amount: ₹${totalSummary.totalNetReceivable.toFixed(2)}*`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return {
+    billNumber,
+    fromDate,
+    toDate,
+    cycle,
+    yearMonth,
+    buyerFilter: customerFilter,
+    buyerLabelHi,
+    buyerLabelEn,
+    customerCode,
+    customerMobile,
+    morningSummary,
+    eveningSummary,
+    totalSummary,
+    dayWiseRows,
+    entries: periodSales,
+    whatsAppMessageHi,
+    whatsAppMessageEn,
+  };
+}
+
+

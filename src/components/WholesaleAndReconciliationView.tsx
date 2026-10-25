@@ -4,6 +4,7 @@ import {
   Calendar,
   CheckCircle2,
   Edit2,
+  FileText,
   Info,
   MessageSquare,
   Moon,
@@ -37,11 +38,14 @@ import {
   formatAutoDecimalFatSnf,
   formatCurrency,
   formatNumber,
+  formatWholeCurrency,
+  generateTenDaySaleBillData,
+  getTenDayCycleDates,
   lookupRateFromChart,
   round2,
   round3,
 } from '../utils/dairyCalculations';
-import { ConfirmDialog } from './Modals';
+import { ConfirmDialog, WhatsAppPreviewModal } from './Modals';
 
 interface WholesaleAndReconciliationViewProps {
   state: DairyAppState;
@@ -68,8 +72,26 @@ export const WholesaleAndReconciliationView: React.FC<
   const date = state.selectedDate;
   const shift = state.selectedShift;
 
-  // Active Sub-view: sale_entry (दूध बिक्री) | customers (ग्राहक सूची) | reconciliation (आवक-जावक मिलान)
-  const [activeSubView, setActiveSubView] = useState<'sale_entry' | 'customers' | 'reconciliation'>('sale_entry');
+  // Active Sub-view: sale_entry (दूध बिक्री) | sale_10day_bill (बिक्री का 10-दिन का बिल) | customers (ग्राहक सूची) | reconciliation (आवक-जावक मिलान)
+  const [activeSubView, setActiveSubView] = useState<
+    'sale_entry' | 'sale_10day_bill' | 'customers' | 'reconciliation'
+  >('sale_entry');
+
+  // 10-Day Wholesale Sale Bill State
+  const defaultDayNum = Number(date.slice(8, 10)) || 1;
+  const defaultCycle: 1 | 2 | 3 = defaultDayNum <= 10 ? 1 : defaultDayNum <= 20 ? 2 : 3;
+  const [saleBillCustomerFilter, setSaleBillCustomerFilter] = useState<string>('all');
+  const [saleBillYearMonth, setSaleBillYearMonth] = useState<string>(date.slice(0, 7));
+  const [saleBillCycle, setSaleBillCycle] = useState<1 | 2 | 3 | 'custom'>(defaultCycle);
+  const defaultCycleRange = getTenDayCycleDates(date.slice(0, 7), defaultCycle);
+  const [saleBillCustomFrom, setSaleBillCustomFrom] = useState<string>(defaultCycleRange.fromDate);
+  const [saleBillCustomTo, setSaleBillCustomTo] = useState<string>(defaultCycleRange.toDate);
+  const [saleBillTableView, setSaleBillTableView] = useState<'day_wise' | 'all_entries'>('day_wise');
+  const [saleWaModal, setSaleWaModal] = useState<{ open: boolean; phone: string; message: string }>({
+    open: false,
+    phone: '',
+    message: '',
+  });
 
   // Sale Form State
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -425,8 +447,9 @@ export const WholesaleAndReconciliationView: React.FC<
     <div className="space-y-3 sm:space-y-5">
       {/* Top Navigation Tabs inside Milk Sales: 
           1. दूध बिक्री एंट्री (Sale Entry)
-          2. ग्राहक सूची (Customer List)
-          3. आवक-जावक मिलान (Reconciliation) */}
+          2. बिक्री का 10-दिन का बिल (10-Day Sale Bill)
+          3. ग्राहक सूची (Customer List)
+          4. आवक-जावक मिलान (Reconciliation) */}
       <div className="bg-white border border-slate-200 rounded-2xl p-2 flex flex-wrap items-center justify-between gap-2 no-print">
         <div className="flex flex-wrap items-center gap-1.5">
           <button
@@ -440,6 +463,28 @@ export const WholesaleAndReconciliationView: React.FC<
           >
             <Truck className="w-4 h-4" />
             {lang === 'hi' ? 'दूध बिक्री एंट्री (Milk Sale)' : 'Milk Sale Entry'}
+          </button>
+
+          <button
+            type="button"
+            data-testid="tab-sale-10day-bill"
+            onClick={() => {
+              const dy = Number(date.slice(8, 10)) || 1;
+              const cyc: 1 | 2 | 3 = dy <= 10 ? 1 : dy <= 20 ? 2 : 3;
+              setSaleBillYearMonth(date.slice(0, 7));
+              if (saleBillCycle !== 'custom') {
+                setSaleBillCycle(cyc);
+              }
+              setActiveSubView('sale_10day_bill');
+            }}
+            className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors ${
+              activeSubView === 'sale_10day_bill'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100'
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            {lang === 'hi' ? 'बिक्री का 10-दिन का बिल (10-Day Sale Bill)' : '10-Day Sale Bill'}
           </button>
 
           <button
@@ -715,8 +760,8 @@ export const WholesaleAndReconciliationView: React.FC<
                 </div>
               </div>
 
-              {/* FAT + SNF + Quantity + Rate/L: ALL IN ONE ROW (Mobile friendly, never hidden by keyboard) */}
-              <div className="grid grid-cols-4 gap-1.5">
+              {/* FAT + SNF + Quantity + Rate/L + Total Amount: ALL IN ONE ROW (Rate & Total Amount right together with decimals!) */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
                 <div>
                   <label htmlFor="sale-fat" className="block text-[10px] font-bold text-slate-700 mb-0.5">
                     {lang === 'hi' ? '1. FAT' : '1. FAT'}
@@ -770,10 +815,10 @@ export const WholesaleAndReconciliationView: React.FC<
                   <label htmlFor="sale-rate" className="block text-[10px] font-bold text-slate-700 mb-0.5">
                     {isManualRate
                       ? lang === 'hi'
-                        ? '4. Manual दर'
+                        ? '4. Manual दर (₹/L)'
                         : '4. Manual Rate'
                       : lang === 'hi'
-                      ? '4. चार्ट दर (₹)'
+                      ? '4. चार्ट दर (₹/L)'
                       : '4. Chart Rate'}
                   </label>
                   {isManualRate ? (
@@ -789,29 +834,67 @@ export const WholesaleAndReconciliationView: React.FC<
                       className="w-full h-10 px-2 py-1 text-sm font-bold font-mono text-center border-2 border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600 focus:border-amber-600 tabular-nums"
                     />
                   ) : (
-                    <div className="w-full h-10 px-1 py-1 text-xs font-bold font-mono bg-blue-50 border-2 border-blue-300 rounded-lg flex items-center justify-center tabular-nums text-blue-900">
+                    <div
+                      data-testid="sale-form-rate-box"
+                      className="w-full h-10 px-1 py-1 text-xs sm:text-sm font-bold font-mono bg-blue-50 border-2 border-blue-300 rounded-lg flex items-center justify-center tabular-nums text-blue-900"
+                    >
                       {liveRate !== null ? `₹${liveRate.toFixed(2)}` : 'चार्ट से'}
                     </div>
                   )}
                 </div>
+
+                {/* 5. Total Amount box right alongside Rate in the form (with decimals) */}
+                <div className="col-span-2 sm:col-span-1">
+                  <label className="block text-[10px] font-bold text-emerald-800 mb-0.5">
+                    {lang === 'hi' ? '5. कुल अमाउंट (Total ₹)' : '5. Total Amount (₹)'}
+                  </label>
+                  <div
+                    data-testid="sale-form-total-amount-box"
+                    className="w-full h-10 px-2 py-1 text-xs sm:text-sm font-extrabold font-mono bg-emerald-50 border-2 border-emerald-400 rounded-lg flex items-center justify-center tabular-nums text-emerald-900"
+                  >
+                    {liveNetReceivable !== null ? `₹${liveNetReceivable.toFixed(2)}` : '₹0.00'}
+                  </div>
+                </div>
               </div>
 
-              {/* Action Buttons & Optional Extra Fields */}
+              {/* Action Buttons + Rate & Total Amount Inline Summary Pill */}
               <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setShowExtraSaleFields((prev) => !prev)}
-                  className="text-[11px] font-semibold text-slate-600 hover:text-blue-600 flex items-center gap-1"
-                >
-                  <Settings2 className="w-3 h-3" />
-                  {showExtraSaleFields
-                    ? lang === 'hi'
-                      ? 'अतिरिक्त विवरण छुपाएँ'
-                      : 'Hide Details'
-                    : lang === 'hi'
-                    ? '+ छूट/अन्य शुल्क व नोट'
-                    : '+ Charges & Note'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Inline Rate + Total Amount Pill right next to action bar */}
+                  <div
+                    data-testid="sale-rate-and-total-inline"
+                    className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1 text-xs tabular-nums"
+                  >
+                    <span>
+                      {lang === 'hi' ? 'दर (Rate):' : 'Rate:'}{' '}
+                      <strong className="text-blue-900 font-bold">
+                        {liveRate !== null ? formatCurrency(liveRate) : '—'}
+                      </strong>
+                    </span>
+                    <span className="text-emerald-300">|</span>
+                    <span>
+                      {lang === 'hi' ? 'टोटल अमाउंट:' : 'Total:'}{' '}
+                      <strong className="text-emerald-800 font-extrabold text-xs sm:text-sm">
+                        {liveNetReceivable !== null ? formatCurrency(liveNetReceivable) : '₹0.00'}
+                      </strong>
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowExtraSaleFields((prev) => !prev)}
+                    className="text-[11px] font-semibold text-slate-600 hover:text-blue-600 flex items-center gap-1"
+                  >
+                    <Settings2 className="w-3 h-3" />
+                    {showExtraSaleFields
+                      ? lang === 'hi'
+                        ? 'अतिरिक्त विवरण छुपाएँ'
+                        : 'Hide Details'
+                      : lang === 'hi'
+                      ? '+ छूट/अन्य शुल्क व नोट'
+                      : '+ Charges & Note'}
+                  </button>
+                </div>
 
                 <div className="flex items-center gap-1.5">
                   {editingId && (
@@ -893,11 +976,25 @@ export const WholesaleAndReconciliationView: React.FC<
                 </h3>
               </div>
 
-              <div className="flex items-center gap-2 text-xs font-semibold">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
                 <span className="text-slate-600">कुल बिक्री:</span>
                 <strong className="text-blue-900 font-bold">{formatNumber(saleSummary.totalLiters, 3)} L</strong>
                 <span className="text-slate-300">|</span>
                 <strong className="text-emerald-700 font-bold">{formatCurrency(saleSummary.totalNetReceivable)}</strong>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dy = Number(date.slice(8, 10)) || 1;
+                    const cyc: 1 | 2 | 3 = dy <= 10 ? 1 : dy <= 20 ? 2 : 3;
+                    setSaleBillYearMonth(date.slice(0, 7));
+                    setSaleBillCycle(cyc);
+                    setActiveSubView('sale_10day_bill');
+                  }}
+                  className="ml-1 px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[11px] font-bold flex items-center gap-1"
+                >
+                  <FileText className="w-3 h-3" />
+                  {lang === 'hi' ? '10-दिन का बिक्री बिल' : '10-Day Sale Bill'}
+                </button>
               </div>
             </div>
 
@@ -1032,6 +1129,562 @@ export const WholesaleAndReconciliationView: React.FC<
       )}
 
       {/* ========================================================================
+          SUBVIEW 1B: 10-DAY WHOLESALE MILK SALE BILL (बिक्री का 10-दिन का बिल)
+         ======================================================================== */}
+      {activeSubView === 'sale_10day_bill' &&
+        (() => {
+          // Collect any distinct buyer names not yet in customers list so they can also be filtered
+          const registeredNamesLower = new Set(customers.map((c) => c.name.trim().toLowerCase()));
+          const extraBuyerNames = Array.from(
+            new Set(
+              state.sales
+                .map((s) => s.buyerName.trim())
+                .filter((name) => name && !registeredNamesLower.has(name.toLowerCase()))
+            )
+          );
+
+          const saleBill = generateTenDaySaleBillData(state.sales, customers, {
+            customerFilter: saleBillCustomerFilter,
+            yearMonth: saleBillYearMonth,
+            cycle: saleBillCycle,
+            customFromDate: saleBillCustomFrom,
+            customToDate: saleBillCustomTo,
+            dairyName: state.dairyName || 'Ujalaa Dairy',
+          });
+
+          return (
+            <div data-testid="sale-10day-bill-section" className="space-y-4 sm:space-y-5">
+              {/* Filter & Cycle Controls Card */}
+              <div className="bg-white border-2 border-blue-200 rounded-2xl p-4 sm:p-5 space-y-4 no-print">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-900">
+                      {lang === 'hi'
+                        ? 'बिक्री का 10-दिन का बिलिंग सिस्टम (10-Day Milk Sale Bill)'
+                        : '10-Day Wholesale Milk Sale Billing'}
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      {lang === 'hi'
+                        ? 'चक्र 1: 1 से 10 तारीख · चक्र 2: 11 से 20 तारीख · चक्र 3: 21 से माह अंत तक (सभी बिक्री नंबर प्वाइंट/दशमलव के साथ)'
+                        : 'Cycle 1: 1–10 · Cycle 2: 11–20 · Cycle 3: 21–End of Month (Exact decimal amounts)'}
+                    </p>
+                  </div>
+
+                  {/* Quick Cycle Pill Buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[
+                      { id: 1 as const, hi: '1 से 10 तारीख', en: '1st – 10th' },
+                      { id: 2 as const, hi: '11 से 20 तारीख', en: '11th – 20th' },
+                      { id: 3 as const, hi: '21 से माह अंत', en: '21st – End' },
+                      { id: 'custom' as const, hi: 'कस्टम तारीख', en: 'Custom Range' },
+                    ].map((cycBtn) => (
+                      <button
+                        key={String(cycBtn.id)}
+                        type="button"
+                        data-testid={`sale-bill-cycle-btn-${cycBtn.id}`}
+                        onClick={() => setSaleBillCycle(cycBtn.id)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors ${
+                          saleBillCycle === cycBtn.id
+                            ? 'bg-blue-600 text-white shadow-xs'
+                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        {lang === 'hi' ? cycBtn.hi : cycBtn.en}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+                  <div>
+                    <label
+                      htmlFor="sale-bill-customer-select"
+                      className="block text-xs font-bold text-slate-700 mb-1"
+                    >
+                      {lang === 'hi' ? 'ग्राहक / खरीदार चुनें' : 'Select Customer / Buyer'}
+                    </label>
+                    <select
+                      id="sale-bill-customer-select"
+                      data-testid="sale-bill-customer-select"
+                      value={saleBillCustomerFilter}
+                      onChange={(e) => setSaleBillCustomerFilter(e.target.value)}
+                      className="w-full min-h-[42px] px-3 py-2 text-xs sm:text-sm font-semibold bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    >
+                      <option value="all">
+                        {lang === 'hi' ? 'सभी ग्राहक (All Buyers)' : 'All Customers / Buyers'}
+                      </option>
+                      {customers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.code} — {c.name} {c.mobile ? `(${c.mobile})` : ''}
+                        </option>
+                      ))}
+                      {extraBuyerNames.map((bName) => (
+                        <option key={`buyer:${bName}`} value={`buyer:${bName}`}>
+                          {bName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="sale-bill-month"
+                      className="block text-xs font-bold text-slate-700 mb-1"
+                    >
+                      {lang === 'hi' ? 'महीना और वर्ष' : 'Month & Year'}
+                    </label>
+                    <input
+                      id="sale-bill-month"
+                      data-testid="sale-bill-month-input"
+                      type="month"
+                      value={saleBillYearMonth}
+                      onChange={(e) => setSaleBillYearMonth(e.target.value)}
+                      className="w-full min-h-[42px] px-3 py-2 text-xs sm:text-sm font-bold border border-slate-300 rounded-xl tabular-nums"
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="sale-bill-cycle-select"
+                      className="block text-xs font-bold text-slate-700 mb-1"
+                    >
+                      {lang === 'hi' ? '10-दिन का चक्र चुनें' : '10-Day Cycle'}
+                    </label>
+                    <select
+                      id="sale-bill-cycle-select"
+                      data-testid="sale-bill-cycle-select"
+                      value={String(saleBillCycle)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSaleBillCycle(val === 'custom' ? 'custom' : (Number(val) as 1 | 2 | 3));
+                      }}
+                      className="w-full min-h-[42px] px-3 py-2 text-xs sm:text-sm font-semibold bg-white border border-slate-300 rounded-xl"
+                    >
+                      <option value="1">
+                        {lang === 'hi' ? 'चक्र 1: 1 से 10 तारीख' : 'Cycle 1: 1st to 10th'}
+                      </option>
+                      <option value="2">
+                        {lang === 'hi' ? 'चक्र 2: 11 से 20 तारीख' : 'Cycle 2: 11th to 20th'}
+                      </option>
+                      <option value="3">
+                        {lang === 'hi'
+                          ? 'चक्र 3: 21 से महीने के अंत तक'
+                          : 'Cycle 3: 21st to End of Month'}
+                      </option>
+                      <option value="custom">
+                        {lang === 'hi' ? 'कस्टम तारीख रेंज' : 'Custom Date Range'}
+                      </option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => window.print()}
+                        className="flex-1 min-h-[42px] px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-xs"
+                      >
+                        <Printer className="w-4 h-4" />
+                        {lang === 'hi' ? 'प्रिंट / PDF' : 'Print / PDF'}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="sale-bill-whatsapp-btn"
+                        onClick={() =>
+                          setSaleWaModal({
+                            open: true,
+                            phone: saleBill.customerMobile || '',
+                            message:
+                              lang === 'hi' ? saleBill.whatsAppMessageHi : saleBill.whatsAppMessageEn,
+                          })
+                        }
+                        className="flex-1 min-h-[42px] px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-xs"
+                      >
+                        <MessageSquare className="w-4 h-4" />
+                        WhatsApp
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {saleBillCycle === 'custom' && (
+                  <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        {lang === 'hi' ? 'तारीख से (From Date)' : 'From Date'}
+                      </label>
+                      <input
+                        type="date"
+                        value={saleBillCustomFrom}
+                        onChange={(e) => setSaleBillCustomFrom(e.target.value)}
+                        className="w-full min-h-[40px] px-3 py-1.5 text-xs font-bold border border-slate-300 rounded-xl tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        {lang === 'hi' ? 'तारीख तक (To Date)' : 'To Date'}
+                      </label>
+                      <input
+                        type="date"
+                        value={saleBillCustomTo}
+                        onChange={(e) => setSaleBillCustomTo(e.target.value)}
+                        className="w-full min-h-[40px] px-3 py-1.5 text-xs font-bold border border-slate-300 rounded-xl tabular-nums"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Printable 10-Day Wholesale Sale Bill Output Card */}
+              <div
+                data-testid="sale-10day-bill-card"
+                className="bg-white border-2 border-blue-300 rounded-2xl p-4 sm:p-6 space-y-4 shadow-xs"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 pb-4 gap-3">
+                  <div>
+                    <span className="inline-block px-2.5 py-0.5 rounded-md bg-blue-50 text-blue-800 text-[11px] font-bold mb-1">
+                      {lang === 'hi' ? 'थोक दूध बिक्री — 10-दिन का बिल' : 'Wholesale Milk Sale — 10-Day Bill'}
+                    </span>
+                    <h3 className="text-lg sm:text-xl font-extrabold text-blue-950">
+                      {state.dairyName || 'Ujalaa Dairy'} —{' '}
+                      {lang === 'hi' ? '10-दिन का दूध बिक्री बिल' : '10-Day Milk Sale Bill'}
+                    </h3>
+                    <p className="text-xs text-slate-600 mt-0.5 tabular-nums">
+                      बिल नं: <strong>{saleBill.billNumber}</strong> · अवधि:{' '}
+                      <strong>
+                        {saleBill.fromDate} से {saleBill.toDate}
+                      </strong>
+                    </p>
+                    <p className="text-sm font-bold text-slate-900 mt-1">
+                      {lang === 'hi' ? 'ग्राहक / खरीदार:' : 'Customer / Buyer:'}{' '}
+                      <span className="text-blue-800">
+                        {lang === 'hi' ? saleBill.buyerLabelHi : saleBill.buyerLabelEn}
+                      </span>
+                      {saleBill.customerMobile ? ` (${saleBill.customerMobile})` : ''}
+                    </p>
+                  </div>
+
+                  {/* Table View Switcher (Date-wise Morning/Evening vs Individual Entries) */}
+                  <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl no-print self-start sm:self-center">
+                    <button
+                      type="button"
+                      onClick={() => setSaleBillTableView('day_wise')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                        saleBillTableView === 'day_wise'
+                          ? 'bg-white text-blue-700 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {lang === 'hi' ? 'तारीख-वार (सुबह/शाम)' : 'Date-wise (AM/PM)'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSaleBillTableView('all_entries')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                        saleBillTableView === 'all_entries'
+                          ? 'bg-white text-blue-700 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {lang === 'hi'
+                        ? `सभी एंट्री (${saleBill.entries.length})`
+                        : `All Entries (${saleBill.entries.length})`}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 4 Summary Cards (Morning, Evening, Total Liters & Avg FAT/SNF, Final Net Receivable with Decimals) */}
+                <div
+                  data-testid="sale-10day-summary-cards"
+                  className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs tabular-nums"
+                >
+                  <div className="p-3.5 bg-amber-50/70 rounded-xl border border-amber-200">
+                    <span className="text-amber-900 font-bold block">
+                      {lang === 'hi' ? '1. सुबह की बिक्री (Morning)' : '1. Morning Sale'}
+                    </span>
+                    <span className="text-base font-extrabold text-slate-900 mt-1 block">
+                      {formatNumber(saleBill.morningSummary.totalLiters, 3)} L
+                    </span>
+                    <div className="mt-1 flex items-center justify-between text-[11px] text-slate-600">
+                      <span>
+                        FAT/SNF: {formatNumber(saleBill.morningSummary.avgFat)}/
+                        {formatNumber(saleBill.morningSummary.avgSnf)}
+                      </span>
+                      <strong className="text-amber-950 font-bold">
+                        {formatCurrency(saleBill.morningSummary.totalNetReceivable)}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 bg-indigo-50/70 rounded-xl border border-indigo-200">
+                    <span className="text-indigo-900 font-bold block">
+                      {lang === 'hi' ? '2. शाम की बिक्री (Evening)' : '2. Evening Sale'}
+                    </span>
+                    <span className="text-base font-extrabold text-slate-900 mt-1 block">
+                      {formatNumber(saleBill.eveningSummary.totalLiters, 3)} L
+                    </span>
+                    <div className="mt-1 flex items-center justify-between text-[11px] text-slate-600">
+                      <span>
+                        FAT/SNF: {formatNumber(saleBill.eveningSummary.avgFat)}/
+                        {formatNumber(saleBill.eveningSummary.avgSnf)}
+                      </span>
+                      <strong className="text-indigo-950 font-bold">
+                        {formatCurrency(saleBill.eveningSummary.totalNetReceivable)}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 bg-blue-50/80 rounded-xl border border-blue-200">
+                    <span className="text-blue-900 font-bold block">
+                      {lang === 'hi' ? '3. कुल बेचा दूध एवं औसत' : '3. Total Liters & Avg'}
+                    </span>
+                    <span
+                      data-testid="sale-10day-total-liters"
+                      className="text-base font-extrabold text-blue-950 mt-1 block"
+                    >
+                      {formatNumber(saleBill.totalSummary.totalLiters, 3)} L
+                    </span>
+                    <div className="mt-1 flex items-center justify-between text-[11px] text-blue-800">
+                      <span>
+                        FAT/SNF: {formatNumber(saleBill.totalSummary.avgFat)}/
+                        {formatNumber(saleBill.totalSummary.avgSnf)}
+                      </span>
+                      <strong>
+                        दर:{' '}
+                        {saleBill.totalSummary.avgRate !== null
+                          ? formatCurrency(saleBill.totalSummary.avgRate)
+                          : '—'}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 bg-emerald-50 rounded-xl border-2 border-emerald-400">
+                    <span className="text-emerald-900 font-bold block">
+                      {lang === 'hi'
+                        ? '4. 10-दिन की कुल बिक्री राशि'
+                        : '4. 10-Day Total Sale Bill'}
+                    </span>
+                    <span
+                      data-testid="sale-10day-total-amount"
+                      className="text-lg font-black text-emerald-800 mt-1 block"
+                    >
+                      {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
+                    </span>
+                    <span className="text-[11px] text-emerald-700 block mt-0.5">
+                      {lang === 'hi'
+                        ? `कुल ${saleBill.totalSummary.entryCount} बिक्री एंट्री (दशमलव सहित)`
+                        : `${saleBill.totalSummary.entryCount} sale entries (with decimals)`}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Table 1: Date-wise Morning & Evening Side-by-Side Breakdown */}
+                {saleBillTableView === 'day_wise' ? (
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-xs border-collapse tabular-nums">
+                      <thead>
+                        <tr className="bg-blue-50 text-blue-950 border-b border-blue-200">
+                          <th className="py-2.5 px-2.5 text-left">तारीख</th>
+                          <th className="py-2.5 px-2 text-right">सुबह L</th>
+                          <th className="py-2.5 px-2 text-right">सुबह FAT/SNF</th>
+                          <th className="py-2.5 px-2 text-right">सुबह दर</th>
+                          <th className="py-2.5 px-2 text-right">सुबह राशि (₹)</th>
+                          <th className="py-2.5 px-2 text-right">शाम L</th>
+                          <th className="py-2.5 px-2 text-right">शाम FAT/SNF</th>
+                          <th className="py-2.5 px-2 text-right">शाम दर</th>
+                          <th className="py-2.5 px-2 text-right">शाम राशि (₹)</th>
+                          <th className="py-2.5 px-2.5 text-right font-bold">कुल दूध (L)</th>
+                          <th className="py-2.5 px-2.5 text-right font-bold">कुल बिक्री राशि (₹)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {saleBill.dayWiseRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={11} className="py-8 text-center text-slate-500">
+                              {lang === 'hi'
+                                ? `इस 10-दिन की अवधि (${saleBill.fromDate} से ${saleBill.toDate}) में कोई दूध बिक्री दर्ज नहीं है।`
+                                : `No wholesale milk sales recorded in this period (${saleBill.fromDate} to ${saleBill.toDate}).`}
+                            </td>
+                          </tr>
+                        ) : (
+                          saleBill.dayWiseRows.map((row) => (
+                            <tr key={row.date} className="hover:bg-slate-50">
+                              <td className="py-2 px-2.5 font-bold text-slate-900">{row.date}</td>
+                              <td className="py-2 px-2 text-right">
+                                {row.morningLiters > 0 ? formatNumber(row.morningLiters, 3) : '—'}
+                              </td>
+                              <td className="py-2 px-2 text-right">
+                                {row.morningFat !== null
+                                  ? `${formatNumber(row.morningFat)}/${formatNumber(row.morningSnf)}`
+                                  : '—'}
+                              </td>
+                              <td className="py-2 px-2 text-right">
+                                {row.morningRate !== null ? formatCurrency(row.morningRate) : '—'}
+                              </td>
+                              <td className="py-2 px-2 text-right font-semibold text-amber-900">
+                                {row.morningAmount > 0 ? formatCurrency(row.morningAmount) : '—'}
+                              </td>
+                              <td className="py-2 px-2 text-right">
+                                {row.eveningLiters > 0 ? formatNumber(row.eveningLiters, 3) : '—'}
+                              </td>
+                              <td className="py-2 px-2 text-right">
+                                {row.eveningFat !== null
+                                  ? `${formatNumber(row.eveningFat)}/${formatNumber(row.eveningSnf)}`
+                                  : '—'}
+                              </td>
+                              <td className="py-2 px-2 text-right">
+                                {row.eveningRate !== null ? formatCurrency(row.eveningRate) : '—'}
+                              </td>
+                              <td className="py-2 px-2 text-right font-semibold text-indigo-900">
+                                {row.eveningAmount > 0 ? formatCurrency(row.eveningAmount) : '—'}
+                              </td>
+                              <td className="py-2 px-2.5 text-right font-bold text-blue-900">
+                                {formatNumber(row.totalLiters, 3)} L
+                              </td>
+                              <td className="py-2 px-2.5 text-right font-extrabold text-emerald-700">
+                                {formatCurrency(row.totalAmount)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      <tfoot>
+                        <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
+                          <td className="py-3 px-2.5">
+                            {lang === 'hi'
+                              ? `10-दिन का कुल योग (${saleBill.dayWiseRows.length} दिन)`
+                              : `10-Day Total (${saleBill.dayWiseRows.length} days)`}
+                          </td>
+                          <td className="py-3 px-2 text-right">
+                            {formatNumber(saleBill.morningSummary.totalLiters, 3)}
+                          </td>
+                          <td className="py-3 px-2 text-right">
+                            {formatNumber(saleBill.morningSummary.avgFat)}/
+                            {formatNumber(saleBill.morningSummary.avgSnf)}
+                          </td>
+                          <td className="py-3 px-2 text-right">
+                            {saleBill.morningSummary.avgRate !== null
+                              ? formatCurrency(saleBill.morningSummary.avgRate)
+                              : '—'}
+                          </td>
+                          <td className="py-3 px-2 text-right text-amber-950">
+                            {formatCurrency(saleBill.morningSummary.totalNetReceivable)}
+                          </td>
+                          <td className="py-3 px-2 text-right">
+                            {formatNumber(saleBill.eveningSummary.totalLiters, 3)}
+                          </td>
+                          <td className="py-3 px-2 text-right">
+                            {formatNumber(saleBill.eveningSummary.avgFat)}/
+                            {formatNumber(saleBill.eveningSummary.avgSnf)}
+                          </td>
+                          <td className="py-3 px-2 text-right">
+                            {saleBill.eveningSummary.avgRate !== null
+                              ? formatCurrency(saleBill.eveningSummary.avgRate)
+                              : '—'}
+                          </td>
+                          <td className="py-3 px-2 text-right text-indigo-950">
+                            {formatCurrency(saleBill.eveningSummary.totalNetReceivable)}
+                          </td>
+                          <td className="py-3 px-2.5 text-right text-blue-900">
+                            {formatNumber(saleBill.totalSummary.totalLiters, 3)} L
+                          </td>
+                          <td className="py-3 px-2.5 text-right text-emerald-800 text-sm font-black">
+                            {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                ) : (
+                  /* Table 2: Individual Sale Entries in the 10-Day Period */
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-xs border-collapse tabular-nums">
+                      <thead>
+                        <tr className="bg-blue-50 text-blue-950 border-b border-blue-200">
+                          <th className="py-2.5 px-3 text-left">#</th>
+                          <th className="py-2.5 px-3 text-left">तारीख / शिफ्ट</th>
+                          <th className="py-2.5 px-3 text-left">ग्राहक / खरीदार</th>
+                          <th className="py-2.5 px-3 text-left">प्रकार</th>
+                          <th className="py-2.5 px-3 text-right">मात्रा (L)</th>
+                          <th className="py-2.5 px-3 text-right">FAT / SNF</th>
+                          <th className="py-2.5 px-3 text-right">दर (Rate/L)</th>
+                          <th className="py-2.5 px-3 text-right">कुल राशि (₹)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {saleBill.entries.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="py-8 text-center text-slate-500">
+                              {lang === 'hi'
+                                ? 'इस अवधि में कोई बिक्री एंट्री नहीं है।'
+                                : 'No sale entries in this period.'}
+                            </td>
+                          </tr>
+                        ) : (
+                          saleBill.entries.map((s, idx) => (
+                            <tr key={s.id} className="hover:bg-slate-50">
+                              <td className="py-2 px-3 font-mono">{idx + 1}</td>
+                              <td className="py-2 px-3 font-semibold">
+                                {s.date} ({s.shift === 'morning' ? 'सुबह' : 'शाम'})
+                              </td>
+                              <td className="py-2 px-3 font-bold text-slate-900">
+                                {s.customerCode ? (
+                                  <span className="font-mono text-blue-700 mr-1">{s.customerCode}</span>
+                                ) : null}
+                                {s.buyerName}
+                              </td>
+                              <td className="py-2 px-3">
+                                {s.milkType === 'cow'
+                                  ? 'गाय'
+                                  : s.milkType === 'buffalo'
+                                  ? 'भैंस'
+                                  : 'मिश्रित'}
+                              </td>
+                              <td className="py-2 px-3 text-right font-bold">
+                                {formatNumber(s.liters, 3)} L
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                {formatNumber(s.avgFat)} / {formatNumber(s.avgSnf)}
+                              </td>
+                              <td className="py-2 px-3 text-right">{formatCurrency(s.rate)}</td>
+                              <td className="py-2 px-3 text-right font-bold text-emerald-700">
+                                {formatCurrency(s.netReceivable)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      <tfoot>
+                        <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
+                          <td colSpan={4} className="py-3 px-3">
+                            कुल योग ({saleBill.entries.length} एंट्री)
+                          </td>
+                          <td className="py-3 px-3 text-right text-blue-900">
+                            {formatNumber(saleBill.totalSummary.totalLiters, 3)} L
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            {formatNumber(saleBill.totalSummary.avgFat)} /{' '}
+                            {formatNumber(saleBill.totalSummary.avgSnf)}
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            {saleBill.totalSummary.avgRate !== null
+                              ? formatCurrency(saleBill.totalSummary.avgRate)
+                              : '—'}
+                          </td>
+                          <td className="py-3 px-3 text-right text-emerald-800 text-sm font-black">
+                            {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+      {/* ========================================================================
           SUBVIEW 2: CUSTOMERS LIST & MANAGEMENT (ग्राहक सूची एवं प्रबंधन)
          ======================================================================== */}
       {activeSubView === 'customers' && (
@@ -1142,6 +1795,20 @@ export const WholesaleAndReconciliationView: React.FC<
                             </button>
                             <button
                               type="button"
+                              onClick={() => {
+                                setSaleBillCustomerFilter(cust.id);
+                                const dy = Number(date.slice(8, 10)) || 1;
+                                const cyc: 1 | 2 | 3 = dy <= 10 ? 1 : dy <= 20 ? 2 : 3;
+                                setSaleBillYearMonth(date.slice(0, 7));
+                                setSaleBillCycle(cyc);
+                                setActiveSubView('sale_10day_bill');
+                              }}
+                              className="min-h-[30px] px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[11px] font-bold rounded-lg"
+                            >
+                              10-दिन बिल
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => handleOpenAddCustomerModal(cust)}
                               className="min-h-[30px] px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
                             >
@@ -1228,7 +1895,7 @@ export const WholesaleAndReconciliationView: React.FC<
               </span>
               <span className="text-[11px] text-slate-500 tabular-nums">
                 {lang === 'hi' ? 'कुल खरीद लागत:' : 'Total Cost:'}{' '}
-                {formatCurrency(mainRec.purchaseAmount)}
+                {formatWholeCurrency(mainRec.purchaseAmount)}
               </span>
             </div>
 
@@ -1546,6 +2213,20 @@ export const WholesaleAndReconciliationView: React.FC<
           }
           setDeleteCustId(null);
         }}
+      />
+
+      {/* WHATSAPP SHARE MODAL FOR 10-DAY SALE BILL */}
+      <WhatsAppPreviewModal
+        open={saleWaModal.open}
+        title={
+          lang === 'hi'
+            ? '10-दिन का बिक्री बिल WhatsApp पर भेजें'
+            : 'Share 10-Day Sale Bill on WhatsApp'
+        }
+        phone={saleWaModal.phone}
+        message={saleWaModal.message}
+        lang={lang}
+        onClose={() => setSaleWaModal((prev) => ({ ...prev, open: false }))}
       />
     </div>
   );
