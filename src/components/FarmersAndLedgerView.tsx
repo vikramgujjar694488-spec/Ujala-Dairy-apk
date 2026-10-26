@@ -2,14 +2,18 @@ import React, { useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
+  Calendar,
   CheckCircle2,
   Edit2,
   FileText,
   MessageSquare,
+  Moon,
   Package,
   Printer,
   RefreshCw,
+  Sun,
   Trash2,
+  TrendingUp,
   UserCheck,
   UserPlus,
   Users,
@@ -27,9 +31,14 @@ import {
   TenDayBill,
 } from '../types/dairy';
 import {
+  calculateCollectionSummary,
   calculateFarmerLedger,
+  calculatePureProfitLoss,
+  calculateSaleSummary,
   computeBillSnapshotHash,
   formatCurrency,
+  formatDateDMY,
+  formatMonthYear,
   formatNumber,
   formatWholeCurrency,
   generateTenDayBillData,
@@ -37,8 +46,10 @@ import {
   getCycleFromDate,
   getCycleLabelEn,
   getCycleLabelHi,
+  getTenDayCycleDates,
   normalizeFarmerShiftSchedule,
   round2,
+  round3,
   truncatePurchaseAmount,
 } from '../utils/dairyCalculations';
 import { ConfirmDialog, WhatsAppPreviewModal } from './Modals';
@@ -127,7 +138,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   const [feedError, setFeedError] = useState<string | null>(null);
   const [deleteFeedId, setDeleteFeedId] = useState<string | null>(null);
 
-  // 5. 10-Day Billing State
+  // 5. 10-Day Billing & Clean Reports State (Only 4 Reports: सुबह, शाम, 10-दिन सुबह-शाम, लाभ-हानि)
   const [billFarmerId, setBillFarmerId] = useState<string>(state.farmers[0]?.id || '');
   const [billYearMonth, setBillYearMonth] = useState<string>(state.selectedDate.slice(0, 7));
   const [billCycle, setBillCycle] = useState<1 | 2 | 3>(
@@ -137,6 +148,11 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   const [quickBillPayAmount, setQuickBillPayAmount] = useState<string>('');
   const [quickBillPayMethod, setQuickBillPayMethod] = useState<PaymentMethod>('cash');
   const [quickBillPayNotes, setQuickBillPayNotes] = useState<string>('');
+  const [activeCleanReport, setActiveCleanReport] = useState<
+    'morning' | 'evening' | 'tenday' | 'profit_loss'
+  >('tenday');
+  const [reportSingleDate, setReportSingleDate] = useState<string>(state.selectedDate);
+  const [reportFarmerFilter, setReportFarmerFilter] = useState<string>('all');
 
   // WhatsApp Preview Modal
   const [waModal, setWaModal] = useState<{ open: boolean; phone: string; message: string }>({
@@ -446,7 +462,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
       `*${state.dairyName || 'Ujalaa Dairy'} — 10-दिन का दूध बिल*`,
       `बिल नं: ${bill.billNumber}`,
       `किसान: ${bill.farmerCode} - ${bill.farmerName}`,
-      `अवधि: ${cycleLabel} (${bill.fromDate} से ${bill.toDate})`,
+      `अवधि: ${cycleLabel} (${formatDateDMY(bill.fromDate)} से ${formatDateDMY(bill.toDate)})`,
       `--------------------------------`,
       `सुबह का दूध: ${formatNumber(bill.morningLiters, 3)} L (${formatWholeCurrency(bill.morningAmount)})`,
       `शाम का दूध: ${formatNumber(bill.eveningLiters, 3)} L (${formatWholeCurrency(bill.eveningAmount)})`,
@@ -494,7 +510,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           }`}
         >
           <Users className="w-4 h-4" />
-          {lang === 'hi' ? '9. किसान प्रबंधन' : '9. Farmers'}
+          {lang === 'hi' ? 'किसान प्रबंधन' : 'Farmers'}
         </button>
 
         <button
@@ -507,7 +523,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           }`}
         >
           <BookOpen className="w-4 h-4" />
-          {lang === 'hi' ? '10. किसान का खाता (Ledger)' : '10. Farmer Ledger'}
+          {lang === 'hi' ? 'किसान का खाता (Ledger)' : 'Farmer Ledger'}
         </button>
 
         <button
@@ -520,7 +536,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           }`}
         >
           <Wallet className="w-4 h-4" />
-          {lang === 'hi' ? '11. एडवांस और भुगतान' : '11. Advance & Payments'}
+          {lang === 'hi' ? 'एडवांस और भुगतान' : 'Advance & Payments'}
         </button>
 
         <button
@@ -533,11 +549,12 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           }`}
         >
           <Package className="w-4 h-4" />
-          {lang === 'hi' ? '12. दाना और पशु-आहार' : '12. Cattle Feed'}
+          {lang === 'hi' ? 'दाना और पशु-आहार' : 'Cattle Feed'}
         </button>
 
         <button
           type="button"
+          data-testid="subtab-billing-reports-btn"
           onClick={() => setSubTab('billing')}
           className={`min-h-[42px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors ${
             subTab === 'billing'
@@ -546,7 +563,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           }`}
         >
           <FileText className="w-4 h-4" />
-          {lang === 'hi' ? '13. 10-दिन बिलिंग' : '13. 10-Day Billing'}
+          {lang === 'hi' ? '10-दिन बिलिंग व रिपोर्ट' : '10-Day Billing & Reports'}
         </button>
       </div>
 
@@ -734,129 +751,127 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           </div>
 
           {/* Farmers Table */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 overflow-x-auto">
-            <h3 className="text-base font-bold text-slate-900 mb-3">
+          <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5">
+            <h3 className="text-sm sm:text-base font-bold text-slate-900 mb-2.5">
               {lang === 'hi'
-                ? `पंजीकृत किसानों की सूची (${state.farmers.length}) — नाम पर क्लिक कर पूरा खाता देखें`
+                ? `पंजीकृत किसानों की सूची (${state.farmers.length}) — नाम पर क्लिक कर खाता देखें`
                 : `Registered Farmers (${state.farmers.length}) — Click name to open Ledger`}
             </h3>
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="bg-blue-50 text-blue-950 border-b border-blue-100">
-                  <th className="py-2.5 px-3 text-left">ID</th>
-                  <th className="py-2.5 px-3 text-left">
-                    {lang === 'hi' ? 'किसान का नाम — निर्धारित समय' : 'Farmer Name — Shift Schedule'}
-                  </th>
-                  <th className="py-2.5 px-3 text-left">{lang === 'hi' ? 'मोबाइल / गाँव' : 'Mobile'}</th>
-                  <th className="py-2.5 px-3 text-right">
-                    {lang === 'hi' ? 'कुल दूध (L)' : 'Total Milk'}
-                  </th>
-                  <th className="py-2.5 px-3 text-right">
-                    {lang === 'hi' ? 'वर्तमान शेष बकाया' : 'Closing Balance'}
-                  </th>
-                  <th className="py-2.5 px-3 text-center">
-                    {lang === 'hi' ? 'स्थिति' : 'Status'}
-                  </th>
-                  <th className="py-2.5 px-3 text-center">
-                    {lang === 'hi' ? 'कार्य' : 'Actions'}
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 tabular-nums">
-                {state.farmers.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="py-8 text-center text-slate-500">
-                      {lang === 'hi'
-                        ? 'अभी कोई किसान नहीं जोड़ा गया है।'
-                        : 'No farmers added yet.'}
-                    </td>
+            <div>
+              <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
+                <thead>
+                  <tr className="bg-blue-50 text-blue-950">
+                    <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">
+                      {lang === 'hi' ? 'किसान (ID व नाम)' : 'Farmer (ID & Name)'}
+                    </th>
+                    <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">
+                      {lang === 'hi' ? 'कुल दूध' : 'Milk'}
+                    </th>
+                    <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">
+                      {lang === 'hi' ? 'शेष बकाया' : 'Balance'}
+                    </th>
+                    <th className="py-2 px-1 sm:px-2 text-center border border-slate-300">
+                      {lang === 'hi' ? 'कार्य' : 'Actions'}
+                    </th>
                   </tr>
-                ) : (
-                  state.farmers.map((f) => {
-                    const ledger = calculateFarmerLedger(
-                      f,
-                      state.collections,
-                      state.advancesAndPayments,
-                      state.cattleFeed
-                    );
-                    return (
-                      <tr key={f.id} className="hover:bg-slate-50">
-                        <td className="py-2.5 px-3 font-bold text-slate-700">{f.code}</td>
-                        <td className="py-2.5 px-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setLedgerFarmerId(f.id);
-                              setSubTab('ledger');
-                            }}
-                            className="text-left font-bold text-blue-700 hover:underline"
-                          >
-                            {f.name} — {scheduleLabel(f.shiftSchedule)}
-                          </button>
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-600">
-                          {f.mobile || '—'} {f.village ? `· ${f.village}` : ''}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-semibold">
-                          {formatNumber(ledger.totalLiters, 3)} L
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-blue-900">
-                          {formatWholeCurrency(ledger.closingBalance)}
-                        </td>
-                        <td className="py-2.5 px-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => onSaveFarmer({ ...f, active: !f.active }, true)}
-                            className={`px-2 py-1 rounded-md text-[11px] font-semibold ${
-                              f.active
-                                ? 'text-emerald-700 bg-emerald-50'
-                                : 'text-slate-500 bg-slate-100'
-                            }`}
-                          >
-                            {f.active
-                              ? lang === 'hi'
-                                ? 'सक्रिय (Active)'
-                                : 'Active'
-                              : lang === 'hi'
-                              ? 'निष्क्रिय (Inactive)'
-                              : 'Inactive'}
-                          </button>
-                        </td>
-                        <td className="py-2.5 px-3 text-center">
-                          <div className="flex items-center justify-center gap-1.5">
+                </thead>
+                <tbody>
+                  {state.farmers.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="py-6 text-center text-slate-500 border border-slate-300">
+                        {lang === 'hi'
+                          ? 'अभी कोई किसान नहीं जोड़ा गया है।'
+                          : 'No farmers added yet.'}
+                      </td>
+                    </tr>
+                  ) : (
+                    state.farmers.map((f) => {
+                      const ledger = calculateFarmerLedger(
+                        f,
+                        state.collections,
+                        state.advancesAndPayments,
+                        state.cattleFeed
+                      );
+                      return (
+                        <tr key={f.id} className="hover:bg-slate-50">
+                          <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
                             <button
                               type="button"
-                              onClick={() => handleEditFarmer(f)}
-                              aria-label={`Edit ${f.name}`}
-                              className="min-h-[32px] px-2.5 py-1 bg-slate-100 hover:bg-blue-50 text-slate-700 rounded-lg font-semibold flex items-center gap-1"
+                              onClick={() => {
+                                setLedgerFarmerId(f.id);
+                                setSubTab('ledger');
+                              }}
+                              className="text-left font-bold text-blue-700 hover:underline leading-tight block"
                             >
-                              <Edit2 className="w-3.5 h-3.5" />
-                              <span>Edit</span>
+                              <span className="text-slate-800">{f.code}</span> — {f.name}
                             </button>
+                            <span className="text-[11px] text-slate-500 block leading-tight mt-0.5">
+                              {scheduleLabel(f.shiftSchedule)}
+                              {f.mobile ? ` · ${f.mobile}` : ''}
+                              {f.village ? ` · ${f.village}` : ''}
+                            </span>
+                          </td>
+                          <td className="py-2 px-1.5 sm:px-2.5 text-right font-bold whitespace-nowrap border border-slate-300">
+                            {formatNumber(ledger.totalLiters, 2)} L
+                          </td>
+                          <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                            <span className="font-bold text-blue-900 block">
+                              {formatWholeCurrency(ledger.closingBalance)}
+                            </span>
                             <button
                               type="button"
-                              onClick={() => setDeleteFarmerTarget(f)}
-                              aria-label={`Delete ${f.name}`}
-                              className="min-h-[32px] px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-semibold flex items-center gap-1"
+                              onClick={() => onSaveFarmer({ ...f, active: !f.active }, true)}
+                              className={`mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold inline-block ${
+                                f.active
+                                  ? 'text-emerald-700 bg-emerald-50'
+                                  : 'text-slate-500 bg-slate-100'
+                              }`}
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>Delete</span>
+                              {f.active
+                                ? lang === 'hi'
+                                  ? 'सक्रिय'
+                                  : 'Active'
+                                : lang === 'hi'
+                                ? 'निष्क्रिय'
+                                : 'Inactive'}
                             </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+                          </td>
+                          <td className="py-2 px-1 sm:px-2 text-center border border-slate-300">
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleEditFarmer(f)}
+                                aria-label={`Edit ${f.name}`}
+                                className="min-h-[28px] px-1.5 py-1 bg-slate-100 hover:bg-blue-50 text-slate-700 rounded-lg font-semibold flex items-center gap-0.5"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">Edit</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeleteFarmerTarget(f)}
+                                aria-label={`Delete ${f.name}`}
+                                className="min-h-[28px] px-1.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-semibold flex items-center gap-0.5"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">Delete</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
 
       {/* SUBTAB 2: INDIVIDUAL FARMER LEDGER / PASSBOOK (Section 10) */}
       {subTab === 'ledger' && (
-        <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
+        <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
             <div>
               <h2 className="text-base font-bold text-slate-900">
@@ -992,30 +1007,25 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
               </div>
 
               {/* Ledger Table */}
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs border-collapse">
+              <div>
+                <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
                   <thead>
-                    <tr className="bg-slate-50 text-slate-700 border-b border-slate-200">
-                      <th className="py-2.5 px-3 text-left">{lang === 'hi' ? 'तारीख' : 'Date'}</th>
-                      <th className="py-2.5 px-3 text-left">{lang === 'hi' ? 'शिफ्ट' : 'Shift'}</th>
-                      <th className="py-2.5 px-3 text-left">
-                        {lang === 'hi' ? 'विवरण' : 'Particulars'}
+                    <tr className="bg-slate-50 text-slate-800">
+                      <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">
+                        {lang === 'hi' ? 'तारीख / शिफ्ट' : 'Date / Shift'}
                       </th>
-                      <th className="py-2.5 px-3 text-right">
-                        {lang === 'hi' ? 'लीटर (FAT/SNF/रेट)' : 'Milk Details'}
+                      <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">
+                        {lang === 'hi' ? 'विवरण · लीटर | FAT | SNF | रेट' : 'Particulars · L | FAT | SNF | Rate'}
                       </th>
-                      <th className="py-2.5 px-3 text-right">
-                        {lang === 'hi' ? 'दूध राशि (+)' : 'Milk Cr (+)'}
+                      <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">
+                        {lang === 'hi' ? 'जमा(+) / नामे(-)' : 'Cr(+) / Dr(-)'}
                       </th>
-                      <th className="py-2.5 px-3 text-right">
-                        {lang === 'hi' ? 'एडवांस/दाना/भुगतान (-)' : 'Deductions/Paid (-)'}
-                      </th>
-                      <th className="py-2.5 px-3 text-right">
-                        {lang === 'hi' ? 'बाकी बकाया' : 'Running Balance'}
+                      <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">
+                        {lang === 'hi' ? 'बाकी बकाया' : 'Balance'}
                       </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 tabular-nums">
+                  <tbody>
                     {ledgerData.rows
                       .filter(
                         (r) =>
@@ -1031,29 +1041,53 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                           row.paymentAmount;
                         return (
                           <tr key={row.id} className="hover:bg-slate-50">
-                            <td className="py-2 px-3">{row.date}</td>
-                            <td className="py-2 px-3">
-                              {row.shift === 'morning'
-                                ? 'सुबह'
-                                : row.shift === 'evening'
-                                ? 'शाम'
-                                : '—'}
+                            <td className="py-2 px-1 sm:px-2.5 whitespace-nowrap border border-slate-300">
+                              <span className="font-mono font-bold text-slate-900 text-xs sm:text-sm block leading-tight">
+                                {formatDateDMY(row.date)}
+                              </span>
+                              <span className="text-[11px] font-semibold text-slate-500 block leading-tight mt-0.5">
+                                {row.shift === 'morning'
+                                  ? 'सुबह'
+                                  : row.shift === 'evening'
+                                  ? 'शाम'
+                                  : '—'}
+                              </span>
                             </td>
-                            <td className="py-2 px-3 font-medium text-slate-900">
-                              {lang === 'hi' ? row.descriptionHi : row.descriptionEn}
+                            <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
+                              <span className="font-bold text-slate-900 text-xs sm:text-sm block leading-tight">
+                                {lang === 'hi' ? row.descriptionHi : row.descriptionEn}
+                              </span>
+                              {row.liters ? (
+                                <div className="mt-1 inline-grid grid-cols-4 divide-x divide-slate-300 border border-slate-300 rounded bg-slate-50 text-xs font-extrabold tabular-nums">
+                                  <span className="px-1 sm:px-1.5 py-0.5 text-slate-900">
+                                    {formatNumber(row.liters, 2)}L
+                                  </span>
+                                  <span className="px-1 sm:px-1.5 py-0.5 text-amber-950 bg-amber-50/70">
+                                    F:{formatNumber(row.fat, 1)}
+                                  </span>
+                                  <span className="px-1 sm:px-1.5 py-0.5 text-indigo-950 bg-indigo-50/70">
+                                    S:{formatNumber(row.snf, 1)}
+                                  </span>
+                                  <span className="px-1 sm:px-1.5 py-0.5 text-blue-900">
+                                    ₹{formatNumber(row.rate, 2)}
+                                  </span>
+                                </div>
+                              ) : null}
                             </td>
-                            <td className="py-2 px-3 text-right text-slate-600">
-                              {row.liters
-                                ? `${formatNumber(row.liters, 3)} L (${row.fat}/${row.snf} @ ₹${row.rate})`
-                                : '—'}
+                            <td className="py-2 px-1 sm:px-2 text-right whitespace-nowrap border border-slate-300">
+                              {row.milkAmount > 0 && (
+                                <span className="font-extrabold text-blue-800 text-xs sm:text-sm block">
+                                  +{formatWholeCurrency(row.milkAmount)}
+                                </span>
+                              )}
+                              {debitTotal > 0 && (
+                                <span className="font-extrabold text-red-600 text-xs sm:text-sm block">
+                                  -{formatWholeCurrency(debitTotal)}
+                                </span>
+                              )}
+                              {row.milkAmount === 0 && debitTotal === 0 && '—'}
                             </td>
-                            <td className="py-2 px-3 text-right font-semibold text-blue-700">
-                              {row.milkAmount > 0 ? formatWholeCurrency(row.milkAmount) : '—'}
-                            </td>
-                            <td className="py-2 px-3 text-right font-semibold text-red-600">
-                              {debitTotal > 0 ? formatWholeCurrency(debitTotal) : '—'}
-                            </td>
-                            <td className="py-2 px-3 text-right font-bold text-slate-900">
+                            <td className="py-2 px-1 sm:px-2 text-right font-extrabold text-slate-900 text-xs sm:text-sm whitespace-nowrap border border-slate-300">
                               {formatWholeCurrency(row.runningBalance)}
                             </td>
                           </tr>
@@ -1086,7 +1120,9 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    {lang === 'hi' ? 'भुगतान की तारीख *' : 'Payment Date *'}
+                    {lang === 'hi'
+                      ? `भुगतान की तारीख (${formatDateDMY(advDate)}) *`
+                      : `Payment Date (${formatDateDMY(advDate)}) *`}
                   </label>
                   <input
                     type="date"
@@ -1347,29 +1383,31 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
             </form>
           </div>
 
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 overflow-x-auto">
-            <h3 className="text-sm font-bold text-slate-900 mb-3">
+          <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5">
+            <h3 className="text-sm font-bold text-slate-900 mb-2.5">
               {lang === 'hi' ? 'एडवांस और भुगतान सूची' : 'Advances & Payments History'}
             </h3>
-            <table className="w-full text-xs border-collapse">
+            <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-200">
-                  <th className="py-2 px-3 text-left">ID</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'तारीख' : 'Date'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'किसान' : 'Farmer'}</th>
-                  <th className="py-2 px-3 text-left">
-                    {lang === 'hi' ? 'भुगतान अवधि (10-दिन)' : '10-Day Period'}
+                <tr className="bg-slate-50">
+                  <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">
+                    {lang === 'hi' ? 'तारीख / किसान' : 'Date / Farmer'}
                   </th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'प्रकार' : 'Type'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'तरीका' : 'Method'}</th>
-                  <th className="py-2 px-3 text-right">{lang === 'hi' ? 'राशि' : 'Amount'}</th>
-                  <th className="py-2 px-3 text-center">{lang === 'hi' ? 'कार्य' : 'Action'}</th>
+                  <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">
+                    {lang === 'hi' ? 'अवधि व प्रकार' : 'Period & Type'}
+                  </th>
+                  <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">
+                    {lang === 'hi' ? 'राशि' : 'Amount'}
+                  </th>
+                  <th className="py-2 px-1 sm:px-2 text-center border border-slate-300">
+                    {lang === 'hi' ? 'कार्य' : 'Action'}
+                  </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 tabular-nums">
+              <tbody>
                 {state.advancesAndPayments.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-6 text-center text-slate-500">
+                    <td colSpan={4} className="py-6 text-center text-slate-500 border border-slate-300">
                       {lang === 'hi' ? 'अभी कोई रिकॉर्ड नहीं है' : 'No records yet'}
                     </td>
                   </tr>
@@ -1377,27 +1415,31 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   state.advancesAndPayments.map((a) => {
                     const eff = getAdvancePaymentEffectiveCycle(a);
                     return (
-                      <tr key={a.id}>
-                        <td className="py-2 px-3 font-mono">{a.txnCode}</td>
-                        <td className="py-2 px-3">{a.date}</td>
-                        <td className="py-2 px-3 font-bold">{a.farmerName}</td>
-                        <td className="py-2 px-3">
-                          <span className="px-2 py-0.5 bg-blue-50 text-blue-800 border border-blue-200 rounded-md font-semibold">
-                            {getCycleLabelHi(eff.cycle)} ({eff.yearMonth})
+                      <tr key={a.id} className="hover:bg-slate-50">
+                        <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                          <span className="font-bold text-slate-900 block leading-tight">
+                            {a.farmerName}
+                          </span>
+                          <span className="text-[11px] text-slate-600 font-mono font-semibold block leading-tight mt-0.5">
+                            {formatDateDMY(a.date)} · {a.txnCode}
                           </span>
                         </td>
-                        <td className="py-2 px-3">
-                          {a.type === 'advance' ? 'एडवांस (Advance)' : 'भुगतान (Payment)'}
+                        <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                          <span className="px-1.5 py-0.5 bg-blue-50 text-blue-800 border border-blue-200 rounded text-[11px] font-semibold inline-block">
+                            {getCycleLabelHi(eff.cycle, eff.yearMonth)}
+                          </span>
+                          <span className="text-[11px] text-slate-600 block mt-0.5">
+                            {a.type === 'advance' ? 'एडवांस' : 'भुगतान'} · {a.paymentMethod.toUpperCase()}
+                          </span>
                         </td>
-                        <td className="py-2 px-3 uppercase">{a.paymentMethod}</td>
-                        <td className="py-2 px-3 text-right font-bold">
+                        <td className="py-2 px-1.5 sm:px-2.5 text-right font-bold whitespace-nowrap border border-slate-300">
                           {formatCurrency(a.amount)}
                         </td>
-                        <td className="py-2 px-3 text-center">
+                        <td className="py-2 px-1 sm:px-2 text-center border border-slate-300">
                           <button
                             type="button"
                             onClick={() => setDeleteAdvId(a.id)}
-                            className="px-2 py-1 bg-red-50 text-red-600 rounded-lg"
+                            className="px-1.5 py-1 bg-red-50 text-red-600 rounded-lg"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -1431,7 +1473,9 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    {lang === 'hi' ? 'तारीख *' : 'Date *'}
+                    {lang === 'hi'
+                      ? `तारीख (${formatDateDMY(feedDate)}) *`
+                      : `Date (${formatDateDMY(feedDate)}) *`}
                   </label>
                   <input
                     type="date"
@@ -1546,53 +1590,66 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
             </form>
           </div>
 
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 overflow-x-auto">
-            <h3 className="text-sm font-bold text-slate-900 mb-3">
+          <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5">
+            <h3 className="text-sm font-bold text-slate-900 mb-2.5">
               {lang === 'hi' ? 'दाना और पशु-आहार रिकॉर्ड सूची' : 'Cattle Feed Records'}
             </h3>
-            <table className="w-full text-xs border-collapse">
+            <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-200">
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'तारीख' : 'Date'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'किसान' : 'Farmer'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'सामग्री' : 'Item'}</th>
-                  <th className="py-2 px-3 text-right">
-                    {lang === 'hi' ? 'मात्रा × कीमत' : 'Qty × Price'}
+                <tr className="bg-slate-50">
+                  <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">
+                    {lang === 'hi' ? 'तारीख / किसान' : 'Date / Farmer'}
                   </th>
-                  <th className="py-2 px-3 text-right">{lang === 'hi' ? 'कुल कीमत' : 'Total'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'प्रकार' : 'Mode'}</th>
-                  <th className="py-2 px-3 text-center">{lang === 'hi' ? 'कार्य' : 'Action'}</th>
+                  <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">
+                    {lang === 'hi' ? 'सामग्री व मात्रा' : 'Item & Qty'}
+                  </th>
+                  <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">
+                    {lang === 'hi' ? 'कुल कीमत' : 'Total'}
+                  </th>
+                  <th className="py-2 px-1 sm:px-2 text-center border border-slate-300">
+                    {lang === 'hi' ? 'कार्य' : 'Action'}
+                  </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 tabular-nums">
+              <tbody>
                 {state.cattleFeed.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-6 text-center text-slate-500">
+                    <td colSpan={4} className="py-6 text-center text-slate-500 border border-slate-300">
                       {lang === 'hi' ? 'अभी कोई रिकॉर्ड नहीं है' : 'No records yet'}
                     </td>
                   </tr>
                 ) : (
                   state.cattleFeed.map((cf) => (
-                    <tr key={cf.id}>
-                      <td className="py-2 px-3">{cf.date}</td>
-                      <td className="py-2 px-3 font-bold">{cf.farmerName}</td>
-                      <td className="py-2 px-3">{cf.itemName}</td>
-                      <td className="py-2 px-3 text-right">
-                        {cf.quantity} × {formatCurrency(cf.unitPrice)}
+                    <tr key={cf.id} className="hover:bg-slate-50">
+                      <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                        <span className="font-bold text-slate-900 block leading-tight">
+                          {cf.farmerName}
+                        </span>
+                        <span className="text-[11px] text-slate-600 font-mono font-semibold block leading-tight mt-0.5">
+                          {formatDateDMY(cf.date)}
+                        </span>
                       </td>
-                      <td className="py-2 px-3 text-right font-bold">
-                        {formatCurrency(cf.totalAmount)}
+                      <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                        <span className="font-medium text-slate-900 block leading-tight">
+                          {cf.itemName}
+                        </span>
+                        <span className="text-[11px] text-slate-500 block leading-tight">
+                          {cf.quantity} × {formatCurrency(cf.unitPrice)}
+                        </span>
                       </td>
-                      <td className="py-2 px-3">
-                        {cf.paymentMode === 'deduct_from_milk'
-                          ? 'दूध खाते से कटौती'
-                          : 'नकद प्राप्त'}
+                      <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                        <span className="font-bold text-slate-900 block">
+                          {formatCurrency(cf.totalAmount)}
+                        </span>
+                        <span className="text-[10px] text-slate-500 block">
+                          {cf.paymentMode === 'deduct_from_milk' ? 'दूध से कटौती' : 'नकद'}
+                        </span>
                       </td>
-                      <td className="py-2 px-3 text-center">
+                      <td className="py-2 px-1 sm:px-2 text-center border border-slate-300">
                         <button
                           type="button"
                           onClick={() => setDeleteFeedId(cf.id)}
-                          className="px-2 py-1 bg-red-50 text-red-600 rounded-lg"
+                          className="px-1.5 py-1 bg-red-50 text-red-600 rounded-lg"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1606,13 +1663,737 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
         </div>
       )}
 
-      {/* SUBTAB 5: 10-DAY BILLING SYSTEM (Section 13) */}
+      {/* SUBTAB 5: 10-DAY BILLING & CLEAN REPORTS (केवल 4 रिपोर्ट: सुबह, शाम, 10-दिन सुबह-शाम, लाभ-हानि) */}
       {subTab === 'billing' && (
         <div className="space-y-5">
+          {/* CLEAN 4-REPORTS CARD INSIDE 10-DAY BILLING SECTION */}
+          <div
+            data-testid="ten-day-billing-reports-section"
+            className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5 no-print">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">
+                  {lang === 'hi'
+                    ? '10-दिन की डेयरी रिपोर्ट्स (सुबह · शाम · सुबह-शाम · लाभ-हानि)'
+                    : '10-Day Dairy Reports (Morning · Evening · Morning-Evening · Profit & Loss)'}
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {lang === 'hi'
+                    ? 'केवल आवश्यक 4 साफ-सुथरी 10-दिन की रिपोर्ट — किसी भी रिपोर्ट पर क्लिक करके देखें व प्रिंट करें'
+                    : 'Clean 4 essential 10-day reports inside 10-Day Billing'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="min-h-[40px] px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5 self-start sm:self-auto"
+              >
+                <Printer className="w-4 h-4" />
+                {lang === 'hi' ? 'रिपोर्ट प्रिंट करें' : 'Print Report'}
+              </button>
+            </div>
+
+            {/* ONLY 4 REPORT OPTIONS AS REQUESTED */}
+            <div
+              data-testid="clean-four-report-tabs"
+              className="grid grid-cols-2 sm:grid-cols-4 gap-2 no-print"
+            >
+              <button
+                type="button"
+                data-testid="report-btn-morning"
+                onClick={() => setActiveCleanReport('morning')}
+                className={`min-h-[44px] px-3 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition-colors ${
+                  activeCleanReport === 'morning'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <Sun className="w-4 h-4 shrink-0" />
+                <span>{lang === 'hi' ? '10 दिन की सुबह की रिपोर्ट' : '10-Day Morning Report'}</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="report-btn-evening"
+                onClick={() => setActiveCleanReport('evening')}
+                className={`min-h-[44px] px-3 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition-colors ${
+                  activeCleanReport === 'evening'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <Moon className="w-4 h-4 shrink-0" />
+                <span>{lang === 'hi' ? '10 दिन की शाम की रिपोर्ट' : '10-Day Evening Report'}</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="report-btn-tenday"
+                onClick={() => setActiveCleanReport('tenday')}
+                className={`min-h-[44px] px-3 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition-colors ${
+                  activeCleanReport === 'tenday'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <Calendar className="w-4 h-4 shrink-0" />
+                <span>
+                  {lang === 'hi' ? '10 दिन की सुबह-शाम की रिपोर्ट' : '10-Day Morning-Evening'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="report-btn-profit-loss"
+                onClick={() => setActiveCleanReport('profit_loss')}
+                className={`min-h-[44px] px-3 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition-colors ${
+                  activeCleanReport === 'profit_loss'
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <TrendingUp className="w-4 h-4 shrink-0" />
+                <span>{lang === 'hi' ? 'लाभ-हानि रिपोर्ट' : 'Profit & Loss Report'}</span>
+              </button>
+            </div>
+
+            {/* REPORT 1 & 2: 10 दिन की सुबह की रिपोर्ट (10-Day Morning) / 10 दिन की शाम की रिपोर्ट (10-Day Evening) */}
+            {(activeCleanReport === 'morning' || activeCleanReport === 'evening') &&
+              (() => {
+                const shiftType = activeCleanReport === 'morning' ? 'morning' : 'evening';
+                const shiftLabelHi =
+                  shiftType === 'morning'
+                    ? '10 दिन की सुबह की रिपोर्ट (10-Day Morning Report)'
+                    : '10 दिन की शाम की रिपोर्ट (10-Day Evening Report)';
+                const { fromDate, toDate } = getTenDayCycleDates(billYearMonth, billCycle);
+                const entries = state.collections.filter(
+                  (c) =>
+                    c.date >= fromDate &&
+                    c.date <= toDate &&
+                    c.shift === shiftType &&
+                    (reportFarmerFilter === 'all' || c.farmerId === reportFarmerFilter)
+                );
+                const sum = calculateCollectionSummary(entries);
+
+                // Build day-by-day rows for the 10-day cycle
+                const startDay = Number(fromDate.slice(8, 10));
+                const endDay = Number(toDate.slice(8, 10));
+                const shiftDayRows: Array<{
+                  date: string;
+                  count: number;
+                  liters: number;
+                  avgFat: number | null;
+                  avgSnf: number | null;
+                  avgRate: number | null;
+                  amount: number;
+                }> = [];
+
+                for (let d = startDay; d <= endDay; d++) {
+                  const dStr = `${billYearMonth}-${String(d).padStart(2, '0')}`;
+                  const dayEntries = entries.filter((c) => c.date === dStr);
+                  const dSum = calculateCollectionSummary(dayEntries);
+                  shiftDayRows.push({
+                    date: dStr,
+                    count: dSum.entryCount,
+                    liters: dSum.totalLiters,
+                    avgFat: dSum.avgFat,
+                    avgSnf: dSum.avgSnf,
+                    avgRate: dSum.avgRate,
+                    amount: dSum.totalAmount,
+                  });
+                }
+
+                return (
+                  <div
+                    data-testid={`clean-report-view-${shiftType}`}
+                    className="space-y-4 pt-2 border-t border-slate-100"
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 no-print">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? 'महीना चुनें' : 'Month'}
+                        </label>
+                        <input
+                          type="month"
+                          value={billYearMonth}
+                          onChange={(e) => setBillYearMonth(e.target.value)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm border border-slate-300 rounded-xl tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? '10-दिन की अवधि' : '10-Day Period'}
+                        </label>
+                        <select
+                          value={billCycle}
+                          onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                        >
+                          <option value={1}>1 से 10 तारीख (Cycle 1)</option>
+                          <option value={2}>11 से 20 तारीख (Cycle 2)</option>
+                          <option value={3}>21 से महीने के अंत तक (Cycle 3)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? 'किसान चुनें (वैकल्पिक)' : 'Filter Farmer'}
+                        </label>
+                        <select
+                          value={reportFarmerFilter}
+                          onChange={(e) => setReportFarmerFilter(e.target.value)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                        >
+                          <option value="all">सभी किसान (All Farmers)</option>
+                          {state.farmers.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.code} — {f.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums">
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <span className="text-slate-500 block">
+                          10-दिन कुल {shiftType === 'morning' ? 'सुबह' : 'शाम'} एंट्रियाँ
+                        </span>
+                        <span className="text-base font-bold text-slate-900 mt-0.5 block">
+                          {sum.entryCount}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
+                        <span className="text-blue-900 font-semibold block">
+                          10-दिन कुल {shiftType === 'morning' ? 'सुबह' : 'शाम'} दूध (लीटर)
+                        </span>
+                        <span className="text-base font-bold text-blue-900 mt-0.5 block">
+                          {formatNumber(sum.totalLiters, 3)} L
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <span className="text-slate-500 block">औसत FAT / SNF</span>
+                        <span className="text-base font-bold text-slate-900 mt-0.5 block">
+                          {formatNumber(sum.avgFat)} / {formatNumber(sum.avgSnf)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                        <span className="text-emerald-900 font-semibold block">
+                          10-दिन कुल {shiftType === 'morning' ? 'सुबह' : 'शाम'} राशि
+                        </span>
+                        <span className="text-base font-bold text-emerald-800 mt-0.5 block">
+                          {formatWholeCurrency(sum.totalAmount)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
+                        <thead>
+                          <tr className="bg-slate-50">
+                            <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">तारीख</th>
+                            <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">
+                              {shiftType === 'morning' ? 'सुबह' : 'शाम'} L
+                            </th>
+                            <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-amber-50/70 text-amber-950">
+                              FAT
+                            </th>
+                            <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-indigo-50/70 text-indigo-950">
+                              SNF
+                            </th>
+                            <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">रेट</th>
+                            <th className="py-2 px-1 sm:px-2.5 text-right border border-slate-300">
+                              {shiftType === 'morning' ? 'सुबह' : 'शाम'} राशि
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {shiftDayRows.map((r) => (
+                            <tr key={r.date} className="hover:bg-slate-50">
+                              <td className="py-1.5 px-1 sm:px-2.5 font-mono font-bold text-slate-900 whitespace-nowrap border border-slate-300">
+                                {formatDateDMY(r.date)}
+                                <span className="text-[10px] text-slate-400 ml-0.5">({r.count})</span>
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-blue-900 whitespace-nowrap border border-slate-300">
+                                {formatNumber(r.liters, 2)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-950 bg-amber-50/30 whitespace-nowrap border border-slate-300">
+                                {formatNumber(r.avgFat, 1)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-950 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
+                                {formatNumber(r.avgSnf, 1)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                                {r.avgRate !== null ? `₹${r.avgRate.toFixed(1)}` : '—'}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2.5 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
+                                {formatWholeCurrency(r.amount)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-blue-50/80 font-extrabold tabular-nums">
+                            <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
+                              कुल ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
+                            </td>
+                            <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
+                              {formatNumber(sum.totalLiters, 2)}
+                            </td>
+                            <td className="py-2 px-1 sm:px-2 text-center text-amber-950 bg-amber-50/60 whitespace-nowrap border border-slate-300">
+                              {formatNumber(sum.avgFat, 1)}
+                            </td>
+                            <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 bg-indigo-50/60 whitespace-nowrap border border-slate-300">
+                              {formatNumber(sum.avgSnf, 1)}
+                            </td>
+                            <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
+                              {sum.avgRate !== null ? `₹${sum.avgRate.toFixed(1)}` : '—'}
+                            </td>
+                            <td className="py-2 px-1 sm:px-2.5 text-right text-emerald-800 whitespace-nowrap border border-slate-300">
+                              {formatWholeCurrency(sum.totalAmount)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+
+            {/* REPORT 3: 10 दिन की सुबह-शाम की रिपोर्ट (10-Day Morning-Evening Report) */}
+            {activeCleanReport === 'tenday' &&
+              (() => {
+                const { fromDate, toDate } = getTenDayCycleDates(billYearMonth, billCycle);
+                const periodEntries = state.collections.filter(
+                  (c) =>
+                    c.date >= fromDate &&
+                    c.date <= toDate &&
+                    (reportFarmerFilter === 'all' || c.farmerId === reportFarmerFilter)
+                );
+                const mornEntries = periodEntries.filter((c) => c.shift === 'morning');
+                const eveEntries = periodEntries.filter((c) => c.shift === 'evening');
+                const mornSum = calculateCollectionSummary(mornEntries);
+                const eveSum = calculateCollectionSummary(eveEntries);
+                const totalSum = calculateCollectionSummary(periodEntries);
+
+                // Build day-by-day rows from fromDate to toDate
+                const startDay = Number(fromDate.slice(8, 10));
+                const endDay = Number(toDate.slice(8, 10));
+                const dayRows: Array<{
+                  date: string;
+                  mornLiters: number;
+                  mornAmt: number;
+                  eveLiters: number;
+                  eveAmt: number;
+                  totLiters: number;
+                  totAmt: number;
+                }> = [];
+                for (let d = startDay; d <= endDay; d++) {
+                  const dStr = `${billYearMonth}-${String(d).padStart(2, '0')}`;
+                  const dMorn = mornEntries.filter((c) => c.date === dStr);
+                  const dEve = eveEntries.filter((c) => c.date === dStr);
+                  const mL = round3(dMorn.reduce((s, c) => s + c.liters, 0));
+                  const mA = truncatePurchaseAmount(
+                    dMorn.reduce((s, c) => s + truncatePurchaseAmount(c.totalAmount), 0)
+                  );
+                  const eL = round3(dEve.reduce((s, c) => s + c.liters, 0));
+                  const eA = truncatePurchaseAmount(
+                    dEve.reduce((s, c) => s + truncatePurchaseAmount(c.totalAmount), 0)
+                  );
+                  dayRows.push({
+                    date: dStr,
+                    mornLiters: mL,
+                    mornAmt: mA,
+                    eveLiters: eL,
+                    eveAmt: eA,
+                    totLiters: round3(mL + eL),
+                    totAmt: mA + eA,
+                  });
+                }
+
+                return (
+                  <div
+                    data-testid="clean-report-view-tenday"
+                    className="space-y-4 pt-2 border-t border-slate-100"
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 no-print">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? 'महीना चुनें' : 'Month'}
+                        </label>
+                        <input
+                          type="month"
+                          value={billYearMonth}
+                          onChange={(e) => setBillYearMonth(e.target.value)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm border border-slate-300 rounded-xl tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? '10-दिन की अवधि' : '10-Day Period'}
+                        </label>
+                        <select
+                          value={billCycle}
+                          onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                        >
+                          <option value={1}>1 से 10 तारीख (Cycle 1)</option>
+                          <option value={2}>11 से 20 तारीख (Cycle 2)</option>
+                          <option value={3}>21 से महीने के अंत तक (Cycle 3)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? 'किसान चुनें (वैकल्पिक)' : 'Filter Farmer'}
+                        </label>
+                        <select
+                          value={reportFarmerFilter}
+                          onChange={(e) => setReportFarmerFilter(e.target.value)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                        >
+                          <option value="all">सभी किसान (All Farmers)</option>
+                          {state.farmers.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.code} — {f.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums">
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <span className="text-slate-500 block">10-दिन सुबह का दूध / राशि</span>
+                        <span className="text-sm font-bold text-slate-900 mt-0.5 block">
+                          {formatNumber(mornSum.totalLiters, 3)} L ·{' '}
+                          {formatWholeCurrency(mornSum.totalAmount)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <span className="text-slate-500 block">10-दिन शाम का दूध / राशि</span>
+                        <span className="text-sm font-bold text-slate-900 mt-0.5 block">
+                          {formatNumber(eveSum.totalLiters, 3)} L ·{' '}
+                          {formatWholeCurrency(eveSum.totalAmount)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
+                        <span className="text-blue-900 font-semibold block">
+                          10-दिन कुल दूध · FAT/SNF
+                        </span>
+                        <span className="text-sm font-bold text-blue-900 mt-0.5 block">
+                          {formatNumber(totalSum.totalLiters, 3)} L ·{' '}
+                          {formatNumber(totalSum.avgFat)}/{formatNumber(totalSum.avgSnf)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                        <span className="text-emerald-900 font-semibold block">
+                          10-दिन कुल खरीद राशि
+                        </span>
+                        <span className="text-base font-bold text-emerald-800 mt-0.5 block">
+                          {formatWholeCurrency(totalSum.totalAmount)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
+                        <thead>
+                          <tr className="bg-slate-50">
+                            <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">तारीख</th>
+                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">सुबह (L / ₹)</th>
+                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">शाम (L / ₹)</th>
+                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">कुल (L / ₹)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dayRows.map((r) => (
+                            <tr key={r.date} className="hover:bg-slate-50">
+                              <td className="py-1.5 px-1.5 sm:px-2.5 font-mono font-bold text-slate-900 whitespace-nowrap border border-slate-300">
+                                {formatDateDMY(r.date)}
+                              </td>
+                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                <span className="block font-bold text-slate-900 leading-tight">
+                                  {formatNumber(r.mornLiters, 2)} L
+                                </span>
+                                <span className="block text-xs font-semibold text-slate-600 leading-tight">
+                                  {formatWholeCurrency(r.mornAmt)}
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                <span className="block font-bold text-slate-900 leading-tight">
+                                  {formatNumber(r.eveLiters, 2)} L
+                                </span>
+                                <span className="block text-xs font-semibold text-slate-600 leading-tight">
+                                  {formatWholeCurrency(r.eveAmt)}
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                <span className="block font-extrabold text-blue-900 leading-tight">
+                                  {formatNumber(r.totLiters, 2)} L
+                                </span>
+                                <span className="block text-xs font-extrabold text-emerald-800 leading-tight">
+                                  {formatWholeCurrency(r.totAmt)}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-blue-50/80 font-extrabold tabular-nums">
+                            <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                              कुल ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
+                            </td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                              <span className="block leading-tight">
+                                {formatNumber(mornSum.totalLiters, 2)} L
+                              </span>
+                              <span className="block text-xs text-slate-700 leading-tight">
+                                {formatWholeCurrency(mornSum.totalAmount)}
+                              </span>
+                            </td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                              <span className="block leading-tight">
+                                {formatNumber(eveSum.totalLiters, 2)} L
+                              </span>
+                              <span className="block text-xs text-slate-700 leading-tight">
+                                {formatWholeCurrency(eveSum.totalAmount)}
+                              </span>
+                            </td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                              <span className="block text-blue-900 leading-tight">
+                                {formatNumber(totalSum.totalLiters, 2)} L
+                              </span>
+                              <span className="block text-xs text-emerald-800 leading-tight">
+                                {formatWholeCurrency(totalSum.totalAmount)}
+                              </span>
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+
+            {/* REPORT 4: लाभ-हानि रिपोर्ट (Profit & Loss Report) */}
+            {activeCleanReport === 'profit_loss' &&
+              (() => {
+                const { fromDate, toDate } = getTenDayCycleDates(billYearMonth, billCycle);
+                const periodCollections = state.collections.filter(
+                  (c) => c.date >= fromDate && c.date <= toDate
+                );
+                const periodSales = state.sales.filter(
+                  (s) => s.date >= fromDate && s.date <= toDate
+                );
+                const mornPL = calculatePureProfitLoss(
+                  periodCollections.filter((c) => c.shift === 'morning'),
+                  periodSales.filter((s) => s.shift === 'morning')
+                );
+                const evePL = calculatePureProfitLoss(
+                  periodCollections.filter((c) => c.shift === 'evening'),
+                  periodSales.filter((s) => s.shift === 'evening')
+                );
+                const totalPL = calculatePureProfitLoss(periodCollections, periodSales);
+
+                const startDay = Number(fromDate.slice(8, 10));
+                const endDay = Number(toDate.slice(8, 10));
+                const plRows: Array<{
+                  date: string;
+                  buyLiters: number;
+                  buyAmt: number;
+                  saleLiters: number;
+                  saleAmt: number;
+                  netDiff: number;
+                  isProfit: boolean;
+                }> = [];
+
+                for (let d = startDay; d <= endDay; d++) {
+                  const dStr = `${billYearMonth}-${String(d).padStart(2, '0')}`;
+                  const dCol = periodCollections.filter((c) => c.date === dStr);
+                  const dSal = periodSales.filter((s) => s.date === dStr);
+                  const dPL = calculatePureProfitLoss(dCol, dSal);
+                  plRows.push({
+                    date: dStr,
+                    buyLiters: dPL.purchasedLiters,
+                    buyAmt: dPL.purchaseAmount,
+                    saleLiters: dPL.soldLiters,
+                    saleAmt: dPL.saleAmount,
+                    netDiff: dPL.netDifference,
+                    isProfit: dPL.isProfit,
+                  });
+                }
+
+                return (
+                  <div
+                    data-testid="clean-report-view-profit-loss"
+                    className="space-y-4 pt-2 border-t border-slate-100"
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 no-print">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? 'महीना चुनें' : 'Month'}
+                        </label>
+                        <input
+                          type="month"
+                          value={billYearMonth}
+                          onChange={(e) => setBillYearMonth(e.target.value)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm border border-slate-300 rounded-xl tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {lang === 'hi' ? '10-दिन की अवधि' : '10-Day Period'}
+                        </label>
+                        <select
+                          value={billCycle}
+                          onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                        >
+                          <option value={1}>1 से 10 तारीख (Cycle 1)</option>
+                          <option value={2}>11 से 20 तारीख (Cycle 2)</option>
+                          <option value={3}>21 से महीने के अंत तक (Cycle 3)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums">
+                      <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
+                        <span className="text-blue-900 font-semibold block">
+                          कुल दूध खरीद (Purchase)
+                        </span>
+                        <span className="text-sm font-bold text-blue-900 mt-0.5 block">
+                          {formatNumber(totalPL.purchasedLiters, 3)} L ·{' '}
+                          {formatWholeCurrency(totalPL.purchaseAmount)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <span className="text-slate-700 font-semibold block">
+                          कुल दूध बिक्री (Wholesale Sale)
+                        </span>
+                        <span className="text-sm font-bold text-slate-900 mt-0.5 block">
+                          {formatNumber(totalPL.soldLiters, 3)} L ·{' '}
+                          {formatCurrency(totalPL.saleAmount)}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <span className="text-slate-600 block">सुबह व शाम का लाभ/हानि</span>
+                        <span className="text-xs font-bold text-slate-900 mt-0.5 block">
+                          सुबह: {mornPL.netDifference >= 0 ? '+' : ''}
+                          {formatCurrency(mornPL.netDifference)} | शाम:{' '}
+                          {evePL.netDifference >= 0 ? '+' : ''}
+                          {formatCurrency(evePL.netDifference)}
+                        </span>
+                      </div>
+                      <div
+                        data-testid="clean-report-pl-net-card"
+                        className={`p-3 rounded-xl border-2 ${
+                          totalPL.isProfit
+                            ? 'bg-emerald-50 border-emerald-400'
+                            : 'bg-rose-50 border-rose-400'
+                        }`}
+                      >
+                        <span className="text-slate-800 font-bold block">
+                          शुद्ध लाभ / हानि (बिक्री - खरीद)
+                        </span>
+                        <span
+                          className={`text-base font-extrabold mt-0.5 block ${
+                            totalPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                          }`}
+                        >
+                          {totalPL.netDifference >= 0
+                            ? `+${formatCurrency(totalPL.netDifference)} (लाभ)`
+                            : `${formatCurrency(totalPL.netDifference)} (हानि)`}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
+                        <thead>
+                          <tr className="bg-slate-50">
+                            <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">तारीख</th>
+                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">खरीद (L / ₹)</th>
+                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">बिक्री (L / ₹)</th>
+                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">लाभ / हानि</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {plRows.map((r) => (
+                            <tr key={r.date} className="hover:bg-slate-50">
+                              <td className="py-1.5 px-1.5 sm:px-2.5 font-mono font-bold text-slate-900 whitespace-nowrap border border-slate-300">
+                                {formatDateDMY(r.date)}
+                              </td>
+                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                <span className="block font-bold text-slate-900 leading-tight">
+                                  {formatNumber(r.buyLiters, 2)} L
+                                </span>
+                                <span className="block text-xs font-semibold text-slate-600 leading-tight">
+                                  {formatWholeCurrency(r.buyAmt)}
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                <span className="block font-bold text-slate-900 leading-tight">
+                                  {formatNumber(r.saleLiters, 2)} L
+                                </span>
+                                <span className="block text-xs font-semibold text-slate-600 leading-tight">
+                                  {formatCurrency(r.saleAmt)}
+                                </span>
+                              </td>
+                              <td
+                                className={`py-1.5 px-1.5 sm:px-2.5 text-right font-extrabold whitespace-nowrap border border-slate-300 ${
+                                  r.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                                }`}
+                              >
+                                {r.netDiff >= 0
+                                  ? `+${formatCurrency(r.netDiff)}`
+                                  : formatCurrency(r.netDiff)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-blue-50/80 font-extrabold tabular-nums">
+                            <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                              कुल ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
+                            </td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                              <span className="block leading-tight">
+                                {formatNumber(totalPL.purchasedLiters, 2)} L
+                              </span>
+                              <span className="block text-xs text-slate-700 leading-tight">
+                                {formatWholeCurrency(totalPL.purchaseAmount)}
+                              </span>
+                            </td>
+                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                              <span className="block leading-tight">
+                                {formatNumber(totalPL.soldLiters, 2)} L
+                              </span>
+                              <span className="block text-xs text-slate-700 leading-tight">
+                                {formatCurrency(totalPL.saleAmount)}
+                              </span>
+                            </td>
+                            <td
+                              className={`py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300 ${
+                                totalPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
+                              }`}
+                            >
+                              {totalPL.netDifference >= 0
+                                ? `+${formatCurrency(totalPL.netDifference)}`
+                                : formatCurrency(totalPL.netDifference)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+          </div>
+
           <div className="bg-white border border-slate-200 rounded-2xl p-5 no-print">
             <h2 className="text-base font-bold text-slate-900 mb-1">
               {lang === 'hi'
-                ? '10-दिन का बिलिंग सिस्टम (10-Day Cycle Billing)'
+                ? 'किसान का 10-दिन बिल बनाएँ (10-Day Cycle Farmer Bill)'
                 : '10-Day Cycle Farmer Billing'}
             </h2>
             <p className="text-xs text-slate-500 mb-4">
@@ -1734,7 +2515,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   <p className="text-xs text-slate-600 mt-0.5 tabular-nums">
                     बिल नं: <strong>{activeBill.billNumber}</strong> · अवधि:{' '}
                     <strong>
-                      {activeBill.fromDate} से {activeBill.toDate}
+                      {formatDateDMY(activeBill.fromDate)} से {formatDateDMY(activeBill.toDate)}
                     </strong>
                   </p>
                   <p className="text-sm font-bold text-slate-900 mt-1">
@@ -1798,6 +2579,95 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   </span>
                 </div>
               </div>
+
+              {/* Bordered 10-Day Bill Saved Milk Entries Grid (Liters | FAT | SNF | Rate | Amount) */}
+              {(() => {
+                const billEntries = state.collections
+                  .filter(
+                    (c) =>
+                      c.farmerId === activeBill.farmerId &&
+                      c.date >= activeBill.fromDate &&
+                      c.date <= activeBill.toDate
+                  )
+                  .sort((a, b) => a.date.localeCompare(b.date) || a.shift.localeCompare(b.shift));
+
+                return (
+                  <div className="space-y-1.5">
+                    <h4 className="text-xs sm:text-sm font-extrabold text-slate-800">
+                      {lang === 'hi'
+                        ? `इस बिल की सेव की गई दूध एंट्रियाँ (${billEntries.length} एंट्री · ${formatDateDMY(activeBill.fromDate)} से ${formatDateDMY(activeBill.toDate)})`
+                        : `Saved Milk Entries in this Bill (${billEntries.length})`}
+                    </h4>
+                    <table
+                      data-testid="bill-saved-entries-table"
+                      className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums"
+                    >
+                      <thead>
+                        <tr className="bg-blue-50 text-blue-950">
+                          <th className="py-1.5 px-1 sm:px-2 text-left font-bold border border-slate-300">
+                            {lang === 'hi' ? 'तारीख / शिफ्ट' : 'Date / Shift'}
+                          </th>
+                          <th className="py-1.5 px-1 sm:px-2 text-right font-bold border border-slate-300">
+                            {lang === 'hi' ? 'लीटर' : 'Liters'}
+                          </th>
+                          <th className="py-1.5 px-1 sm:px-2 text-center font-bold border border-slate-300 bg-amber-50/80 text-amber-950">
+                            FAT
+                          </th>
+                          <th className="py-1.5 px-1 sm:px-2 text-center font-bold border border-slate-300 bg-indigo-50/80 text-indigo-950">
+                            SNF
+                          </th>
+                          <th className="py-1.5 px-1 sm:px-2 text-right font-bold border border-slate-300">
+                            {lang === 'hi' ? 'रेट' : 'Rate'}
+                          </th>
+                          <th className="py-1.5 px-1 sm:px-2 text-right font-bold border border-slate-300">
+                            {lang === 'hi' ? 'राशि' : 'Amount'}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {billEntries.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="py-4 text-center text-slate-500 border border-slate-300">
+                              {lang === 'hi'
+                                ? 'इस 10-दिन की अवधि में कोई दूध एंट्री नहीं है।'
+                                : 'No milk entries in this 10-day period.'}
+                            </td>
+                          </tr>
+                        ) : (
+                          billEntries.map((ce) => (
+                            <tr key={ce.id} className="hover:bg-slate-50">
+                              <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap">
+                                <span className="font-mono font-bold text-slate-900 block leading-tight">
+                                  {formatDateDMY(ce.date)}
+                                </span>
+                                <span className="text-[11px] font-semibold text-slate-600 block leading-tight">
+                                  {ce.shift === 'morning' ? 'सुबह' : 'शाम'} ·{' '}
+                                  {ce.milkType === 'cow' ? 'गाय' : 'भैंस'}
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
+                                {formatNumber(ce.liters, 2)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-950 bg-amber-50/40 whitespace-nowrap border border-slate-300">
+                                {formatNumber(ce.fat, 1)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-950 bg-indigo-50/40 whitespace-nowrap border border-slate-300">
+                                {formatNumber(ce.snf, 1)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                                ₹{formatNumber(ce.rate, 2)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
+                                {formatWholeCurrency(ce.totalAmount)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs tabular-nums">
                 <div
@@ -2030,53 +2900,64 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           )}
 
           {/* Saved Bills Archive */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 no-print overflow-x-auto">
-            <h3 className="text-sm font-bold text-slate-900 mb-3">
+          <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5 no-print">
+            <h3 className="text-sm font-bold text-slate-900 mb-2.5">
               {lang === 'hi'
                 ? `पुराने सेव किए गए 10-दिन के बिल (${state.bills.length})`
                 : `Saved 10-Day Bills (${state.bills.length})`}
             </h3>
-            <table className="w-full text-xs border-collapse">
+            <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-200">
-                  <th className="py-2 px-3 text-left">बिल नं</th>
-                  <th className="py-2 px-3 text-left">किसान</th>
-                  <th className="py-2 px-3 text-left">अवधि</th>
-                  <th className="py-2 px-3 text-right">कुल दूध</th>
-                  <th className="py-2 px-3 text-right">दूध राशि</th>
-                  <th className="py-2 px-3 text-right">अंतिम देय राशि</th>
-                  <th className="py-2 px-3 text-center">खोलें</th>
+                <tr className="bg-slate-50">
+                  <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">किसान / बिल नं</th>
+                  <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">अवधि (DD-MM-YYYY)</th>
+                  <th className="py-2 px-1 sm:px-2.5 text-right border border-slate-300">दूध · FAT/SNF · देय</th>
+                  <th className="py-2 px-1 sm:px-2 text-center border border-slate-300">खोलें</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 tabular-nums">
+              <tbody>
                 {state.bills.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-6 text-center text-slate-500">
+                    <td colSpan={4} className="py-6 text-center text-slate-500 border border-slate-300">
                       {lang === 'hi' ? 'कोई पुराना बिल सेव नहीं है' : 'No saved bills yet'}
                     </td>
                   </tr>
                 ) : (
                   state.bills.map((b) => (
                     <tr key={b.id} className="hover:bg-slate-50">
-                      <td className="py-2 px-3 font-mono">{b.billNumber}</td>
-                      <td className="py-2 px-3 font-bold">
-                        {b.farmerCode} — {b.farmerName}
+                      <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
+                        <span className="font-bold text-slate-900 block leading-tight">
+                          {b.farmerCode} — {b.farmerName}
+                        </span>
+                        <span className="text-[11px] text-slate-500 font-mono block leading-tight mt-0.5">
+                          {b.billNumber}
+                        </span>
                       </td>
-                      <td className="py-2 px-3">
-                        {b.fromDate} से {b.toDate}
+                      <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
+                        <span className="font-mono font-bold text-slate-800 block leading-tight">
+                          {formatDateDMY(b.fromDate)}
+                        </span>
+                        <span className="font-mono font-semibold text-slate-600 text-[11px] block leading-tight">
+                          से {formatDateDMY(b.toDate)}
+                        </span>
                       </td>
-                      <td className="py-2 px-3 text-right">{formatNumber(b.totalLiters, 3)} L</td>
-                      <td className="py-2 px-3 text-right">{formatWholeCurrency(b.totalMilkAmount)}</td>
-                      <td className="py-2 px-3 text-right font-bold text-emerald-700">
-                        {formatWholeCurrency(b.netPayable)}
+                      <td className="py-2 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                        <span className="font-extrabold text-emerald-700 text-xs sm:text-sm block leading-tight">
+                          {formatWholeCurrency(b.netPayable)}
+                        </span>
+                        <div className="mt-1 inline-grid grid-cols-3 divide-x divide-slate-300 border border-slate-300 rounded bg-slate-50 text-[11px] font-bold">
+                          <span className="px-1 py-0.5 text-slate-900">{formatNumber(b.totalLiters, 1)}L</span>
+                          <span className="px-1 py-0.5 text-amber-950 bg-amber-50/70">F:{formatNumber(b.avgFat, 1)}</span>
+                          <span className="px-1 py-0.5 text-indigo-950 bg-indigo-50/70">S:{formatNumber(b.avgSnf, 1)}</span>
+                        </div>
                       </td>
-                      <td className="py-2 px-3 text-center">
+                      <td className="py-2 px-1 sm:px-2 text-center border border-slate-300">
                         <button
                           type="button"
                           onClick={() => setActiveBill(b)}
-                          className="px-2.5 py-1 bg-blue-50 text-blue-700 font-semibold rounded-lg"
+                          className="px-2 py-1 bg-blue-50 text-blue-700 font-bold rounded-lg whitespace-nowrap"
                         >
-                          {lang === 'hi' ? 'बिल खोलें' : 'Open'}
+                          {lang === 'hi' ? 'खोलें' : 'Open'}
                         </button>
                       </td>
                     </tr>

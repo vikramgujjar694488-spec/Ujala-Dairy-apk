@@ -174,9 +174,9 @@ export default function App() {
     } else if (target === 'expenses') {
       setRateSubTab('expenses');
       setActiveTab('ratechart');
-    } else if (target === 'reports') {
-      setReportSubTab('reports');
-      setActiveTab('reports');
+    } else if (target === 'reports' || target === 'billing') {
+      setFarmerSubTab('billing');
+      setActiveTab('ledger');
     } else if (target === 'backup') {
       setReportSubTab('backup');
       setActiveTab('settings');
@@ -214,12 +214,42 @@ export default function App() {
       if (!check.allowed) {
         return prev;
       }
-      return {
+      const next = {
         ...prev,
         collections: isEdit
           ? prev.collections.map((c) => (c.id === entry.id ? entry : c))
           : [...prev.collections, entry],
       };
+      saveDairyState(next);
+      return next;
+    });
+  };
+
+  const handleSaveBatchCollections = (
+    entries: MilkCollectionEntry[],
+    newFarmers: Farmer[] = []
+  ) => {
+    setState((prev) => {
+      let nextFarmers = [...prev.farmers];
+      for (const nf of newFarmers) {
+        if (!nextFarmers.some((f) => f.id === nf.id || String(f.code) === String(nf.code))) {
+          nextFarmers.push(nf);
+        }
+      }
+      let nextCollections = [...prev.collections];
+      for (const entry of entries) {
+        const check = canSaveFarmerShiftMilkEntry(nextCollections, entry);
+        if (check.allowed) {
+          nextCollections.push(entry);
+        }
+      }
+      const next = {
+        ...prev,
+        farmers: nextFarmers,
+        collections: nextCollections,
+      };
+      saveDairyState(next);
+      return next;
     });
   };
 
@@ -487,12 +517,24 @@ export default function App() {
               type="button"
               onClick={() => handleNavigate('farmers')}
               className={`hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 ${
-                activeTab === 'farmers' || activeTab === 'ledger'
+                (activeTab === 'farmers' || activeTab === 'ledger') && farmerSubTab !== 'billing'
                   ? 'text-white underline underline-offset-4 font-bold'
                   : ''
               }`}
             >
               {lang === 'hi' ? 'किसान व खाता' : 'Farmers & Ledger'}
+            </button>
+            <button
+              type="button"
+              data-testid="nav-billing-reports-btn"
+              onClick={() => handleNavigate('billing')}
+              className={`hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 ${
+                (activeTab === 'farmers' || activeTab === 'ledger') && farmerSubTab === 'billing'
+                  ? 'text-white underline underline-offset-4 font-bold'
+                  : ''
+              }`}
+            >
+              {lang === 'hi' ? '10-दिन बिलिंग व रिपोर्ट' : '10-Day Bill & Reports'}
             </button>
             <button
               type="button"
@@ -502,17 +544,6 @@ export default function App() {
               }`}
             >
               {lang === 'hi' ? 'रेट चार्ट व खर्च' : 'Rate Chart & Expense'}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleNavigate('reports')}
-              className={`hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 ${
-                activeTab === 'reports' || activeTab === 'settings'
-                  ? 'text-white underline underline-offset-4 font-bold'
-                  : ''
-              }`}
-            >
-              {lang === 'hi' ? 'रिपोर्ट व बैकअप' : 'Reports & Backup'}
             </button>
           </nav>
 
@@ -556,6 +587,7 @@ export default function App() {
             onChangeDate={handleChangeDate}
             onChangeShift={handleChangeShift}
             onSaveEntry={handleSaveCollection}
+            onSaveBatchEntries={handleSaveBatchCollections}
             onDeleteEntry={handleDeleteCollection}
             onToggleFarmerLeave={handleToggleFarmerLeave}
             onSaveFarmer={handleSaveFarmer}
@@ -649,17 +681,19 @@ export default function App() {
           },
           {
             id: 'farmers',
-            hi: 'किसान',
+            hi: 'किसान/खाता',
             en: 'Farmers',
             icon: Users,
-            isActive: activeTab === 'farmers' && farmerSubTab === 'farmers',
+            isActive:
+              (activeTab === 'farmers' || activeTab === 'ledger') && farmerSubTab !== 'billing',
           },
           {
-            id: 'ledger',
-            hi: 'हिसाब',
-            en: 'Ledger',
-            icon: BookOpen,
-            isActive: activeTab === 'ledger' || (activeTab === 'farmers' && farmerSubTab !== 'farmers'),
+            id: 'billing',
+            hi: '10-दिन/रिपोर्ट',
+            en: '10-Day/Report',
+            icon: FileText,
+            isActive:
+              (activeTab === 'farmers' || activeTab === 'ledger') && farmerSubTab === 'billing',
           },
           {
             id: 'ratechart',
@@ -669,10 +703,10 @@ export default function App() {
             isActive: activeTab === 'ratechart',
           },
           {
-            id: 'reports',
-            hi: 'रिपोर्ट/बैकअप',
-            en: 'Reports',
-            icon: FileText,
+            id: 'backup',
+            hi: 'बैकअप/सेटिंग',
+            en: 'Backup',
+            icon: BookOpen,
             isActive: activeTab === 'reports' || activeTab === 'settings',
           },
         ].map((item) => {

@@ -51,6 +51,7 @@ jobs:
               "lucide-react": "^0.468.0",
               "react": "^19.0.0",
               "react-dom": "^19.0.0",
+              "tesseract.js": "^5.1.1",
               "xlsx": "^0.18.5"
             };
             pkg.devDependencies = {
@@ -74,6 +75,26 @@ jobs:
           npm install --no-save --legacy-peer-deps @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
           rm -rf android
           npx cap add android
+          node -e '
+            const fs = require("fs");
+            const manifestPath = "android/app/src/main/AndroidManifest.xml";
+            if (fs.existsSync(manifestPath)) {
+              let xml = fs.readFileSync(manifestPath, "utf8");
+              const perms = [
+                "<uses-permission android:name=\"android.permission.CAMERA\" />",
+                "<uses-permission android:name=\"android.permission.READ_MEDIA_IMAGES\" />",
+                "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" />",
+                "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"29\" />"
+              ].join("\n    ");
+              if (!xml.includes("android.permission.CAMERA")) {
+                xml = xml.replace("<uses-permission android:name=\"android.permission.INTERNET\" />", "<uses-permission android:name=\"android.permission.INTERNET\" />\n    " + perms);
+              }
+              if (!xml.includes("usesCleartextTraffic")) {
+                xml = xml.replace("<application", "<application android:usesCleartextTraffic=\"true\"");
+              }
+              fs.writeFileSync(manifestPath, xml);
+            }
+          '
           npx cap sync android
 
       - name: Build Debug APK with Gradle
@@ -97,9 +118,14 @@ jobs:
           tag_name: v1.0.${{ github.run_number }}
           name: "Ujalaa Dairy Android Debug APK (Build #${{ github.run_number }})"
           body: |
-            ## Ujalaa Dairy — Android Debug APK
+            ## Ujalaa Dairy — Android Debug APK (Latest Update)
             
             - **Direct APK Download**: Click **`Ujalaa-Dairy-debug.apk`** under **Assets** below to download and install directly on your Android phone.
+            - **Included Features**:
+              - Photo Milk Entry Preview Table (Date, Shift, Farmer Code, Name, Cow/Buffalo, FAT, SNF, Liters, Rate, Amount) before saving
+              - Max 2 Milk Entries per Farmer per Shift (1 Cow + 1 Buffalo) & strict duplicate blocking
+              - 10-Day Billing Period selection in Payments (`1-10`, `11-20`, `21-End`) with automatic under/over-payment carry-forward adjustment in bills
+              - Auto Today's Date & 12:00 PM Noon Shift switching, Gallery & Camera photo support, 10-Day Sale Bill, and APK-ready Backup/Restore
             - **Package ID**: `com.ujalaadairy.app`
             - **App Name**: `Ujalaa Dairy`
             - **Commit**: `${{ github.sha }}`

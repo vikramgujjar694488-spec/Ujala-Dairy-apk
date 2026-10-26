@@ -27,6 +27,7 @@ import {
   ExcelImportMode,
   FlexibleExcelParseResult,
   formatCurrency,
+  formatDateDMY,
   lookupRateFromChart,
   makeRateKey,
   parseExcelWithMode,
@@ -1552,7 +1553,7 @@ export const RateChartAndExpensesView: React.FC<RateChartAndExpensesViewProps> =
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    {lang === 'hi' ? 'तारीख *' : 'Date *'}
+                    {lang === 'hi' ? `तारीख (${formatDateDMY(expDate)}) *` : `Date (${formatDateDMY(expDate)}) *`}
                   </label>
                   <input
                     type="date"
@@ -1691,49 +1692,51 @@ export const RateChartAndExpensesView: React.FC<RateChartAndExpensesViewProps> =
             </div>
           </div>
 
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 overflow-x-auto">
+          <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5 overflow-hidden">
             <h3 className="text-sm font-bold text-slate-900 mb-3">
               {lang === 'hi' ? 'सभी दर्ज किए गए खर्च' : 'Recorded Expenses'}
             </h3>
-            <table className="w-full text-xs border-collapse">
+            <table className="w-full text-[11px] sm:text-xs border-collapse border border-slate-300">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-200">
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'तारीख' : 'Date'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'शिफ्ट' : 'Shift'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'श्रेणी' : 'Category'}</th>
-                  <th className="py-2 px-3 text-left">{lang === 'hi' ? 'विवरण' : 'Description'}</th>
-                  <th className="py-2 px-3 text-right">{lang === 'hi' ? 'राशि' : 'Amount'}</th>
-                  <th className="py-2 px-3 text-center">{lang === 'hi' ? 'कार्य' : 'Action'}</th>
+                <tr className="bg-slate-100 border-b border-slate-300">
+                  <th className="py-2 px-1.5 text-left border border-slate-300">{lang === 'hi' ? 'तारीख / शिफ्ट' : 'Date / Shift'}</th>
+                  <th className="py-2 px-1.5 text-left border border-slate-300">{lang === 'hi' ? 'श्रेणी व विवरण' : 'Category'}</th>
+                  <th className="py-2 px-1.5 text-right border border-slate-300">{lang === 'hi' ? 'राशि' : 'Amount'}</th>
+                  <th className="py-2 px-1 text-center border border-slate-300">{lang === 'hi' ? 'कार्य' : 'Act'}</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 tabular-nums">
+              <tbody className="divide-y divide-slate-200 tabular-nums">
                 {state.expenses.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-6 text-center text-slate-500">
+                    <td colSpan={4} className="py-6 text-center text-slate-500 border border-slate-300">
                       {lang === 'hi' ? 'अभी कोई खर्च रिकॉर्ड नहीं है' : 'No expenses recorded'}
                     </td>
                   </tr>
                 ) : (
                   state.expenses.map((e) => (
                     <tr key={e.id}>
-                      <td className="py-2 px-3">{e.date}</td>
-                      <td className="py-2 px-3">
-                        {e.shift === 'morning'
-                          ? 'सुबह'
-                          : e.shift === 'evening'
-                          ? 'शाम'
-                          : 'दैनिक/सामान्य'}
+                      <td className="py-2 px-1.5 border border-slate-300">
+                        <div className="font-bold text-slate-900">{formatDateDMY(e.date)}</div>
+                        <div className="text-[10px] text-slate-500">
+                          {e.shift === 'morning'
+                            ? 'सुबह'
+                            : e.shift === 'evening'
+                            ? 'शाम'
+                            : 'दैनिक/सामान्य'}
+                        </div>
                       </td>
-                      <td className="py-2 px-3 font-bold">{e.category}</td>
-                      <td className="py-2 px-3">{e.description || '—'}</td>
-                      <td className="py-2 px-3 text-right font-bold text-red-600">
+                      <td className="py-2 px-1.5 border border-slate-300">
+                        <div className="font-bold text-slate-900">{e.category}</div>
+                        <div className="text-[10px] text-slate-600">{e.description || '—'}</div>
+                      </td>
+                      <td className="py-2 px-1.5 text-right text-xs sm:text-sm font-extrabold text-red-600 border border-slate-300 whitespace-nowrap">
                         {formatCurrency(e.amount)}
                       </td>
-                      <td className="py-2 px-3 text-center">
+                      <td className="py-2 px-1 text-center border border-slate-300">
                         <button
                           type="button"
                           onClick={() => setDeleteExpId(e.id)}
-                          className="px-2 py-1 bg-red-50 text-red-600 rounded-lg"
+                          className="p-1.5 bg-red-50 text-red-600 rounded-lg inline-flex"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>

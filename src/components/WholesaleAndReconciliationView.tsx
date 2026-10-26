@@ -37,6 +37,7 @@ import {
   classifyMilkType,
   formatAutoDecimalFatSnf,
   formatCurrency,
+  formatDateDMY,
   formatNumber,
   formatWholeCurrency,
   generateTenDaySaleBillData,
@@ -540,14 +541,22 @@ export const WholesaleAndReconciliationView: React.FC<
               className="flex flex-wrap items-center justify-between gap-1.5 pb-2 mb-2 border-b border-slate-100"
             >
               <div className="flex items-center gap-1.5">
-                <div className="flex items-center gap-1 bg-slate-100 px-2 py-1 rounded-lg">
+                <div className="relative inline-flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 cursor-pointer">
                   <Calendar className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                  <span className="text-xs font-extrabold text-blue-800 tabular-nums whitespace-nowrap">
+                    {formatDateDMY(date)}
+                  </span>
                   <input
                     type="date"
                     aria-label={lang === 'hi' ? 'बिक्री की तारीख' : 'Sale Date'}
                     value={date}
                     onChange={(e) => onChangeDate(e.target.value)}
-                    className="text-xs font-bold text-slate-900 bg-transparent focus:outline-none tabular-nums w-[108px]"
+                    onClick={(e) => {
+                      try {
+                        (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
+                      } catch {}
+                    }}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                   />
                 </div>
 
@@ -971,8 +980,8 @@ export const WholesaleAndReconciliationView: React.FC<
               <div>
                 <h3 className="text-sm sm:text-base font-bold text-slate-900">
                   {lang === 'hi'
-                    ? `इस तारीख की सेव की गई दूध बिक्री (${date})`
-                    : `Saved Milk Sales for ${date}`}
+                    ? `इस तारीख की सेव की गई दूध बिक्री (${formatDateDMY(date)})`
+                    : `Saved Milk Sales for ${formatDateDMY(date)}`}
                 </h3>
               </div>
 
@@ -998,25 +1007,34 @@ export const WholesaleAndReconciliationView: React.FC<
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs border-collapse">
+            <div>
+              <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
                 <thead>
-                  <tr className="bg-slate-50 text-slate-700 border-b border-slate-200">
-                    <th className="py-2.5 px-3 text-left">#</th>
-                    <th className="py-2.5 px-3 text-left">{lang === 'hi' ? 'शिफ्ट' : 'Shift'}</th>
-                    <th className="py-2.5 px-3 text-left">{lang === 'hi' ? 'ग्राहक / खरीदार' : 'Customer'}</th>
-                    <th className="py-2.5 px-3 text-left">{lang === 'hi' ? 'प्रकार' : 'Type'}</th>
-                    <th className="py-2.5 px-3 text-right">{lang === 'hi' ? 'लीटर' : 'Liters'}</th>
-                    <th className="py-2.5 px-3 text-right">FAT / SNF</th>
-                    <th className="py-2.5 px-3 text-right">{lang === 'hi' ? 'दर (Rate)' : 'Rate'}</th>
-                    <th className="py-2.5 px-3 text-right">{lang === 'hi' ? 'कुल राशि' : 'Total Amount'}</th>
-                    <th className="py-2.5 px-3 text-center">{lang === 'hi' ? 'कार्य' : 'Actions'}</th>
+                  <tr className="bg-slate-50 text-slate-800">
+                    <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">
+                      {lang === 'hi' ? 'ग्राहक / शिफ्ट' : 'Customer / Shift'}
+                    </th>
+                    <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">
+                      {lang === 'hi' ? 'लीटर' : 'Liters'}
+                    </th>
+                    <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-amber-50/70 text-amber-950">
+                      FAT
+                    </th>
+                    <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-indigo-50/70 text-indigo-950">
+                      SNF
+                    </th>
+                    <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">
+                      {lang === 'hi' ? 'रेट' : 'Rate'}
+                    </th>
+                    <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">
+                      {lang === 'hi' ? 'राशि / कार्य' : 'Total / Act'}
+                    </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 tabular-nums">
+                <tbody>
                   {daySales.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="py-6 text-center text-slate-500">
+                      <td colSpan={6} className="py-6 text-center text-slate-500 border border-slate-300">
                         {lang === 'hi'
                           ? 'इस तारीख के लिए कोई दूध बिक्री दर्ज नहीं है।'
                           : 'No milk sales recorded for this date.'}
@@ -1025,64 +1043,63 @@ export const WholesaleAndReconciliationView: React.FC<
                   ) : (
                     daySales.map((s, idx) => (
                       <tr key={s.id} className="hover:bg-slate-50">
-                        <td className="py-2.5 px-3 font-mono">{idx + 1}</td>
-                        <td className="py-2.5 px-3">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[11px] font-bold ${
-                              s.shift === 'morning' ? 'bg-amber-100 text-amber-900' : 'bg-indigo-100 text-indigo-900'
-                            }`}
-                          >
-                            {s.shift === 'morning' ? 'सुबह' : 'शाम'}
+                        <td className="py-1.5 px-1 sm:px-2.5 border border-slate-300">
+                          <span className="font-bold text-slate-900 block leading-tight">
+                            <span className="text-slate-400 font-normal mr-0.5">{idx + 1}.</span>
+                            {s.customerCode ? (
+                              <span className="font-mono text-blue-700 mr-1">{s.customerCode}</span>
+                            ) : null}
+                            {s.buyerName}
+                          </span>
+                          <span className="text-[11px] font-semibold text-slate-600 block leading-tight mt-0.5">
+                            {formatDateDMY(s.date)} ·{' '}
+                            <span
+                              className={`px-1 py-0.2 rounded font-bold text-[10px] ${
+                                s.shift === 'morning'
+                                  ? 'bg-amber-100 text-amber-900'
+                                  : 'bg-indigo-100 text-indigo-900'
+                              }`}
+                            >
+                              {s.shift === 'morning' ? 'सुबह' : 'शाम'}
+                            </span>{' '}
+                            ·{' '}
+                            {s.milkType === 'cow'
+                              ? 'गाय'
+                              : s.milkType === 'buffalo'
+                              ? 'भैंस'
+                              : 'मिश्रित'}
                           </span>
                         </td>
-                        <td className="py-2.5 px-3 font-bold text-slate-900">
-                          {s.customerCode ? <span className="font-mono text-blue-700 mr-1.5">{s.customerCode}</span> : null}
-                          {s.buyerName}
+                        <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
+                          {formatNumber(s.liters, 2)}
                         </td>
-                        <td className="py-2.5 px-3">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                              s.milkType === 'cow'
-                                ? 'bg-amber-50 text-amber-900'
-                                : s.milkType === 'buffalo'
-                                ? 'bg-blue-50 text-blue-900'
-                                : 'bg-slate-100 text-slate-800'
-                            }`}
-                          >
-                            {s.milkType === 'cow' ? 'गाय' : s.milkType === 'buffalo' ? 'भैंस' : 'मिश्रित'}
+                        <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-950 bg-amber-50/40 whitespace-nowrap border border-slate-300">
+                          {formatNumber(s.avgFat, 1)}
+                        </td>
+                        <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-950 bg-indigo-50/40 whitespace-nowrap border border-slate-300">
+                          {formatNumber(s.avgSnf, 1)}
+                        </td>
+                        <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                          ₹{formatNumber(s.rate, 2)}
+                        </td>
+                        <td className="py-1.5 px-1 sm:px-2 text-right whitespace-nowrap border border-slate-300">
+                          <span className="font-extrabold text-emerald-700 block leading-tight">
+                            {formatCurrency(s.netReceivable)}
                           </span>
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-slate-900">
-                          {formatNumber(s.liters, 3)} L
-                        </td>
-                        <td className="py-2.5 px-3 text-right">
-                          {formatNumber(s.avgFat)} / {formatNumber(s.avgSnf)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right">
-                          {formatCurrency(s.rate)}{' '}
-                          <span className="text-[10px] text-slate-400">
-                            ({s.isManualRate ? 'Manual' : 'Chart'})
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-emerald-700">
-                          {formatCurrency(s.netReceivable)}
-                        </td>
-                        <td className="py-2.5 px-3 text-center">
-                          <div className="flex items-center justify-center gap-1.5">
+                          <div className="flex items-center justify-end gap-1 mt-1">
                             <button
                               type="button"
                               onClick={() => setSaleSlipEntry(s)}
                               title={lang === 'hi' ? 'बिक्री रसीद प्रिंट' : 'Print Slip'}
-                              className="min-h-[30px] px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg font-semibold flex items-center gap-1"
+                              className="min-h-[24px] px-1.5 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded font-semibold flex items-center"
                             >
                               <Printer className="w-3 h-3" />
-                              <span className="hidden sm:inline">पर्ची</span>
                             </button>
                             <button
                               type="button"
                               onClick={() => handleEdit(s)}
                               title={lang === 'hi' ? 'एडिट करें' : 'Edit'}
-                              className="min-h-[30px] px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
+                              className="min-h-[24px] px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded"
                             >
                               <Edit2 className="w-3 h-3" />
                             </button>
@@ -1090,7 +1107,7 @@ export const WholesaleAndReconciliationView: React.FC<
                               type="button"
                               onClick={() => setDeleteTargetId(s.id)}
                               title={lang === 'hi' ? 'डिलीट करें' : 'Delete'}
-                              className="min-h-[30px] px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg"
+                              className="min-h-[24px] px-1.5 py-0.5 bg-red-50 hover:bg-red-100 text-red-600 rounded"
                             >
                               <Trash2 className="w-3 h-3" />
                             </button>
@@ -1101,25 +1118,27 @@ export const WholesaleAndReconciliationView: React.FC<
                   )}
                 </tbody>
                 <tfoot>
-                  <tr className="bg-slate-100 font-bold text-slate-900 border-t-2 border-slate-300 tabular-nums">
-                    <td colSpan={4} className="py-3 px-3">
+                  <tr className="bg-slate-100 font-extrabold text-slate-900 tabular-nums">
+                    <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
                       {lang === 'hi'
-                        ? `कुल बिक्री योग (${saleSummary.entryCount} एंट्री)`
-                        : `Total Sales Summary (${saleSummary.entryCount})`}
+                        ? `कुल (${saleSummary.entryCount} एंट्री)`
+                        : `Total (${saleSummary.entryCount})`}
                     </td>
-                    <td className="py-3 px-3 text-right text-blue-800">
-                      {formatNumber(saleSummary.totalLiters, 3)} L
+                    <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
+                      {formatNumber(saleSummary.totalLiters, 2)}
                     </td>
-                    <td className="py-3 px-3 text-right">
-                      {formatNumber(saleSummary.avgFat)} / {formatNumber(saleSummary.avgSnf)}
+                    <td className="py-2 px-1 sm:px-2 text-center text-amber-950 bg-amber-50/60 whitespace-nowrap border border-slate-300">
+                      {formatNumber(saleSummary.avgFat, 1)}
                     </td>
-                    <td className="py-3 px-3 text-right">
-                      {saleSummary.avgRate !== null ? formatCurrency(saleSummary.avgRate) : '—'}
+                    <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 bg-indigo-50/60 whitespace-nowrap border border-slate-300">
+                      {formatNumber(saleSummary.avgSnf, 1)}
                     </td>
-                    <td className="py-3 px-3 text-right text-emerald-700">
+                    <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
+                      {saleSummary.avgRate !== null ? `₹${formatNumber(saleSummary.avgRate, 2)}` : '—'}
+                    </td>
+                    <td className="py-2 px-1 sm:px-2 text-right text-emerald-700 whitespace-nowrap border border-slate-300">
                       {formatCurrency(saleSummary.totalNetReceivable)}
                     </td>
-                    <td></td>
                   </tr>
                 </tfoot>
               </table>
@@ -1352,7 +1371,7 @@ export const WholesaleAndReconciliationView: React.FC<
                     <p className="text-xs text-slate-600 mt-0.5 tabular-nums">
                       बिल नं: <strong>{saleBill.billNumber}</strong> · अवधि:{' '}
                       <strong>
-                        {saleBill.fromDate} से {saleBill.toDate}
+                        {formatDateDMY(saleBill.fromDate)} से {formatDateDMY(saleBill.toDate)}
                       </strong>
                     </p>
                     <p className="text-sm font-bold text-slate-900 mt-1">
@@ -1480,116 +1499,101 @@ export const WholesaleAndReconciliationView: React.FC<
 
                 {/* Table 1: Date-wise Morning & Evening Side-by-Side Breakdown */}
                 {saleBillTableView === 'day_wise' ? (
-                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                    <table className="w-full text-xs border-collapse tabular-nums">
+                  <div>
+                    <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
                       <thead>
-                        <tr className="bg-blue-50 text-blue-950 border-b border-blue-200">
-                          <th className="py-2.5 px-2.5 text-left">तारीख</th>
-                          <th className="py-2.5 px-2 text-right">सुबह L</th>
-                          <th className="py-2.5 px-2 text-right">सुबह FAT/SNF</th>
-                          <th className="py-2.5 px-2 text-right">सुबह दर</th>
-                          <th className="py-2.5 px-2 text-right">सुबह राशि (₹)</th>
-                          <th className="py-2.5 px-2 text-right">शाम L</th>
-                          <th className="py-2.5 px-2 text-right">शाम FAT/SNF</th>
-                          <th className="py-2.5 px-2 text-right">शाम दर</th>
-                          <th className="py-2.5 px-2 text-right">शाम राशि (₹)</th>
-                          <th className="py-2.5 px-2.5 text-right font-bold">कुल दूध (L)</th>
-                          <th className="py-2.5 px-2.5 text-right font-bold">कुल बिक्री राशि (₹)</th>
+                        <tr className="bg-blue-50 text-blue-950">
+                          <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">तारीख</th>
+                          <th className="py-2 px-1 sm:px-2.5 text-right border border-slate-300">सुबह (L / ₹)</th>
+                          <th className="py-2 px-1 sm:px-2.5 text-right border border-slate-300">शाम (L / ₹)</th>
+                          <th className="py-2 px-1 sm:px-2.5 text-right font-bold border border-slate-300">कुल (L / ₹)</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100">
+                      <tbody>
                         {saleBill.dayWiseRows.length === 0 ? (
                           <tr>
-                            <td colSpan={11} className="py-8 text-center text-slate-500">
+                            <td colSpan={4} className="py-8 text-center text-slate-500 border border-slate-300">
                               {lang === 'hi'
-                                ? `इस 10-दिन की अवधि (${saleBill.fromDate} से ${saleBill.toDate}) में कोई दूध बिक्री दर्ज नहीं है।`
-                                : `No wholesale milk sales recorded in this period (${saleBill.fromDate} to ${saleBill.toDate}).`}
+                                ? `इस 10-दिन की अवधि (${formatDateDMY(saleBill.fromDate)} से ${formatDateDMY(saleBill.toDate)}) में कोई दूध बिक्री दर्ज नहीं है।`
+                                : `No wholesale milk sales recorded in this period (${formatDateDMY(saleBill.fromDate)} to ${formatDateDMY(saleBill.toDate)}).`}
                             </td>
                           </tr>
                         ) : (
                           saleBill.dayWiseRows.map((row) => (
                             <tr key={row.date} className="hover:bg-slate-50">
-                              <td className="py-2 px-2.5 font-bold text-slate-900">{row.date}</td>
-                              <td className="py-2 px-2 text-right">
-                                {row.morningLiters > 0 ? formatNumber(row.morningLiters, 3) : '—'}
+                              <td className="py-2 px-1 sm:px-2.5 font-mono font-bold text-slate-900 whitespace-nowrap border border-slate-300">
+                                {formatDateDMY(row.date)}
                               </td>
-                              <td className="py-2 px-2 text-right">
-                                {row.morningFat !== null
-                                  ? `${formatNumber(row.morningFat)}/${formatNumber(row.morningSnf)}`
-                                  : '—'}
+                              <td className="py-2 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                {row.morningLiters > 0 ? (
+                                  <>
+                                    <span className="font-bold text-amber-950 block leading-tight">
+                                      {formatCurrency(row.morningAmount)}
+                                    </span>
+                                    <span className="text-[11px] font-semibold text-slate-600 block leading-tight">
+                                      {formatNumber(row.morningLiters, 2)}L ({formatNumber(row.morningFat, 1)}/{formatNumber(row.morningSnf, 1)})
+                                    </span>
+                                  </>
+                                ) : (
+                                  '—'
+                                )}
                               </td>
-                              <td className="py-2 px-2 text-right">
-                                {row.morningRate !== null ? formatCurrency(row.morningRate) : '—'}
+                              <td className="py-2 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                {row.eveningLiters > 0 ? (
+                                  <>
+                                    <span className="font-bold text-indigo-950 block leading-tight">
+                                      {formatCurrency(row.eveningAmount)}
+                                    </span>
+                                    <span className="text-[11px] font-semibold text-slate-600 block leading-tight">
+                                      {formatNumber(row.eveningLiters, 2)}L ({formatNumber(row.eveningFat, 1)}/{formatNumber(row.eveningSnf, 1)})
+                                    </span>
+                                  </>
+                                ) : (
+                                  '—'
+                                )}
                               </td>
-                              <td className="py-2 px-2 text-right font-semibold text-amber-900">
-                                {row.morningAmount > 0 ? formatCurrency(row.morningAmount) : '—'}
-                              </td>
-                              <td className="py-2 px-2 text-right">
-                                {row.eveningLiters > 0 ? formatNumber(row.eveningLiters, 3) : '—'}
-                              </td>
-                              <td className="py-2 px-2 text-right">
-                                {row.eveningFat !== null
-                                  ? `${formatNumber(row.eveningFat)}/${formatNumber(row.eveningSnf)}`
-                                  : '—'}
-                              </td>
-                              <td className="py-2 px-2 text-right">
-                                {row.eveningRate !== null ? formatCurrency(row.eveningRate) : '—'}
-                              </td>
-                              <td className="py-2 px-2 text-right font-semibold text-indigo-900">
-                                {row.eveningAmount > 0 ? formatCurrency(row.eveningAmount) : '—'}
-                              </td>
-                              <td className="py-2 px-2.5 text-right font-bold text-blue-900">
-                                {formatNumber(row.totalLiters, 3)} L
-                              </td>
-                              <td className="py-2 px-2.5 text-right font-extrabold text-emerald-700">
-                                {formatCurrency(row.totalAmount)}
+                              <td className="py-2 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                                <span className="font-extrabold text-emerald-700 block leading-tight">
+                                  {formatCurrency(row.totalAmount)}
+                                </span>
+                                <span className="text-[11px] font-bold text-blue-900 block leading-tight">
+                                  {formatNumber(row.totalLiters, 2)} L
+                                </span>
                               </td>
                             </tr>
                           ))
                         )}
                       </tbody>
                       <tfoot>
-                        <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
-                          <td className="py-3 px-2.5">
+                        <tr className="bg-slate-100 font-extrabold">
+                          <td className="py-2.5 px-1 sm:px-2.5 border border-slate-300">
                             {lang === 'hi'
-                              ? `10-दिन का कुल योग (${saleBill.dayWiseRows.length} दिन)`
-                              : `10-Day Total (${saleBill.dayWiseRows.length} days)`}
+                              ? `कुल (${saleBill.dayWiseRows.length} दिन)`
+                              : `Total (${saleBill.dayWiseRows.length}d)`}
                           </td>
-                          <td className="py-3 px-2 text-right">
-                            {formatNumber(saleBill.morningSummary.totalLiters, 3)}
+                          <td className="py-2.5 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                            <span className="text-amber-950 block leading-tight">
+                              {formatCurrency(saleBill.morningSummary.totalNetReceivable)}
+                            </span>
+                            <span className="text-[11px] text-slate-600 block leading-tight">
+                              {formatNumber(saleBill.morningSummary.totalLiters, 2)} L
+                            </span>
                           </td>
-                          <td className="py-3 px-2 text-right">
-                            {formatNumber(saleBill.morningSummary.avgFat)}/
-                            {formatNumber(saleBill.morningSummary.avgSnf)}
+                          <td className="py-2.5 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                            <span className="text-indigo-950 block leading-tight">
+                              {formatCurrency(saleBill.eveningSummary.totalNetReceivable)}
+                            </span>
+                            <span className="text-[11px] text-slate-600 block leading-tight">
+                              {formatNumber(saleBill.eveningSummary.totalLiters, 2)} L
+                            </span>
                           </td>
-                          <td className="py-3 px-2 text-right">
-                            {saleBill.morningSummary.avgRate !== null
-                              ? formatCurrency(saleBill.morningSummary.avgRate)
-                              : '—'}
-                          </td>
-                          <td className="py-3 px-2 text-right text-amber-950">
-                            {formatCurrency(saleBill.morningSummary.totalNetReceivable)}
-                          </td>
-                          <td className="py-3 px-2 text-right">
-                            {formatNumber(saleBill.eveningSummary.totalLiters, 3)}
-                          </td>
-                          <td className="py-3 px-2 text-right">
-                            {formatNumber(saleBill.eveningSummary.avgFat)}/
-                            {formatNumber(saleBill.eveningSummary.avgSnf)}
-                          </td>
-                          <td className="py-3 px-2 text-right">
-                            {saleBill.eveningSummary.avgRate !== null
-                              ? formatCurrency(saleBill.eveningSummary.avgRate)
-                              : '—'}
-                          </td>
-                          <td className="py-3 px-2 text-right text-indigo-950">
-                            {formatCurrency(saleBill.eveningSummary.totalNetReceivable)}
-                          </td>
-                          <td className="py-3 px-2.5 text-right text-blue-900">
-                            {formatNumber(saleBill.totalSummary.totalLiters, 3)} L
-                          </td>
-                          <td className="py-3 px-2.5 text-right text-emerald-800 text-sm font-black">
-                            {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
+                          <td className="py-2.5 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
+                            <span className="text-emerald-800 font-black block leading-tight">
+                              {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
+                            </span>
+                            <span className="text-[11px] text-blue-900 block leading-tight">
+                              {formatNumber(saleBill.totalSummary.totalLiters, 2)} L
+                            </span>
                           </td>
                         </tr>
                       </tfoot>
@@ -1597,24 +1601,22 @@ export const WholesaleAndReconciliationView: React.FC<
                   </div>
                 ) : (
                   /* Table 2: Individual Sale Entries in the 10-Day Period */
-                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                    <table className="w-full text-xs border-collapse tabular-nums">
+                  <div>
+                    <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
                       <thead>
-                        <tr className="bg-blue-50 text-blue-950 border-b border-blue-200">
-                          <th className="py-2.5 px-3 text-left">#</th>
-                          <th className="py-2.5 px-3 text-left">तारीख / शिफ्ट</th>
-                          <th className="py-2.5 px-3 text-left">ग्राहक / खरीदार</th>
-                          <th className="py-2.5 px-3 text-left">प्रकार</th>
-                          <th className="py-2.5 px-3 text-right">मात्रा (L)</th>
-                          <th className="py-2.5 px-3 text-right">FAT / SNF</th>
-                          <th className="py-2.5 px-3 text-right">दर (Rate/L)</th>
-                          <th className="py-2.5 px-3 text-right">कुल राशि (₹)</th>
+                        <tr className="bg-blue-50 text-blue-950">
+                          <th className="py-2 px-1 sm:px-2 text-left border border-slate-300">तारीख / ग्राहक</th>
+                          <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">लीटर</th>
+                          <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-amber-50/70 text-amber-950">FAT</th>
+                          <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-indigo-50/70 text-indigo-950">SNF</th>
+                          <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">रेट</th>
+                          <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">कुल राशि</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100">
+                      <tbody>
                         {saleBill.entries.length === 0 ? (
                           <tr>
-                            <td colSpan={8} className="py-8 text-center text-slate-500">
+                            <td colSpan={6} className="py-8 text-center text-slate-500 border border-slate-300">
                               {lang === 'hi'
                                 ? 'इस अवधि में कोई बिक्री एंट्री नहीं है।'
                                 : 'No sale entries in this period.'}
@@ -1623,31 +1625,32 @@ export const WholesaleAndReconciliationView: React.FC<
                         ) : (
                           saleBill.entries.map((s, idx) => (
                             <tr key={s.id} className="hover:bg-slate-50">
-                              <td className="py-2 px-3 font-mono">{idx + 1}</td>
-                              <td className="py-2 px-3 font-semibold">
-                                {s.date} ({s.shift === 'morning' ? 'सुबह' : 'शाम'})
+                              <td className="py-1.5 px-1 sm:px-2 border border-slate-300">
+                                <span className="font-bold text-slate-900 block leading-tight">
+                                  <span className="text-slate-400 font-normal mr-0.5">{idx + 1}.</span>
+                                  {s.customerCode ? (
+                                    <span className="font-mono text-blue-700 mr-1">{s.customerCode}</span>
+                                  ) : null}
+                                  {s.buyerName}
+                                </span>
+                                <span className="text-[11px] font-semibold text-slate-600 block leading-tight mt-0.5">
+                                  {formatDateDMY(s.date)} ({s.shift === 'morning' ? 'सुबह' : 'शाम'}) ·{' '}
+                                  {s.milkType === 'cow' ? 'गाय' : s.milkType === 'buffalo' ? 'भैंस' : 'मिश्रित'}
+                                </span>
                               </td>
-                              <td className="py-2 px-3 font-bold text-slate-900">
-                                {s.customerCode ? (
-                                  <span className="font-mono text-blue-700 mr-1">{s.customerCode}</span>
-                                ) : null}
-                                {s.buyerName}
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
+                                {formatNumber(s.liters, 2)}
                               </td>
-                              <td className="py-2 px-3">
-                                {s.milkType === 'cow'
-                                  ? 'गाय'
-                                  : s.milkType === 'buffalo'
-                                  ? 'भैंस'
-                                  : 'मिश्रित'}
+                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-950 bg-amber-50/40 whitespace-nowrap border border-slate-300">
+                                {formatNumber(s.avgFat, 1)}
                               </td>
-                              <td className="py-2 px-3 text-right font-bold">
-                                {formatNumber(s.liters, 3)} L
+                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-950 bg-indigo-50/40 whitespace-nowrap border border-slate-300">
+                                {formatNumber(s.avgSnf, 1)}
                               </td>
-                              <td className="py-2 px-3 text-right">
-                                {formatNumber(s.avgFat)} / {formatNumber(s.avgSnf)}
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                                ₹{formatNumber(s.rate, 2)}
                               </td>
-                              <td className="py-2 px-3 text-right">{formatCurrency(s.rate)}</td>
-                              <td className="py-2 px-3 text-right font-bold text-emerald-700">
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-700 whitespace-nowrap border border-slate-300">
                                 {formatCurrency(s.netReceivable)}
                               </td>
                             </tr>
@@ -1655,23 +1658,25 @@ export const WholesaleAndReconciliationView: React.FC<
                         )}
                       </tbody>
                       <tfoot>
-                        <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
-                          <td colSpan={4} className="py-3 px-3">
-                            कुल योग ({saleBill.entries.length} एंट्री)
+                        <tr className="bg-slate-100 font-extrabold">
+                          <td className="py-2 px-1 sm:px-2 border border-slate-300">
+                            कुल ({saleBill.entries.length})
                           </td>
-                          <td className="py-3 px-3 text-right text-blue-900">
-                            {formatNumber(saleBill.totalSummary.totalLiters, 3)} L
+                          <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
+                            {formatNumber(saleBill.totalSummary.totalLiters, 2)}
                           </td>
-                          <td className="py-3 px-3 text-right">
-                            {formatNumber(saleBill.totalSummary.avgFat)} /{' '}
-                            {formatNumber(saleBill.totalSummary.avgSnf)}
+                          <td className="py-2 px-1 sm:px-2 text-center text-amber-950 bg-amber-50/60 whitespace-nowrap border border-slate-300">
+                            {formatNumber(saleBill.totalSummary.avgFat, 1)}
                           </td>
-                          <td className="py-3 px-3 text-right">
+                          <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 bg-indigo-50/60 whitespace-nowrap border border-slate-300">
+                            {formatNumber(saleBill.totalSummary.avgSnf, 1)}
+                          </td>
+                          <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
                             {saleBill.totalSummary.avgRate !== null
-                              ? formatCurrency(saleBill.totalSummary.avgRate)
+                              ? `₹${formatNumber(saleBill.totalSummary.avgRate, 2)}`
                               : '—'}
                           </td>
-                          <td className="py-3 px-3 text-right text-emerald-800 text-sm font-black">
+                          <td className="py-2 px-1 sm:px-2 text-right text-emerald-800 font-black whitespace-nowrap border border-slate-300">
                             {formatCurrency(saleBill.totalSummary.totalNetReceivable)}
                           </td>
                         </tr>
@@ -1723,24 +1728,20 @@ export const WholesaleAndReconciliationView: React.FC<
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
+          <div>
+            <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
               <thead>
-                <tr className="bg-slate-50 text-slate-700 border-b border-slate-200">
-                  <th className="py-2.5 px-3 text-left">कोड</th>
-                  <th className="py-2.5 px-3 text-left">ग्राहक का नाम</th>
-                  <th className="py-2.5 px-3 text-left">मोबाइल नंबर</th>
-                  <th className="py-2.5 px-3 text-left">पता / गाँव / डेयरी</th>
-                  <th className="py-2.5 px-3 text-left">डिफ़ॉल्ट दूध</th>
-                  <th className="py-2.5 px-3 text-right">कुल खरीदा दूध (L)</th>
-                  <th className="py-2.5 px-3 text-right">कुल बिक्री राशि (₹)</th>
-                  <th className="py-2.5 px-3 text-center">कार्य</th>
+                <tr className="bg-slate-50 text-slate-800">
+                  <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">ग्राहक (कोड व नाम)</th>
+                  <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">कुल दूध</th>
+                  <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">कुल राशि</th>
+                  <th className="py-2 px-1 sm:px-2 text-center border border-slate-300">कार्य</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 tabular-nums">
+              <tbody>
                 {filteredCustomers.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-8 text-center text-slate-500">
+                    <td colSpan={4} className="py-8 text-center text-slate-500 border border-slate-300">
                       {customers.length === 0
                         ? lang === 'hi'
                           ? 'अभी कोई ग्राहक नहीं जोड़ा गया है। ऊपर "+ नया ग्राहक जोड़ें" बटन दबाकर ग्राहक जोड़ें।'
@@ -1760,27 +1761,28 @@ export const WholesaleAndReconciliationView: React.FC<
 
                     return (
                       <tr key={cust.id} className="hover:bg-slate-50">
-                        <td className="py-2.5 px-3 font-mono font-bold text-blue-700">{cust.code}</td>
-                        <td className="py-2.5 px-3 font-bold text-slate-900">{cust.name}</td>
-                        <td className="py-2.5 px-3">{cust.mobile || '—'}</td>
-                        <td className="py-2.5 px-3 text-slate-600">{cust.address || '—'}</td>
-                        <td className="py-2.5 px-3">
-                          <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100">
+                        <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                          <span className="font-bold text-slate-900 block leading-tight">
+                            <span className="font-mono text-blue-700">{cust.code}</span> — {cust.name}
+                          </span>
+                          <span className="text-[11px] text-slate-500 block leading-tight mt-0.5">
                             {cust.defaultMilkType === 'cow'
                               ? 'गाय'
                               : cust.defaultMilkType === 'buffalo'
                               ? 'भैंस'
                               : 'मिश्रित'}
+                            {cust.mobile ? ` · ${cust.mobile}` : ''}
+                            {cust.address ? ` · ${cust.address}` : ''}
                           </span>
                         </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-slate-900">
-                          {formatNumber(totalLiters, 3)} L
+                        <td className="py-2 px-1.5 sm:px-2.5 text-right font-bold text-slate-900 whitespace-nowrap border border-slate-300">
+                          {formatNumber(totalLiters, 2)} L
                         </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-emerald-700">
+                        <td className="py-2 px-1.5 sm:px-2.5 text-right font-bold text-emerald-700 whitespace-nowrap border border-slate-300">
                           {formatCurrency(totalAmount)}
                         </td>
-                        <td className="py-2.5 px-3 text-center">
-                          <div className="flex items-center justify-center gap-1.5">
+                        <td className="py-2 px-1 sm:px-2 text-center border border-slate-300">
+                          <div className="flex flex-wrap items-center justify-center gap-1">
                             <button
                               type="button"
                               onClick={() => {
@@ -1789,9 +1791,9 @@ export const WholesaleAndReconciliationView: React.FC<
                                 if (cust.defaultMilkType) setMilkType(cust.defaultMilkType);
                                 setActiveSubView('sale_entry');
                               }}
-                              className="min-h-[30px] px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 text-[11px] font-bold rounded-lg"
+                              className="min-h-[26px] px-1.5 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 text-[10px] font-bold rounded-lg"
                             >
-                              बिक्री करें
+                              बिक्री
                             </button>
                             <button
                               type="button"
@@ -1803,23 +1805,23 @@ export const WholesaleAndReconciliationView: React.FC<
                                 setSaleBillCycle(cyc);
                                 setActiveSubView('sale_10day_bill');
                               }}
-                              className="min-h-[30px] px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[11px] font-bold rounded-lg"
+                              className="min-h-[26px] px-1.5 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold rounded-lg"
                             >
-                              10-दिन बिल
+                              बिल
                             </button>
                             <button
                               type="button"
                               onClick={() => handleOpenAddCustomerModal(cust)}
-                              className="min-h-[30px] px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
+                              className="min-h-[26px] px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
                             >
-                              <Edit2 className="w-3.5 h-3.5" />
+                              <Edit2 className="w-3 h-3" />
                             </button>
                             <button
                               type="button"
                               onClick={() => setDeleteCustId(cust.id)}
-                              className="min-h-[30px] px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg"
+                              className="min-h-[26px] px-1.5 py-0.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Trash2 className="w-3 h-3" />
                             </button>
                           </div>
                         </td>
@@ -2111,7 +2113,7 @@ export const WholesaleAndReconciliationView: React.FC<
                 </strong>
                 <span className="text-[11px] text-slate-600 block">दूध बिक्री रसीद</span>
                 <span className="text-[10px] text-slate-500">
-                  तारीख: {saleSlipEntry.date} ({saleSlipEntry.shift === 'morning' ? 'सुबह' : 'शाम'})
+                  तारीख: {formatDateDMY(saleSlipEntry.date)} ({saleSlipEntry.shift === 'morning' ? 'सुबह' : 'शाम'})
                 </span>
               </div>
 

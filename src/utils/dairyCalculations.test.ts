@@ -28,6 +28,9 @@ import {
   canSaveFarmerShiftMilkEntry,
   getCycleFromDate,
   getCycleLabelHi,
+  getCycleLabelEn,
+  formatDateDMY,
+  formatMonthYear,
 } from './dairyCalculations';
 import {
   createInitialEmptyState,
@@ -1554,4 +1557,113 @@ test('NEW FEATURE TEST 30: 10-Day Billing Period selection in Payments and autom
   assert.equal(bill3.billPayableBeforePayment, 700); // ₹1000 milk - ₹300 excess payment = ₹700
   assert.equal(bill3.paymentsInPeriod, 0);
   assert.equal(bill3.netPayable, 700);
+});
+
+test('NEW FEATURE TEST 31: Single farmer 10-11 entries from 21st to 31st date (21 से 31 तारीख तक की 10-11 एंट्री) in one photo parse & save accurately across all APK/OCR formats', () => {
+  const farmers: Farmer[] = [
+    {
+      id: 'f101',
+      code: '101',
+      name: 'रामलाल गुर्जर',
+      mobile: '9876543210',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  // Format A: Passbook photo with 11 rows (21 to 31) and NO farmer header line (farmer selected in dropdown)
+  const passbookNoHeader = [
+    '21 5.5 4.5 8.5',
+    '22 6.0 4.6 8.5',
+    '23 5.8 4.4 8.5',
+    '24 6.2 4.7 8.6',
+    '25 5.9 4.5 8.5',
+    '26 6.4 4.8 8.6',
+    '27 5.7 4.5 8.5',
+    '28 6.1 4.6 8.5',
+    '29 6.3 4.7 8.6',
+    '30 5.6 4.4 8.5',
+    '31 6.5 4.8 8.6',
+  ].join('\n');
+
+  const rowsA = parseMilkSlipTextToRows(passbookNoHeader, '2026-10-25', 'morning');
+  assert.equal(rowsA.length, 11);
+  assert.equal(rowsA[0].date, '21');
+  assert.equal(rowsA[10].date, '31');
+
+  const builtA = buildCollectionEntriesFromScannedSlip(
+    rowsA,
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning',
+    'f101',
+    []
+  );
+  assert.equal(builtA.entries.length, 11);
+  assert.equal(builtA.skippedDuplicates.length, 0);
+  assert.equal(builtA.autoCreatedFarmers.length, 0);
+  assert.equal(builtA.entries[0].date, '2026-10-21');
+  assert.equal(builtA.entries[0].farmerCode, '101');
+  assert.equal(builtA.entries[0].farmerName, 'रामलाल गुर्जर');
+  assert.equal(builtA.entries[10].date, '2026-10-31');
+  assert.equal(builtA.entries[10].farmerCode, '101');
+
+  // Format B: APK OCR output where Hindi header turns into "00000: 000000 (101)" followed by 21..31 rows
+  const ocrHeaderSlip = `00000: 000000 (101)\n${passbookNoHeader}`;
+  const rowsB = parseMilkSlipTextToRows(ocrHeaderSlip, '2026-10-25', 'morning');
+  assert.equal(rowsB.length, 11);
+  assert.equal(rowsB[0].farmerCode, '101');
+  assert.equal(rowsB[0].date, '21');
+  assert.equal(rowsB[10].date, '31');
+
+  const builtB = buildCollectionEntriesFromScannedSlip(
+    rowsB,
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning',
+    undefined,
+    []
+  );
+  assert.equal(builtB.entries.length, 11);
+  assert.equal(builtB.entries[0].date, '2026-10-21');
+  assert.equal(builtB.entries[10].date, '2026-10-31');
+  assert.equal(builtB.entries[10].farmerCode, '101');
+
+  // Format C: 11 undated rows for a single farmer (where date column 21..31 was cropped out in photo)
+  const undated11Rows = Array.from({ length: 11 }, (_, idx) => ({
+    liters: 5.0 + idx * 0.1,
+    fat: 4.5,
+    snf: 8.5,
+  }));
+  const builtC = buildCollectionEntriesFromScannedSlip(
+    undated11Rows,
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning',
+    'f101',
+    []
+  );
+  assert.equal(builtC.entries.length, 11);
+  assert.equal(builtC.skippedDuplicates.length, 0);
+  assert.equal(builtC.entries[0].date, '2026-10-21');
+  assert.equal(builtC.entries[5].date, '2026-10-26');
+  assert.equal(builtC.entries[10].date, '2026-10-31');
+});
+
+test('TEST 28: formatDateDMY and formatMonthYear format all dates in DD-MM-YYYY (दिन-महीना-साल)', () => {
+  assert.equal(formatDateDMY('2026-10-26'), '26-10-2026');
+  assert.equal(formatDateDMY('2026-01-05'), '05-01-2026');
+  assert.equal(formatDateDMY('10-26'), '26-10');
+  assert.equal(formatDateDMY(''), '—');
+  assert.equal(formatMonthYear('2026-10'), '10-2026');
+  assert.equal(getCycleLabelHi(1, '2026-10'), '1 से 10 तारीख (10-2026)');
+  assert.equal(getCycleLabelHi(3, '2026-10'), '21 से महीने के अंत तक (10-2026)');
+  assert.equal(getCycleLabelEn(2, '2026-10'), '11th to 20th (10-2026)');
 });

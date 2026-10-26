@@ -32,6 +32,7 @@ import {
   classifyMilkType,
   formatAutoDecimalFatSnf,
   formatCurrency,
+  formatDateDMY,
   formatNumber,
   formatSmartMilkQuantity,
   formatWholeCurrency,
@@ -52,14 +53,14 @@ interface CollectionViewProps {
   onChangeDate: (date: string) => void;
   onChangeShift: (shift: ShiftType) => void;
   onSaveEntry: (entry: MilkCollectionEntry, isEdit: boolean) => void;
+  onSaveBatchEntries?: (entries: MilkCollectionEntry[], newFarmers?: Farmer[]) => void;
   onDeleteEntry: (id: string) => void;
   onToggleFarmerLeave: (date: string, shift: ShiftType, farmerId: string, reason?: string) => void;
   onSaveFarmer?: (farmer: Farmer, isEdit: boolean) => void;
   onNavigate: (tab: string) => void;
 }
 
-const CLOUD_API_FALLBACK_URL =
-  'https://ais-pre-e3mxmzlp33iv72t4v7ccb2-270490902491.asia-east1.run.app/api/scan-milk-slip';
+const OCR_SPACE_API_URL = 'https://api.ocr.space/parse/image';
 
 async function compressImageFileToDataUrl(
   file: File,
@@ -113,6 +114,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
   onChangeDate,
   onChangeShift,
   onSaveEntry,
+  onSaveBatchEntries,
   onDeleteEntry,
   onToggleFarmerLeave,
   onSaveFarmer,
@@ -193,13 +195,29 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
   // Photo Entry Preview Items (shown BEFORE saving so user can inspect Date, Code, Name, FAT, SNF, Liters, Rate, Amount & Duplicates)
   const [photoPreviewItems, setPhotoPreviewItems] = useState<ScannedSlipPreviewItem[]>([]);
   const [photoPendingAutoFarmers, setPhotoPendingAutoFarmers] = useState<Farmer[]>([]);
+  // Single Farmer 21-31 Date (10-11 Entries) Passbook Grid inside Photo Modal
+  const [showPassbook21To31Grid, setShowPassbook21To31Grid] = useState<boolean>(false);
+  const [passbookYearMonth, setPassbookYearMonth] = useState<string>(date.slice(0, 7));
+  const [passbookCycle, setPassbookCycle] = useState<1 | 2 | 3>(3);
+  const [passbookShift, setPassbookShift] = useState<ShiftType>(shift);
+  const [passbookDayInputs, setPassbookDayInputs] = useState<
+    Record<number, { liters: string; fat: string; snf: string }>
+  >(() => {
+    const init: Record<number, { liters: string; fat: string; snf: string }> = {};
+    for (let d = 1; d <= 31; d++) {
+      init[d] = { liters: '', fat: '', snf: '8.5' };
+    }
+    return init;
+  });
 
   React.useEffect(() => {
     setPhotoQuickDate(date);
+    setPassbookYearMonth(date.slice(0, 7));
   }, [date]);
 
   React.useEffect(() => {
     setPhotoQuickShift(shift);
+    setPassbookShift(shift);
   }, [shift]);
 
   const fatInputRef = useRef<HTMLInputElement | null>(null);
@@ -433,31 +451,34 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     rawRows: ScannedSlipRawRow[],
     fallbackFarmerId?: string
   ): boolean => {
+    const effectiveFallbackFarmerId =
+      fallbackFarmerId || photoQuickFarmerId || farmerId || undefined;
     const built = buildCollectionEntriesFromScannedSlip(
       rawRows,
       state.farmers,
       state.rateCharts,
       date,
       shift,
-      fallbackFarmerId || photoQuickFarmerId || farmerId || undefined,
+      effectiveFallbackFarmerId,
       state.collections
     );
     if (built.previewItems.length === 0) {
       setCameraError(
         built.warningsHi[0] ||
           (lang === 'hi'
-            ? 'फोटो लोड हो गया है! फोटो में हस्तलिखित नंबर अस्पष्ट होने के कारण नीचे फोटो देखकर मात्रा (लीटर) और FAT भरकर प्रिव्यू देखें।'
-            : 'Photo loaded! Please confirm Liters and FAT below to preview and save.')
+            ? 'फोटो लोड हो गया है! फोटो में हस्तलिखित नंबर अस्पष्ट होने के कारण नीचे फोटो देखकर मात्रा (लीटर) और FAT भरकर प्रिव्यू देखें या "21 से 31 तारीख (10-11 एंट्री) तालिका" का उपयोग करें।'
+            : 'Photo loaded! Please confirm Liters and FAT below or use the 21-31 Passbook Table to preview and save.')
       );
       return false;
     }
 
+    setPhotoStagedRows(rawRows);
     setPhotoPreviewItems(built.previewItems);
     setPhotoPendingAutoFarmers(built.autoCreatedFarmers || []);
     if (built.skippedDuplicates.length > 0 && built.entries.length === 0) {
       setCameraError(
         lang === 'hi'
-          ? 'प्रिव्यू तैयार है: फोटो की सभी एंट्रियाँ (उसी तारीख, शिफ्ट और पशु प्रकार — गाय/भैंस) पहले से मौजूद हैं, इसलिए दोबारा सेव नहीं होंगी।'
+          ? 'प्रिव्यू तैयार है: फोटो की सभी एंट्रियाँ (उसी तारीख, शिफ्ट और पशु प्रकार — गाय/भैंस) पहले से मौजूद हैं, इसलिए दोबारा सेव नहीं होंगी। यदि यह 21 से 31 तारीख की एंट्रियाँ हैं, तो ऊपर "21 से 31 तारीख लगाएँ" बटन दबाएँ।'
           : 'Preview ready: All entries in the photo already exist for the same farmer, date, shift & animal type.'
       );
     } else if (built.skippedDuplicates.length > 0) {
@@ -472,11 +493,72 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     return true;
   };
 
-  // Confirm and save non-duplicate entries from Photo Preview Table
+  // Apply a single farmer to all current photo preview rows & re-stage
+  const handleApplyFarmerToPreview = (targetFarmerId: string) => {
+    setPhotoQuickFarmerId(targetFarmerId);
+    const chosenFarmer = state.farmers.find((f) => f.id === targetFarmerId);
+    if (!chosenFarmer || photoPreviewItems.length === 0) return;
+
+    const updatedRows: ScannedSlipRawRow[] = photoPreviewItems.map((item) => ({
+      farmerCode: chosenFarmer.code,
+      farmerName: chosenFarmer.name,
+      date: item.entry.date,
+      shift: item.entry.shift,
+      liters: item.entry.liters,
+      fat: item.entry.fat,
+      snf: item.entry.snf,
+      rate: item.entry.rate,
+    }));
+    stageScannedRowsForPreview(updatedRows, chosenFarmer.id);
+  };
+
+  // Apply sequential dates for a 10-11 day billing cycle (1-10, 11-20, or 21-31) to all current photo preview rows
+  const handleApplyCycleDatesToPreview = (cycleNum: 1 | 2 | 3) => {
+    if (photoPreviewItems.length === 0) return;
+    const ym = (passbookYearMonth || date.slice(0, 7)).slice(0, 7);
+    const [yStr, mStr] = ym.split('-');
+    const y = Number(yStr) || 2026;
+    const m = Number(mStr) || 10;
+    const maxDay = new Date(y, m, 0).getDate() || 31;
+    const startDay = cycleNum === 1 ? 1 : cycleNum === 2 ? 11 : 21;
+
+    const chosenFarmer =
+      state.farmers.find((f) => f.id === photoQuickFarmerId) ||
+      selectedFarmerObj ||
+      state.farmers.find((f) => f.id === photoPreviewItems[0]?.entry.farmerId);
+
+    const updatedRows: ScannedSlipRawRow[] = photoPreviewItems.map((item, idx) => {
+      const dayVal = Math.min(maxDay, startDay + idx);
+      const nextDate = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(
+        dayVal
+      ).padStart(2, '0')}`;
+      return {
+        farmerCode: chosenFarmer?.code || item.entry.farmerCode,
+        farmerName: chosenFarmer?.name || item.entry.farmerName,
+        date: nextDate,
+        shift: item.entry.shift,
+        liters: item.entry.liters,
+        fat: item.entry.fat,
+        snf: item.entry.snf,
+        rate: item.entry.rate,
+      };
+    });
+    stageScannedRowsForPreview(updatedRows, chosenFarmer?.id);
+  };
+
+  // Confirm and save non-duplicate entries from Photo Preview Table (Atomically saves all 10-11 entries in APK & Web)
   const handleConfirmSavePhotoPreview = () => {
     const savableEntries = photoPreviewItems
       .filter((item) => !item.isDuplicate)
-      .map((item) => item.entry);
+      .map((item) => ({
+        ...item.entry,
+        totalAmount: truncatePurchaseAmount(item.entry.totalAmount),
+        deduction: truncatePurchaseAmount(item.entry.deduction),
+        netPayable: truncatePurchaseAmount(
+          truncatePurchaseAmount(item.entry.totalAmount) -
+            truncatePurchaseAmount(item.entry.deduction)
+        ),
+      }));
 
     if (savableEntries.length === 0) {
       setCameraError(
@@ -487,18 +569,21 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       return;
     }
 
-    if (photoPendingAutoFarmers.length > 0 && onSaveFarmer) {
-      const usedFarmerIds = new Set(savableEntries.map((e) => e.farmerId));
-      photoPendingAutoFarmers.forEach((nf) => {
-        if (usedFarmerIds.has(nf.id)) {
+    const usedFarmerIds = new Set(savableEntries.map((e) => e.farmerId));
+    const usedAutoFarmers = photoPendingAutoFarmers.filter((nf) => usedFarmerIds.has(nf.id));
+
+    if (onSaveBatchEntries) {
+      onSaveBatchEntries(savableEntries, usedAutoFarmers);
+    } else {
+      if (usedAutoFarmers.length > 0 && onSaveFarmer) {
+        usedAutoFarmers.forEach((nf) => {
           onSaveFarmer(nf, false);
-        }
+        });
+      }
+      savableEntries.forEach((entry) => {
+        onSaveEntry(entry, false);
       });
     }
-
-    savableEntries.forEach((entry) => {
-      onSaveEntry(entry, false);
-    });
 
     // Automatically adjust Saved Entries table filters if entries span multiple dates or shifts
     const uniqueDates = Array.from(new Set(savableEntries.map((e) => e.date)));
@@ -526,13 +611,15 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     setPhotoPendingAutoFarmers([]);
   };
 
-  // Handle photo file (from camera capture or gallery selection)
+  // Handle photo file (from camera capture or gallery selection — works in both Web Preview & Installed Android APK)
   const handleSlipPhotoFile = async (file: File) => {
     setCameraError(null);
     setShowCameraModal(true);
     setIsScanningSlip(true);
-    if (!photoQuickFarmerId) {
-      setPhotoQuickFarmerId(farmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id || '');
+    const defaultTargetFarmerId =
+      photoQuickFarmerId || farmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id || '';
+    if (!photoQuickFarmerId && defaultTargetFarmerId) {
+      setPhotoQuickFarmerId(defaultTargetFarmerId);
     }
 
     try {
@@ -541,32 +628,30 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
 
       let extractedRows: ScannedSlipRawRow[] = [];
 
-      // 1. Call Server-Side Gemini Vision OCR endpoint (/api/scan-milk-slip)
-      // Also fallback to Cloud Run endpoint if running inside standalone Android APK (https://localhost)
-      const endpointsToTry = ['/api/scan-milk-slip'];
-      if (
+      // Engine 1: Local/Preview Server Gemini Vision OCR endpoint (/api/scan-milk-slip) with 5s timeout
+      const isCapacitorOrFileApk =
         typeof window !== 'undefined' &&
-        (window.location.hostname === 'localhost' || window.location.protocol === 'file:' || window.location.protocol === 'capacitor:')
-      ) {
-        endpointsToTry.push(CLOUD_API_FALLBACK_URL);
-      }
+        (window.location.protocol === 'capacitor:' ||
+          window.location.protocol === 'file:' ||
+          Boolean((window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor?.isNativePlatform?.()));
 
-      const payload = JSON.stringify({
-        imageBase64: dataUrl,
-        mimeType,
-        farmers: state.farmers.map((f) => ({ code: f.code, name: f.name })),
-        defaultDate: date,
-        defaultShift: shift,
-      });
-
-      for (const endpoint of endpointsToTry) {
-        if (extractedRows.length > 0) break;
+      if (!isCapacitorOrFileApk) {
         try {
-          const resp = await fetch(endpoint, {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 5500);
+          const resp = await fetch('/api/scan-milk-slip', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: payload,
+            body: JSON.stringify({
+              imageBase64: dataUrl,
+              mimeType,
+              farmers: state.farmers.map((f) => ({ code: f.code, name: f.name })),
+              defaultDate: date,
+              defaultShift: shift,
+            }),
+            signal: ctrl.signal,
           });
+          clearTimeout(timer);
           if (resp.ok) {
             const json = await resp.json();
             if (Array.isArray(json?.entries) && json.entries.length > 0) {
@@ -576,12 +661,70 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
             }
           }
         } catch {
-          // Try next endpoint or local fallback
+          // Proceed to APK-compatible OCR engines below
         }
       }
 
-      // 2. Fallback: Browser native TextDetector API if available
-      if (extractedRows.length === 0 && 'TextDetector' in window) {
+      // Engine 2: Direct HTTPS Table OCR (ocr.space Engine 2) — works inside installed Android APK (CORS *)
+      if (extractedRows.length === 0) {
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 7500);
+          const formBody = new URLSearchParams();
+          formBody.append('apikey', 'helloworld');
+          formBody.append('base64Image', dataUrl);
+          formBody.append('isTable', 'true');
+          formBody.append('OCREngine', '2');
+          formBody.append('scale', 'true');
+
+          const ocrResp = await fetch(OCR_SPACE_API_URL, {
+            method: 'POST',
+            body: formBody,
+            signal: ctrl.signal,
+          });
+          clearTimeout(timer);
+          if (ocrResp.ok) {
+            const ocrJson = await ocrResp.json();
+            const parsedText = ocrJson?.ParsedResults?.[0]?.ParsedText || '';
+            if (typeof parsedText === 'string' && parsedText.trim()) {
+              const rowsFromOcrSpace = parseMilkSlipTextToRows(parsedText, date, shift);
+              if (rowsFromOcrSpace.length > 0) {
+                extractedRows = rowsFromOcrSpace;
+              }
+            }
+          }
+        } catch {
+          // Proceed to on-device Tesseract OCR fallback
+        }
+      }
+
+      // Engine 3: Bundled On-Device Tesseract.js OCR (works 100% locally inside installed APK)
+      if (extractedRows.length === 0) {
+        try {
+          const TesseractModule = await import('tesseract.js');
+          const recognizeFn =
+            TesseractModule.recognize ||
+            (TesseractModule.default && TesseractModule.default.recognize);
+          if (typeof recognizeFn === 'function') {
+            const ocrResult = await Promise.race([
+              recognizeFn(dataUrl, 'eng'),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
+            ]);
+            const rawText = ocrResult?.data?.text || '';
+            if (rawText.trim()) {
+              const rowsFromTesseract = parseMilkSlipTextToRows(rawText, date, shift);
+              if (rowsFromTesseract.length > 0) {
+                extractedRows = rowsFromTesseract;
+              }
+            }
+          }
+        } catch {
+          // Ignore and try next fallback
+        }
+      }
+
+      // Engine 4: Browser/Android WebView native TextDetector API if available
+      if (extractedRows.length === 0 && typeof window !== 'undefined' && 'TextDetector' in window) {
         try {
           const img = document.createElement('img');
           img.src = dataUrl;
@@ -601,7 +744,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
         }
       }
 
-      // 3. Fallback: If user typed slip text or if filename encodes slip values (e.g. "101_6.55_4.5_8.5.jpg")
+      // Engine 5: If user typed slip text or if filename encodes slip values (e.g. "101_6.55_4.5_8.5.jpg")
       if (extractedRows.length === 0 && slipManualText.trim()) {
         extractedRows = parseMilkSlipTextToRows(slipManualText, date, shift);
       }
@@ -613,26 +756,44 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
         }
       }
 
-      // 4. Fallback: If current form has valid numbers entered before clicking photo, use them
-      if (extractedRows.length === 0 && hasValidLiters && hasValidFat) {
-        extractedRows = [
-          {
-            farmerCode: selectedFarmerObj?.code || state.farmers[0]?.code,
-            farmerName: selectedFarmerObj?.name || state.farmers[0]?.name,
-            date,
-            shift,
-            liters: litersNum,
-            fat: fatNum,
-            snf: hasValidSnf ? snfNum : 8.5,
-            rate: liveRate ?? undefined,
-          },
-        ];
+      // Engine 6: If current form or quick photo input has valid numbers entered before clicking photo, use them
+      if (extractedRows.length === 0) {
+        const qLit = Number(photoQuickLiters);
+        const qFat = Number(photoQuickFat);
+        const qSnf = Number(photoQuickSnf) > 0 ? Number(photoQuickSnf) : 8.5;
+        if (Number.isFinite(qLit) && qLit > 0 && Number.isFinite(qFat) && qFat > 0) {
+          const chosenFarmer =
+            state.farmers.find((f) => f.id === defaultTargetFarmerId) ||
+            selectedFarmerObj ||
+            state.farmers[0];
+          extractedRows = [
+            {
+              farmerCode: chosenFarmer?.code,
+              farmerName: chosenFarmer?.name,
+              date: photoQuickDate || date,
+              shift: photoQuickShift || shift,
+              liters: qLit,
+              fat: qFat,
+              snf: qSnf,
+            },
+          ];
+        } else if (hasValidLiters && hasValidFat) {
+          extractedRows = [
+            {
+              farmerCode: selectedFarmerObj?.code || state.farmers[0]?.code,
+              farmerName: selectedFarmerObj?.name || state.farmers[0]?.name,
+              date,
+              shift,
+              liters: litersNum,
+              fat: fatNum,
+              snf: hasValidSnf ? snfNum : 8.5,
+              rate: liveRate ?? undefined,
+            },
+          ];
+        }
       }
 
-      stageScannedRowsForPreview(
-        extractedRows,
-        farmerId || photoQuickFarmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id
-      );
+      stageScannedRowsForPreview(extractedRows, defaultTargetFarmerId);
     } catch {
       setCameraError(
         lang === 'hi'
@@ -756,7 +917,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       `*${state.dairyName || 'Ujalaa Dairy'} — दूध खरीद रसीद*`,
       `--------------------------------`,
       `किसान: ${entry.farmerCode} - ${entry.farmerName}`,
-      `तारीख: ${entry.date} | शिफ्ट: ${shiftHi}`,
+      `तारीख: ${formatDateDMY(entry.date)} | शिफ्ट: ${shiftHi}`,
       `समय: ${entry.time}`,
       `दूध का प्रकार: ${typeHi}`,
       `मात्रा: ${formatNumber(entry.liters, 3)} लीटर`,
@@ -847,7 +1008,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
           >
             <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-slate-700/80 pb-1.5">
               {/* Date & Shift inline selector */}
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <Calendar className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                 <input
                   id="collection-date"
@@ -857,6 +1018,12 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   onChange={(e) => onChangeDate(e.target.value)}
                   className="text-xs font-bold bg-slate-800 text-white px-1.5 py-0.5 rounded border border-slate-700 focus:outline-none tabular-nums"
                 />
+                <span
+                  data-testid="collection-date-dmy-badge"
+                  className="text-[11px] font-extrabold text-amber-300 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 tabular-nums"
+                >
+                  {formatDateDMY(date)}
+                </span>
                 <div className="flex items-center bg-slate-800 p-0.5 rounded-lg border border-slate-700">
                   <button
                     type="button"
@@ -1267,14 +1434,15 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 <span>{lang === 'hi' ? 'गैलरी से फोटो' : 'Gallery'}</span>
               </button>
 
-              {/* Hidden file input 1: Direct Camera Capture (capture="environment") */}
+              {/* File input 1: Direct Camera Capture (capture="environment", sr-only for Android WebView APK compatibility) */}
               <input
                 ref={cameraFileInputRef}
+                id="camera-file-input"
                 data-testid="camera-file-input"
                 type="file"
                 accept="image/*"
                 capture="environment"
-                className="hidden"
+                className="sr-only"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) {
@@ -1284,13 +1452,14 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 }}
               />
 
-              {/* Hidden file input 2: Phone Gallery / File Picker (NO capture attribute) */}
+              {/* File input 2: Phone Gallery / File Picker (NO capture attribute, sr-only for Android WebView APK compatibility) */}
               <input
                 ref={galleryFileInputRef}
+                id="gallery-file-input"
                 data-testid="gallery-file-input"
                 type="file"
                 accept="image/*"
-                className="hidden"
+                className="sr-only"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) {
@@ -1345,7 +1514,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                     {lastSavedNotice.entries
                       .map(
                         (en) =>
-                          `${en.farmerCode}-${en.farmerName} [${en.date} ${
+                          `${en.farmerCode}-${en.farmerName} [${formatDateDMY(en.date)} ${
                             en.shift === 'morning' ? 'सुबह' : 'शाम'
                           }: ${formatNumber(en.liters, 3)}L · कुल ${formatWholeCurrency(
                             en.totalAmount
@@ -1714,6 +1883,11 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 className="text-xs font-bold bg-transparent text-slate-900 focus:outline-none tabular-nums"
               />
               {listDateFilter && (
+                <span className="text-[11px] font-extrabold text-blue-900 bg-white px-1.5 py-0.5 rounded border border-slate-200 tabular-nums">
+                  {formatDateDMY(listDateFilter)}
+                </span>
+              )}
+              {listDateFilter && (
                 <button
                   type="button"
                   onClick={() => setListDateFilter('')}
@@ -1784,45 +1958,37 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs border-collapse">
+        <div>
+          <table
+            data-testid="saved-collection-entries-table"
+            className="w-full text-xs sm:text-sm border border-slate-300 border-collapse tabular-nums"
+          >
             <thead>
-              <tr className="bg-blue-50 text-blue-950 border-b border-blue-100">
-                <th className="py-2 px-2.5 text-left font-bold">
-                  {lang === 'hi' ? 'क्र.' : '#'}
+              <tr className="bg-blue-50 text-blue-950 border-b border-slate-300">
+                <th className="py-2 px-1.5 sm:px-2.5 text-left font-extrabold border border-slate-300">
+                  {lang === 'hi' ? 'किसान / तारीख' : 'Farmer / Date'}
                 </th>
-                <th className="py-2 px-2.5 text-left font-bold">
-                  {lang === 'hi' ? 'तारीख' : 'Date'}
+                <th className="py-2 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                  {lang === 'hi' ? 'लीटर' : 'Liters'}
                 </th>
-                <th className="py-2 px-2.5 text-left font-bold">
-                  {lang === 'hi' ? 'किसान का नाम' : 'Farmer Name'}
+                <th className="py-2 px-1 sm:px-2 text-center font-extrabold border border-slate-300">
+                  FAT
                 </th>
-                <th className="py-2 px-2.5 text-left font-bold">
-                  {lang === 'hi' ? 'सुबह/शाम' : 'Shift'}
+                <th className="py-2 px-1 sm:px-2 text-center font-extrabold border border-slate-300">
+                  SNF
                 </th>
-                <th className="py-2 px-2.5 text-left font-bold">
-                  {lang === 'hi' ? 'दूध प्रकार' : 'Milk Type'}
+                <th className="py-2 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                  {lang === 'hi' ? 'रेट' : 'Rate'}
                 </th>
-                <th className="py-2 px-2.5 text-right font-bold">
-                  {lang === 'hi' ? 'मात्रा (L)' : 'Quantity'}
-                </th>
-                <th className="py-2 px-2.5 text-right font-bold">FAT</th>
-                <th className="py-2 px-2.5 text-right font-bold">SNF</th>
-                <th className="py-2 px-2.5 text-right font-bold">
-                  {lang === 'hi' ? 'प्रति लीटर रेट' : 'Rate/L'}
-                </th>
-                <th className="py-2 px-2.5 text-right font-bold">
-                  {lang === 'hi' ? 'कुल रकम' : 'Total Amount'}
-                </th>
-                <th className="py-2 px-2.5 text-center font-bold">
-                  {lang === 'hi' ? 'एडिट / डिलीट' : 'Actions'}
+                <th className="py-2 px-1.5 sm:px-2 text-right font-extrabold border border-slate-300">
+                  {lang === 'hi' ? 'रकम / कार्य' : 'Amt / Act'}
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 tabular-nums">
+            <tbody className="divide-y divide-slate-300 tabular-nums">
               {filteredEntries.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="py-6 text-center text-slate-500">
+                  <td colSpan={6} className="py-6 text-center text-slate-500 border border-slate-300">
                     {lang === 'hi'
                       ? 'अभी कोई दूध कलेक्शन रिकॉर्ड नहीं है।'
                       : 'No milk collection entries found for this filter.'}
@@ -1831,68 +1997,72 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               ) : (
                 filteredEntries.map((entry, idx) => (
                   <tr key={entry.id} className="hover:bg-slate-50">
-                    <td className="py-2 px-2.5 font-medium text-slate-500">{idx + 1}</td>
-                    <td className="py-2 px-2.5 text-slate-600">
-                      {entry.date}
-                      <span className="block text-[10px] text-slate-400">{entry.time}</span>
-                    </td>
-                    <td className="py-2 px-2.5 font-bold text-slate-900">
-                      {entry.farmerCode} — {entry.farmerName}
-                    </td>
-                    <td className="py-2 px-2.5">
-                      {entry.shift === 'morning'
-                        ? lang === 'hi'
-                          ? 'सुबह'
-                          : 'Morning'
-                        : lang === 'hi'
-                        ? 'शाम'
-                        : 'Evening'}
-                    </td>
-                    <td className="py-2 px-2.5">
-                      <span
-                        className={`px-2 py-0.5 rounded font-semibold ${
-                          entry.milkType === 'cow'
-                            ? 'bg-blue-50 text-blue-700'
-                            : 'bg-indigo-50 text-indigo-700'
-                        }`}
-                      >
-                        {entry.milkType === 'cow'
+                    <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
+                      <span className="font-extrabold text-slate-900 block leading-tight text-xs sm:text-sm">
+                        <span className="text-slate-400 font-normal mr-0.5">{idx + 1}.</span>
+                        {entry.farmerCode} — {entry.farmerName}
+                      </span>
+                      <span className="text-[11px] font-semibold text-slate-600 block leading-tight mt-0.5">
+                        {formatDateDMY(entry.date)} ·{' '}
+                        {entry.shift === 'morning'
                           ? lang === 'hi'
-                            ? 'गाय'
-                            : 'Cow'
+                            ? 'सुबह'
+                            : 'AM'
                           : lang === 'hi'
-                          ? 'भैंस'
-                          : 'Buffalo'}
+                          ? 'शाम'
+                          : 'PM'}{' '}
+                        ·{' '}
+                        <span
+                          className={`px-1 py-0.2 rounded font-bold ${
+                            entry.milkType === 'cow'
+                              ? 'bg-blue-50 text-blue-700'
+                              : 'bg-indigo-50 text-indigo-700'
+                          }`}
+                        >
+                          {entry.milkType === 'cow'
+                            ? lang === 'hi'
+                              ? 'गाय'
+                              : 'Cow'
+                            : lang === 'hi'
+                            ? 'भैंस'
+                            : 'Buffalo'}
+                        </span>
                       </span>
                     </td>
-                    <td className="py-2 px-2.5 text-right font-bold text-slate-900">
-                      {formatNumber(entry.liters, 3)}
+                    <td className="py-2 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300 text-xs sm:text-sm">
+                      {formatNumber(entry.liters, 2)} L
                     </td>
-                    <td className="py-2 px-2.5 text-right">{formatNumber(entry.fat, 2)}</td>
-                    <td className="py-2 px-2.5 text-right">{formatNumber(entry.snf, 2)}</td>
-                    <td className="py-2 px-2.5 text-right">{formatCurrency(entry.rate)}</td>
-                    <td
-                      data-testid={`saved-entry-amount-${entry.farmerCode}`}
-                      className="py-2 px-2.5 text-right font-bold text-blue-800"
-                    >
-                      {formatWholeCurrency(entry.totalAmount)}
+                    <td className="py-2 px-1 sm:px-2 text-center font-extrabold text-amber-900 whitespace-nowrap border border-slate-300 bg-amber-50/40 text-xs sm:text-sm">
+                      {formatNumber(entry.fat, 1)}
                     </td>
-                    <td className="py-2 px-2.5 text-center">
-                      <div className="flex items-center justify-center gap-1.5">
+                    <td className="py-2 px-1 sm:px-2 text-center font-extrabold text-indigo-900 whitespace-nowrap border border-slate-300 bg-indigo-50/40 text-xs sm:text-sm">
+                      {formatNumber(entry.snf, 1)}
+                    </td>
+                    <td className="py-2 px-1 sm:px-2 text-right font-extrabold text-blue-900 whitespace-nowrap border border-slate-300 bg-blue-50/30 text-xs sm:text-sm">
+                      ₹{formatNumber(entry.rate, 2)}
+                    </td>
+                    <td className="py-2 px-1.5 sm:px-2 text-right whitespace-nowrap border border-slate-300">
+                      <span
+                        data-testid={`saved-entry-amount-${entry.farmerCode}`}
+                        className="font-extrabold text-emerald-800 block leading-tight text-xs sm:text-sm"
+                      >
+                        {formatWholeCurrency(entry.totalAmount)}
+                      </span>
+                      <div className="flex items-center justify-end gap-1 mt-1">
                         <button
                           type="button"
                           onClick={() => handleEditEntry(entry)}
                           aria-label={`Edit ${entry.farmerName} entry`}
-                          className="min-h-[30px] px-2 py-1 bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 rounded-lg font-semibold flex items-center gap-1"
+                          className="min-h-[24px] px-1.5 py-0.5 bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 rounded font-semibold flex items-center gap-0.5 text-[10px]"
                         >
                           <Edit2 className="w-3 h-3" />
-                          <span>{lang === 'hi' ? 'एडिट' : 'Edit'}</span>
+                          <span className="hidden sm:inline">{lang === 'hi' ? 'एडिट' : 'Edit'}</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => openWhatsAppForEntry(entry)}
                           aria-label={`Share ${entry.farmerName} entry on WhatsApp`}
-                          className="min-h-[30px] px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg font-semibold flex items-center gap-1"
+                          className="min-h-[24px] px-1.5 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded font-semibold flex items-center text-[10px]"
                         >
                           <MessageSquare className="w-3 h-3" />
                         </button>
@@ -1900,10 +2070,10 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                           type="button"
                           onClick={() => setDeleteTargetId(entry.id)}
                           aria-label={`Delete ${entry.farmerName} entry`}
-                          className="min-h-[30px] px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-semibold flex items-center gap-1"
+                          className="min-h-[24px] px-1.5 py-0.5 bg-red-50 hover:bg-red-100 text-red-600 rounded font-semibold flex items-center gap-0.5 text-[10px]"
                         >
                           <Trash2 className="w-3 h-3" />
-                          <span>{lang === 'hi' ? 'डिलीट' : 'Delete'}</span>
+                          <span className="hidden sm:inline">{lang === 'hi' ? 'डिलीट' : 'Delete'}</span>
                         </button>
                       </div>
                     </td>
@@ -1914,32 +2084,29 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
             <tfoot>
               <tr
                 data-testid="collection-summary-row"
-                className="bg-slate-100 text-slate-900 border-t-2 border-slate-300 font-bold tabular-nums"
+                className="bg-slate-100 text-slate-900 border-t-2 border-slate-400 font-extrabold tabular-nums text-xs sm:text-sm"
               >
-                <td colSpan={5} className="py-2.5 px-2.5">
+                <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
                   {lang === 'hi'
-                    ? `कुल सारांश — कुल किसानों की संख्या: ${filteredSummary.distinctFarmerCount} (कुल एंट्रियाँ: ${filteredSummary.entryCount})`
-                    : `Total Summary — Farmers: ${filteredSummary.distinctFarmerCount} (Entries: ${filteredSummary.entryCount})`}
+                    ? `कुल (${filteredSummary.distinctFarmerCount} किसान · ${filteredSummary.entryCount} एंट्री)`
+                    : `Total (${filteredSummary.distinctFarmerCount} Farmers · ${filteredSummary.entryCount})`}
                 </td>
-                <td className="py-2.5 px-2.5 text-right text-blue-800">
-                  {formatNumber(filteredSummary.totalLiters, 3)} L
+                <td className="py-2 px-1 sm:px-2 text-right whitespace-nowrap text-blue-900 border border-slate-300">
+                  {formatNumber(filteredSummary.totalLiters, 2)} L
                 </td>
-                <td className="py-2.5 px-2.5 text-right">
-                  {formatNumber(filteredSummary.avgFat, 2)}
+                <td className="py-2 px-1 sm:px-2 text-center whitespace-nowrap text-amber-900 border border-slate-300">
+                  {formatNumber(filteredSummary.avgFat, 1)}
                 </td>
-                <td className="py-2.5 px-2.5 text-right">
-                  {formatNumber(filteredSummary.avgSnf, 2)}
+                <td className="py-2 px-1 sm:px-2 text-center whitespace-nowrap text-indigo-900 border border-slate-300">
+                  {formatNumber(filteredSummary.avgSnf, 1)}
                 </td>
-                <td className="py-2.5 px-2.5 text-right">
+                <td className="py-2 px-1 sm:px-2 text-right whitespace-nowrap text-blue-900 border border-slate-300">
                   {filteredSummary.avgRate !== null
-                    ? formatCurrency(filteredSummary.avgRate)
+                    ? `₹${formatNumber(filteredSummary.avgRate, 2)}`
                     : '—'}
                 </td>
-                <td className="py-2.5 px-2.5 text-right text-blue-800">
+                <td className="py-2 px-1.5 sm:px-2 text-right whitespace-nowrap text-emerald-800 border border-slate-300">
                   {formatWholeCurrency(filteredSummary.totalAmount)}
-                </td>
-                <td className="py-2.5 px-2.5 text-center text-[11px] text-slate-500 font-normal">
-                  {lang === 'hi' ? 'भारित औसत' : 'Weighted Avg'}
                 </td>
               </tr>
             </tfoot>
@@ -1998,8 +2165,8 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       <div className="bg-white border border-slate-200 rounded-2xl p-3.5">
         <div className="text-xs font-bold text-slate-700 mb-2">
           {lang === 'hi'
-            ? `शिफ्ट उपस्थिति एवं सारांश (${date} · ${shift === 'morning' ? 'सुबह' : 'शाम'})`
-            : `Shift Summary (${date} · ${shift})`}
+            ? `शिफ्ट उपस्थिति एवं सारांश (${formatDateDMY(date)} · ${shift === 'morning' ? 'सुबह' : 'शाम'})`
+            : `Shift Summary (${formatDateDMY(date)} · ${shift})`}
         </div>
         <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2 text-center">
           <div className="p-2 bg-slate-50 rounded-xl border border-slate-100">
@@ -2238,50 +2405,94 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   </button>
                 </div>
 
-                <div className="overflow-x-auto bg-white rounded-xl border border-blue-200">
+                {/* Quick Single-Farmer & 10-11 Day Cycle Date Applier Bar (1-10, 11-20, 21-31) */}
+                <div className="bg-white border border-blue-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[11px] font-bold text-slate-700">
+                      {lang === 'hi' ? 'एक किसान चुनें:' : 'Farmer:'}
+                    </span>
+                    <select
+                      data-testid="preview-apply-farmer-select"
+                      value={photoQuickFarmerId}
+                      onChange={(e) => handleApplyFarmerToPreview(e.target.value)}
+                      className="h-8 px-2 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg"
+                    >
+                      <option value="">
+                        {lang === 'hi' ? '-- पर्ची अनुसार / किसान बदलें --' : '-- As Scanned / Change --'}
+                      </option>
+                      {activeFarmers.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.code} — {f.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[11px] font-bold text-slate-700">
+                      {lang === 'hi' ? 'तारीख क्रम सेट करें:' : 'Set Cycle Dates:'}
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="apply-cycle-21-31-dates-btn"
+                      onClick={() => handleApplyCycleDatesToPreview(3)}
+                      className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-extrabold rounded-lg shadow-2xs"
+                    >
+                      {lang === 'hi' ? '21 से 31 तारीख (10-11 एंट्री)' : '21 to 31 Dates'}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="apply-cycle-1-10-dates-btn"
+                      onClick={() => handleApplyCycleDatesToPreview(1)}
+                      className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-bold rounded-lg border border-slate-300"
+                    >
+                      {lang === 'hi' ? '1 से 10 तारीख' : '1 to 10'}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="apply-cycle-11-20-dates-btn"
+                      onClick={() => handleApplyCycleDatesToPreview(2)}
+                      className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-bold rounded-lg border border-slate-300"
+                    >
+                      {lang === 'hi' ? '11 से 20 तारीख' : '11 to 20'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl border border-blue-200">
                   <table
                     data-testid="photo-entry-preview-table"
-                    className="w-full text-xs border-collapse tabular-nums"
+                    className="w-full text-xs border border-slate-300 border-collapse tabular-nums"
                   >
                     <thead>
                       <tr className="bg-blue-900 text-white">
-                        <th className="py-2 px-2 text-left font-bold">
-                          {lang === 'hi' ? 'तारीख / शिफ्ट' : 'Date / Shift'}
+                        <th className="py-2 px-1.5 sm:px-2 text-left font-bold border border-blue-800">
+                          {lang === 'hi' ? 'तारीख / किसान' : 'Date / Farmer'}
                         </th>
-                        <th className="py-2 px-2 text-left font-bold">
-                          {lang === 'hi' ? 'किसान कोड' : 'Code'}
-                        </th>
-                        <th className="py-2 px-2 text-left font-bold">
-                          {lang === 'hi' ? 'नाम (पशु)' : 'Farmer Name'}
-                        </th>
-                        <th className="py-2 px-2 text-right font-bold">
-                          {lang === 'hi' ? 'फैट (FAT)' : 'FAT'}
-                        </th>
-                        <th className="py-2 px-2 text-right font-bold">SNF</th>
-                        <th className="py-2 px-2 text-right font-bold">
+                        <th className="py-2 px-1 sm:px-2 text-right font-bold border border-blue-800">
                           {lang === 'hi' ? 'लीटर' : 'Liters'}
                         </th>
-                        <th className="py-2 px-2 text-right font-bold">
-                          {lang === 'hi' ? 'रेट' : 'Rate'}
+                        <th className="py-2 px-1 sm:px-2 text-center font-bold border border-blue-800">
+                          FAT / SNF
                         </th>
-                        <th className="py-2 px-2 text-right font-bold">
-                          {lang === 'hi' ? 'अमाउंट' : 'Amount'}
+                        <th className="py-2 px-1.5 sm:px-2 text-right font-bold border border-blue-800">
+                          {lang === 'hi' ? 'अमाउंट / रेट' : 'Amount / Rate'}
                         </th>
-                        <th className="py-2 px-2 text-center font-bold">
+                        <th className="py-2 px-1 sm:px-2 text-center font-bold border border-blue-800">
                           {lang === 'hi' ? 'स्थिति' : 'Status'}
                         </th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-200">
+                    <tbody className="divide-y divide-slate-300">
                       {photoPreviewItems.map((item, idx) => {
                         const en = item.entry;
                         const animalLabel =
                           en.milkType === 'cow'
                             ? lang === 'hi'
-                              ? 'गाय (Cow)'
+                              ? 'गाय'
                               : 'Cow'
                             : lang === 'hi'
-                            ? 'भैंस (Buffalo)'
+                            ? 'भैंस'
                             : 'Buffalo';
                         return (
                           <tr
@@ -2293,58 +2504,48 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                                 : 'hover:bg-blue-50/40 text-slate-900'
                             }
                           >
-                            <td className="py-2 px-2 font-semibold whitespace-nowrap">
-                              {en.date}{' '}
-                              <span className="inline-block px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 text-[10px] font-bold">
-                                {en.shift === 'morning'
-                                  ? lang === 'hi'
-                                    ? 'सुबह'
-                                    : 'Morning'
-                                  : lang === 'hi'
-                                  ? 'शाम'
-                                  : 'Evening'}
+                            <td className="py-1.5 px-1.5 sm:px-2 border border-slate-300">
+                              <span className="font-bold text-slate-900 block leading-tight">
+                                <span className="text-blue-900">{en.farmerCode}</span> — {en.farmerName}
+                              </span>
+                              <span className="text-[11px] font-semibold text-slate-600 block leading-tight mt-0.5">
+                                {formatDateDMY(en.date)}{' '}
+                                <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-800 font-bold">
+                                  {en.shift === 'morning'
+                                    ? lang === 'hi'
+                                      ? 'सुबह'
+                                      : 'Morning'
+                                    : lang === 'hi'
+                                    ? 'शाम'
+                                    : 'Evening'}
+                                </span>{' '}
+                                · {animalLabel}
                               </span>
                             </td>
-                            <td className="py-2 px-2 font-bold text-blue-900">
-                              {en.farmerCode}
+                            <td className="py-1.5 px-1 sm:px-2 text-right whitespace-nowrap font-extrabold text-slate-900 border border-slate-300">
+                              {formatNumber(en.liters, 2)} L
                             </td>
-                            <td className="py-2 px-2 font-bold">
-                              {en.farmerName}{' '}
-                              <span
-                                className={`inline-block ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                  en.milkType === 'cow'
-                                    ? 'bg-blue-100 text-blue-800'
-                                    : 'bg-indigo-100 text-indigo-800'
-                                }`}
-                              >
-                                {animalLabel}
+                            <td className="py-1.5 px-1 sm:px-2 text-center whitespace-nowrap font-extrabold text-amber-900 border border-slate-300">
+                              {formatNumber(en.fat, 1)} / {formatNumber(en.snf, 1)}
+                            </td>
+                            <td className="py-1.5 px-1.5 sm:px-2 text-right whitespace-nowrap border border-slate-300">
+                              <span className="font-extrabold text-emerald-700 block leading-tight">
+                                {formatWholeCurrency(en.totalAmount)}
+                              </span>
+                              <span className="text-[11px] text-blue-800 font-bold block leading-tight mt-0.5">
+                                {formatCurrency(en.rate)}
                               </span>
                             </td>
-                            <td className="py-2 px-2 text-right font-bold">
-                              {formatNumber(en.fat, 2)}
-                            </td>
-                            <td className="py-2 px-2 text-right font-bold">
-                              {formatNumber(en.snf, 2)}
-                            </td>
-                            <td className="py-2 px-2 text-right font-extrabold text-slate-900">
-                              {formatNumber(en.liters, 3)} L
-                            </td>
-                            <td className="py-2 px-2 text-right font-semibold text-blue-800">
-                              {formatCurrency(en.rate)}
-                            </td>
-                            <td className="py-2 px-2 text-right font-extrabold text-emerald-700">
-                              {formatWholeCurrency(en.totalAmount)}
-                            </td>
-                            <td className="py-2 px-2 text-center whitespace-nowrap">
+                            <td className="py-1.5 px-1 sm:px-2 text-center border border-slate-300">
                               {item.isDuplicate ? (
                                 <span
                                   data-testid={`photo-preview-duplicate-badge-${idx}`}
-                                  className="inline-block px-2 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-extrabold no-underline"
+                                  className="inline-block px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-extrabold no-underline"
                                 >
                                   {lang === 'hi' ? item.statusHi : item.statusEn}
                                 </span>
                               ) : (
-                                <span className="inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-extrabold">
+                                <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-extrabold">
                                   {lang === 'hi' ? item.statusHi : item.statusEn}
                                 </span>
                               )}
@@ -2624,6 +2825,251 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               </div>
             )}
 
+            {/* ========================================================================== */}
+            {/* SINGLE FARMER 21 TO 31 DATE (10-11 ENTRIES) PASSBOOK TABLE IN PHOTO MODAL  */}
+            {/* ========================================================================== */}
+            <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-xs font-extrabold text-indigo-950">
+                    {lang === 'hi'
+                      ? 'एक ही किसान की 21 से 31 तारीख (10-11 एंट्री) एक साथ भरें / फोटो से मिलाएँ:'
+                      : 'Single Farmer 21 to 31 Date (10-11 Entries) Passbook Table:'}
+                  </h4>
+                  <p className="text-[11px] text-indigo-800">
+                    {lang === 'hi'
+                      ? 'किसान चुनें और 21 से 31 तारीख (या 1-10, 11-20) की सभी 10-11 एंट्री एक साथ प्रिव्यू करके सेव करें'
+                      : 'Select farmer and enter/preview all 10-11 entries from 21st to 31st at once'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  data-testid="toggle-passbook-21-31-grid-btn"
+                  onClick={() => setShowPassbook21To31Grid((prev) => !prev)}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-2xs"
+                >
+                  {showPassbook21To31Grid
+                    ? lang === 'hi'
+                      ? '21-31 तालिका छुपाएँ'
+                      : 'Hide 21-31 Table'
+                    : lang === 'hi'
+                    ? '21 से 31 तारीख (10-11 एंट्री) तालिका खोलें'
+                    : 'Open 21-31 Passbook Table'}
+                </button>
+              </div>
+
+              {showPassbook21To31Grid && (
+                <div
+                  data-testid="passbook-21-31-grid-section"
+                  className="space-y-2.5 pt-2 border-t border-indigo-200"
+                >
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'किसान चुनें *' : 'Farmer *'}
+                      </label>
+                      <select
+                        data-testid="passbook-grid-farmer-select"
+                        value={photoQuickFarmerId}
+                        onChange={(e) => setPhotoQuickFarmerId(e.target.value)}
+                        className="w-full h-8 px-2 text-xs font-bold bg-white border border-slate-300 rounded-lg"
+                      >
+                        {activeFarmers.map((f) => (
+                          <option key={f.id} value={f.id}>
+                            {f.code} — {f.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'महीना (YYYY-MM)' : 'Month'}
+                      </label>
+                      <input
+                        data-testid="passbook-grid-month-input"
+                        type="month"
+                        value={passbookYearMonth}
+                        onChange={(e) => setPassbookYearMonth(e.target.value)}
+                        className="w-full h-8 px-2 text-xs font-bold bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'अवधि (10-11 दिन)' : 'Period'}
+                      </label>
+                      <select
+                        data-testid="passbook-grid-cycle-select"
+                        value={passbookCycle}
+                        onChange={(e) => setPassbookCycle(Number(e.target.value) as 1 | 2 | 3)}
+                        className="w-full h-8 px-2 text-xs font-bold bg-white border border-slate-300 rounded-lg"
+                      >
+                        <option value={3}>{lang === 'hi' ? '21 से 31 तारीख (11 दिन)' : '21 to 31'}</option>
+                        <option value={2}>{lang === 'hi' ? '11 से 20 तारीख (10 दिन)' : '11 to 20'}</option>
+                        <option value={1}>{lang === 'hi' ? '1 से 10 तारीख (10 दिन)' : '1 to 10'}</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'शिफ्ट' : 'Shift'}
+                      </label>
+                      <select
+                        data-testid="passbook-grid-shift-select"
+                        value={passbookShift}
+                        onChange={(e) => setPassbookShift(e.target.value as ShiftType)}
+                        className="w-full h-8 px-2 text-xs font-bold bg-white border border-slate-300 rounded-lg"
+                      >
+                        <option value="morning">{lang === 'hi' ? 'सुबह (Morning)' : 'Morning'}</option>
+                        <option value="evening">{lang === 'hi' ? 'शाम (Evening)' : 'Evening'}</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const [yStr, mStr] = (passbookYearMonth || date.slice(0, 7)).split('-');
+                    const y = Number(yStr) || 2026;
+                    const m = Number(mStr) || 10;
+                    const maxDayInMonth = new Date(y, m, 0).getDate() || 31;
+                    const startD = passbookCycle === 1 ? 1 : passbookCycle === 2 ? 11 : 21;
+                    const endD =
+                      passbookCycle === 1 ? 10 : passbookCycle === 2 ? 20 : maxDayInMonth;
+                    const daysList: number[] = [];
+                    for (let d = startD; d <= endD; d++) {
+                      daysList.push(d);
+                    }
+
+                    return (
+                      <>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-60 overflow-y-auto bg-white p-2 rounded-xl border border-indigo-200">
+                          {daysList.map((d) => {
+                            const rowVal = passbookDayInputs[d] || {
+                              liters: '',
+                              fat: '',
+                              snf: '8.5',
+                            };
+                            const fullDateStr = `${String(y).padStart(4, '0')}-${String(m).padStart(
+                              2,
+                              '0'
+                            )}-${String(d).padStart(2, '0')}`;
+                            return (
+                              <div
+                                key={d}
+                                className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs tabular-nums"
+                              >
+                                <span className="font-extrabold text-indigo-950 w-18 shrink-0">
+                                  {d} {lang === 'hi' ? 'तारीख' : 'Date'}
+                                  <span className="block text-[9px] text-slate-500 font-semibold">
+                                    {formatDateDMY(fullDateStr)}
+                                  </span>
+                                </span>
+                                <input
+                                  data-testid={`passbook-day-${d}-liters`}
+                                  type="text"
+                                  inputMode="decimal"
+                                  placeholder={lang === 'hi' ? 'लीटर' : 'Liters'}
+                                  value={rowVal.liters}
+                                  onChange={(e) =>
+                                    setPassbookDayInputs((prev) => ({
+                                      ...prev,
+                                      [d]: { ...rowVal, liters: e.target.value },
+                                    }))
+                                  }
+                                  className="w-full h-7 px-1.5 text-xs font-bold font-mono bg-white border border-slate-300 rounded"
+                                />
+                                <input
+                                  data-testid={`passbook-day-${d}-fat`}
+                                  type="text"
+                                  inputMode="decimal"
+                                  placeholder="FAT"
+                                  value={rowVal.fat}
+                                  onChange={(e) =>
+                                    setPassbookDayInputs((prev) => ({
+                                      ...prev,
+                                      [d]: { ...rowVal, fat: e.target.value },
+                                    }))
+                                  }
+                                  className="w-full h-7 px-1.5 text-xs font-bold font-mono bg-white border border-slate-300 rounded"
+                                />
+                                <input
+                                  data-testid={`passbook-day-${d}-snf`}
+                                  type="text"
+                                  inputMode="decimal"
+                                  placeholder="SNF"
+                                  value={rowVal.snf}
+                                  onChange={(e) =>
+                                    setPassbookDayInputs((prev) => ({
+                                      ...prev,
+                                      [d]: { ...rowVal, snf: e.target.value },
+                                    }))
+                                  }
+                                  className="w-16 h-7 px-1.5 text-xs font-bold font-mono bg-white border border-slate-300 rounded shrink-0"
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <button
+                          type="button"
+                          data-testid="stage-passbook-21-31-btn"
+                          onClick={() => {
+                            const chosenFarmer =
+                              state.farmers.find((f) => f.id === photoQuickFarmerId) ||
+                              selectedFarmerObj ||
+                              scheduledForShiftFarmers[0] ||
+                              state.farmers[0];
+                            const builtRows: ScannedSlipRawRow[] = [];
+                            for (const d of daysList) {
+                              const rv = passbookDayInputs[d];
+                              if (!rv) continue;
+                              const lit = Number(rv.liters);
+                              const fat = Number(rv.fat);
+                              const snf = Number(rv.snf) > 0 ? Number(rv.snf) : 8.5;
+                              if (
+                                Number.isFinite(lit) &&
+                                lit > 0 &&
+                                Number.isFinite(fat) &&
+                                fat > 0
+                              ) {
+                                const dStr = `${String(y).padStart(4, '0')}-${String(m).padStart(
+                                  2,
+                                  '0'
+                                )}-${String(d).padStart(2, '0')}`;
+                                builtRows.push({
+                                  farmerCode: chosenFarmer?.code,
+                                  farmerName: chosenFarmer?.name,
+                                  date: dStr,
+                                  shift: passbookShift,
+                                  liters: lit,
+                                  fat,
+                                  snf,
+                                });
+                              }
+                            }
+                            if (builtRows.length === 0) {
+                              setCameraError(
+                                lang === 'hi'
+                                  ? 'कृपया कम से कम एक तारीख का लीटर और FAT भरें।'
+                                  : 'Please enter Liters and FAT for at least one date.'
+                              );
+                              return;
+                            }
+                            setCameraError(null);
+                            stageScannedRowsForPreview(builtRows, chosenFarmer?.id);
+                          }}
+                          className="w-full min-h-[40px] px-4 py-2 bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-extrabold rounded-lg flex items-center justify-center gap-1.5 shadow-xs"
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                          {lang === 'hi'
+                            ? `${startD} से ${endD} तारीख की सभी एंट्री का प्रिव्यू दिखाएँ`
+                            : `Preview All Entries (${startD} to ${endD})`}
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+
             {/* Quick Written Slip Text / OCR Fallback Box (Supports 1 or Many Farmers + Multi-Date Morning/Evening) */}
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
               <label
@@ -2631,19 +3077,19 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 className="block text-xs font-bold text-slate-800"
               >
                 {lang === 'hi'
-                  ? 'या एक/अधिक किसानों व अलग-अलग तारीख (सुबह/शाम) की पर्ची लिखें/पेस्ट करके प्रिव्यू देखें:'
-                  : 'Or paste/type 1 or multiple farmers & multi-date (Morning/Evening) slip text to preview:'}
+                  ? 'या एक/अधिक किसानों व 21 से 31 तारीख (सुबह/शाम) की पर्ची लिखें/पेस्ट करके प्रिव्यू देखें:'
+                  : 'Or paste/type 1 or multiple farmers & 21-31 date (Morning/Evening) slip text to preview:'}
               </label>
               <p className="text-[11px] text-slate-500">
                 {lang === 'hi'
-                  ? 'उदाहरण: "रामलाल 6.5 4.5 8.5" या "102 7.2 5.2 8.8" या "21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6"'
-                  : 'Ex: "Ramlal 6.5 4.5 8.5" or "21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6"'}
+                  ? 'उदाहरण: "किसान: रामलाल गुर्जर (101)" फिर 21 से 31 तारीख की लाइनें जैसे "21 5.5 4.5 8.5", "22 6.0 4.6 8.5" ... "31 6.5 4.8 8.6"'
+                  : 'Ex: "Ramlal (101)" followed by lines "21 5.5 4.5 8.5" ... "31 6.5 4.8 8.6"'}
               </p>
               <textarea
                 id="camera-slip-text-input"
                 data-testid="camera-slip-text-input"
                 rows={3}
-                placeholder={'रामलाल गुर्जर 6.955 4.5 8.5\n102 7.25 5.2 8.8\n21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6'}
+                placeholder={'किसान: रामलाल गुर्जर (101)\n21 5.5 4.5 8.5\n22 6.0 4.6 8.5\n23 5.8 4.4 8.5'}
                 value={slipManualText}
                 onChange={(e) => setSlipManualText(e.target.value)}
                 className="w-full p-2.5 text-xs font-mono bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"

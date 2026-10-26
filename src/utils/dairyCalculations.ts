@@ -66,6 +66,57 @@ export function formatWholeCurrency(val: number | null | undefined): string {
 }
 
 /**
+ * Formats any YYYY-MM-DD (or ISO / MM-DD) date string into DD-MM-YYYY (दिन-महीना-साल).
+ * Examples:
+ * - "2026-10-26" -> "26-10-2026"
+ * - "2026-10-26T07:00:00Z" -> "26-10-2026"
+ * - "10-26" -> "26-10"
+ */
+export function formatDateDMY(dateStr: string | null | undefined): string {
+  if (!dateStr) return '—';
+  const trimmed = String(dateStr).trim();
+  if (!trimmed || trimmed === '—') return '—';
+
+  const isoPrefixMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoPrefixMatch) {
+    return `${isoPrefixMatch[3]}-${isoPrefixMatch[2]}-${isoPrefixMatch[1]}`;
+  }
+
+  const slashYmdMatch = trimmed.match(/^(\d{4})\/(\d{2})\/(\d{2})/);
+  if (slashYmdMatch) {
+    return `${slashYmdMatch[3]}-${slashYmdMatch[2]}-${slashYmdMatch[1]}`;
+  }
+
+  const dmyMatch = trimmed.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (dmyMatch) {
+    return `${dmyMatch[1]}-${dmyMatch[2]}-${dmyMatch[3]}`;
+  }
+
+  const mmDdMatch = trimmed.match(/^(\d{2})-(\d{2})$/);
+  if (mmDdMatch) {
+    return `${mmDdMatch[2]}-${mmDdMatch[1]}`;
+  }
+
+  return trimmed;
+}
+
+/**
+ * Formats YYYY-MM month-year string into MM-YYYY (महीना-साल).
+ * Example: "2026-10" -> "10-2026"
+ */
+export function formatMonthYear(yearMonth: string | null | undefined): string {
+  if (!yearMonth) return '—';
+  const trimmed = String(yearMonth).trim();
+  if (!trimmed) return '—';
+  const ymMatch = trimmed.match(/^(\d{4})-(\d{2})$/);
+  if (ymMatch) {
+    return `${ymMatch[2]}-${ymMatch[1]}`;
+  }
+  return trimmed;
+}
+
+
+/**
  * Requirement 2: Auto-Decimal System for FAT and SNF
  * - Typing "51" -> "5.1" (completedTwoDigits: true)
  * - Typing "50" -> "5.0" (completedTwoDigits: true)
@@ -1021,7 +1072,7 @@ export function getCycleLabelHi(cycle: 1 | 2 | 3, yearMonth?: string): string {
       : cycle === 2
       ? '11 से 20 तारीख'
       : '21 से महीने के अंत तक';
-  return yearMonth ? `${base} (${yearMonth})` : base;
+  return yearMonth ? `${base} (${formatMonthYear(yearMonth)})` : base;
 }
 
 export function getCycleLabelEn(cycle: 1 | 2 | 3, yearMonth?: string): string {
@@ -1031,7 +1082,7 @@ export function getCycleLabelEn(cycle: 1 | 2 | 3, yearMonth?: string): string {
       : cycle === 2
       ? '11th to 20th'
       : '21st to End of Month';
-  return yearMonth ? `${base} (${yearMonth})` : base;
+  return yearMonth ? `${base} (${formatMonthYear(yearMonth)})` : base;
 }
 
 export function getPreviousTenDayCycle(
@@ -2503,7 +2554,7 @@ export function parseMilkSlipTextToRows(
   // Sticky context for multi-row passbook / register pages
   let stickyFarmerName: string | undefined;
   let stickyFarmerCode: string | undefined;
-  let stickyDate: string | undefined = defaultDate;
+  let stickyDate: string | undefined = undefined;
   let stickyShift: ShiftType | undefined = defaultShift;
   let hasExplicitFarmerHeader = false;
 
@@ -2564,6 +2615,7 @@ export function parseMilkSlipTextToRows(
   // Expand dual-shift lines (where a single line has both Morning and Evening entries for a date)
   const expandedSegments: {
     text: string;
+    explicitDate?: string;
     lineDate?: string;
     forcedShift?: ShiftType;
   }[] = [];
@@ -2586,21 +2638,57 @@ export function parseMilkSlipTextToRows(
       const eveBody = dualMatch[5].trim();
       expandedSegments.push({
         text: `${prefix} ${mornBody}`.trim(),
+        explicitDate: dateStr,
         lineDate: effectiveLineDate,
         forcedShift: 'morning',
       });
       expandedSegments.push({
         text: `${prefix} ${eveBody}`.trim(),
+        explicitDate: dateStr,
         lineDate: effectiveLineDate,
         forcedShift: 'evening',
       });
     } else {
       expandedSegments.push({
         text: remainingLine.trim(),
+        explicitDate: dateStr,
         lineDate: effectiveLineDate,
       });
     }
   }
+
+  // Pre-scan expandedSegments to detect if this is a multi-date passbook page
+  // (e.g. a single farmer's 10-11 entries from 21 to 31 date, or 1-10 / 11-20)
+  let dayPrefixedRowCount = 0;
+  const seenDayPrefixes = new Set<number>();
+  for (const seg of expandedSegments) {
+    const toks = seg.text.split(/[\s,|/:-]+/).filter(Boolean);
+    const nums: number[] = [];
+    for (const tok of toks) {
+      const cleanedTok = tok.replace(/[L₹lkgKGलीटर()[\]]/g, '');
+      const cleanedNum = cleanedTok.replace(/[^0-9.]/g, '');
+      const numVal = Number(cleanedNum);
+      if (
+        cleanedNum !== '' &&
+        Number.isFinite(numVal) &&
+        numVal > 0 &&
+        /^[0-9]+(?:\.[0-9]+)?$/.test(cleanedTok)
+      ) {
+        nums.push(numVal);
+      }
+    }
+    if (
+      nums.length >= 3 &&
+      Number.isInteger(nums[0]) &&
+      nums[0] >= 1 &&
+      nums[0] <= 31
+    ) {
+      dayPrefixedRowCount++;
+      seenDayPrefixes.add(nums[0]);
+    }
+  }
+  const isPassbookDateSequence =
+    dayPrefixedRowCount >= 2 && seenDayPrefixes.size >= 2;
 
   for (const seg of expandedSegments) {
     const line = seg.text;
@@ -2656,7 +2744,7 @@ export function parseMilkSlipTextToRows(
         results.push({
           farmerCode: rowCode || stickyFarmerCode,
           farmerName: cleanedName || stickyFarmerName,
-          date: seg.lineDate,
+          date: seg.explicitDate || stickyDate || defaultDate,
           shift: effectiveShift,
           liters,
           fat,
@@ -2697,34 +2785,86 @@ export function parseMilkSlipTextToRows(
         hasExplicitFarmerHeader = true;
       }
       if (numbers.length === 1 && Number.isInteger(numbers[0])) {
-        if (lineFarmerName || codeMatch) {
+        if (lineFarmerName || codeMatch || /[()]/.test(line) || numbers[0] > 31) {
           stickyFarmerCode = String(numbers[0]);
           hasExplicitFarmerHeader = true;
-        } else if (numbers[0] >= 1 && numbers[0] <= 31 && !seg.lineDate) {
+        } else if (numbers[0] >= 1 && numbers[0] <= 31 && !seg.explicitDate) {
           stickyDate = String(numbers[0]);
         } else {
           stickyFarmerCode = String(numbers[0]);
+          hasExplicitFarmerHeader = true;
         }
       }
       continue;
     }
 
-    let rowDate = seg.lineDate;
+    let rowDate = seg.explicitDate;
+
+    // Support dual-shift passbook table row: [Day (1..31), MornLiters, MornFat, MornSnf, EveLiters, EveFat, EveSnf]
+    if (
+      numbers.length === 7 &&
+      Number.isInteger(numbers[0]) &&
+      numbers[0] >= 1 &&
+      numbers[0] <= 31
+    ) {
+      const mLit = normalizeLiters(numbers[1]);
+      const mFat = normalizeFat(numbers[2]);
+      const mSnf = normalizeSnf(numbers[3]);
+      const eLit = normalizeLiters(numbers[4]);
+      const eFat = normalizeFat(numbers[5]);
+      const eSnf = normalizeSnf(numbers[6]);
+      if (
+        mFat >= 2.5 &&
+        mFat <= 11.0 &&
+        mSnf >= 7.0 &&
+        mSnf <= 10.5 &&
+        eFat >= 2.5 &&
+        eFat <= 11.0 &&
+        eSnf >= 7.0 &&
+        eSnf <= 10.5
+      ) {
+        const dayStr = String(numbers[0]);
+        stickyDate = dayStr;
+        const resolvedName = lineFarmerName || stickyFarmerName;
+        const resolvedCode = (codeMatch ? codeMatch[1] : undefined) || stickyFarmerCode;
+        results.push({
+          farmerCode: resolvedCode,
+          farmerName: resolvedName,
+          date: dayStr,
+          shift: 'morning',
+          liters: mLit,
+          fat: mFat,
+          snf: mSnf,
+        });
+        results.push({
+          farmerCode: resolvedCode,
+          farmerName: resolvedName,
+          date: dayStr,
+          shift: 'evening',
+          liters: eLit,
+          fat: eFat,
+          snf: eSnf,
+        });
+        continue;
+      }
+    }
 
     if (numbers.length >= 3) {
       let farmerCode: string | undefined = codeMatch ? codeMatch[1] : undefined;
       let nums = [...numbers];
 
       // If 4+ numbers and first is an integer:
-      // Check if it's a day-of-month (1..31) in a passbook with an active farmer header, or a farmer code
+      // Check if it's a day-of-month (1..31) in a passbook (e.g. 21..31) or a farmer code
       if (nums.length >= 4 && Number.isInteger(nums[0])) {
         if (
           !rowDate &&
           nums[0] >= 1 &&
           nums[0] <= 31 &&
-          (hasExplicitFarmerHeader || lineFarmerName)
+          !codeMatch &&
+          (hasExplicitFarmerHeader || isPassbookDateSequence || lineFarmerName)
         ) {
           rowDate = String(nums[0]);
+          stickyDate = rowDate;
           nums = nums.slice(1);
         } else {
           farmerCode = String(nums[0]);
@@ -2741,11 +2881,13 @@ export function parseMilkSlipTextToRows(
           !rowDate &&
           nums[0] >= 1 &&
           nums[0] <= 31 &&
-          (hasExplicitFarmerHeader || Boolean(lineShift)) &&
+          !codeMatch &&
+          (hasExplicitFarmerHeader || isPassbookDateSequence || Boolean(lineShift)) &&
           !hasSnf &&
           ((c1 >= 2.5 && c1 <= 11.0) || (c2 >= 2.5 && c2 <= 11.0))
         ) {
           rowDate = String(nums[0]);
+          stickyDate = rowDate;
           const isSecondFat = c2 >= 2.5 && c2 <= 11.0;
           const fat = isSecondFat ? c2 : c1;
           const liters = isSecondFat ? normalizeLiters(nums[1]) : normalizeLiters(nums[2]);
@@ -2755,7 +2897,7 @@ export function parseMilkSlipTextToRows(
             results.push({
               farmerCode: resolvedCode,
               farmerName: resolvedName,
-              date: rowDate,
+              date: rowDate || stickyDate || defaultDate,
               shift: effectiveShift,
               liters,
               fat,
@@ -2780,7 +2922,7 @@ export function parseMilkSlipTextToRows(
             results.push({
               farmerCode,
               farmerName: lineFarmerName || (hasExplicitFarmerHeader ? stickyFarmerName : undefined),
-              date: rowDate,
+              date: rowDate || stickyDate || defaultDate,
               shift: effectiveShift,
               liters,
               fat,
@@ -2888,7 +3030,7 @@ export function parseMilkSlipTextToRows(
           results.push({
             farmerCode: resolvedCode,
             farmerName: resolvedName,
-            date: rowDate,
+            date: rowDate || stickyDate || defaultDate,
             shift: effectiveShift,
             liters,
             fat,
@@ -2923,7 +3065,7 @@ export function parseMilkSlipTextToRows(
         results.push({
           farmerCode: resolvedCode,
           farmerName: resolvedName,
-          date: rowDate,
+          date: rowDate || stickyDate || defaultDate,
           shift: effectiveShift,
           liters,
           fat,
@@ -3061,6 +3203,37 @@ export function buildCollectionEntriesFromScannedSlip(
 
   let carryForwardFarmer: Farmer | undefined;
 
+  // Detect if this is a single-farmer multi-row passbook batch (5+ rows, e.g. 10-11 rows for 21-31 date)
+  // where individual row dates were not extracted by OCR
+  const distinctInputCodes = new Set(
+    scannedRows
+      .map((r) => (r.farmerCode ? convertDevanagariDigitsToAscii(String(r.farmerCode)).trim() : ''))
+      .filter(Boolean)
+  );
+  const distinctInputNames = new Set(
+    scannedRows.map((r) => cleanScannedFarmerName(r.farmerName) || '').filter(Boolean)
+  );
+  const resolvedInitialDates = new Set(
+    scannedRows.map((r) => normalizeScannedDate(r.date, date))
+  );
+  const isSingleFarmerUndatedPassbookBatch =
+    scannedRows.length >= 5 &&
+    distinctInputCodes.size <= 1 &&
+    distinctInputNames.size <= 1 &&
+    resolvedInitialDates.size === 1;
+
+  const [ymYearStr, ymMonthStr, ymDayStr] = date.split('-');
+  const ymYear = Number(ymYearStr) || 2026;
+  const ymMonth = Number(ymMonthStr) || 10;
+  const baseDay = Number(ymDayStr) || 21;
+  const maxDaysInMonth = new Date(ymYear, ymMonth, 0).getDate() || 31;
+  const autoCycleStartDay =
+    scannedRows.length === 11 || baseDay >= 21
+      ? 21
+      : baseDay >= 11 && baseDay <= 20
+      ? 11
+      : 1;
+
   for (let i = 0; i < scannedRows.length; i++) {
     const row = scannedRows[i];
     const rawFat = Number(row.fat) || 0;
@@ -3097,14 +3270,21 @@ export function buildCollectionEntriesFromScannedSlip(
     }
 
     // Resolve per-row Date and Shift (falls back to current selected date & shift)
-    const entryDate = normalizeScannedDate(row.date, date);
+    let entryDate = normalizeScannedDate(row.date, date);
     const entryShift = normalizeScannedShift(
       row.shift ? String(row.shift) : undefined,
       shift
     );
 
+    if (isSingleFarmerUndatedPassbookBatch) {
+      const assignedDay = Math.min(maxDaysInMonth, autoCycleStartDay + i);
+      entryDate = `${String(ymYear).padStart(4, '0')}-${String(ymMonth).padStart(2, '0')}-${String(
+        assignedDay
+      ).padStart(2, '0')}`;
+    }
+
     const cleanedRowName = cleanScannedFarmerName(row.farmerName);
-    const cleanedRowCode = row.farmerCode
+    let cleanedRowCode = row.farmerCode
       ? convertDevanagariDigitsToAscii(String(row.farmerCode)).trim()
       : undefined;
 
@@ -3116,6 +3296,22 @@ export function buildCollectionEntriesFromScannedSlip(
       cleanedRowName,
       cleanedRowCode
     );
+
+    // Special guard for single-farmer passbook rows where day-of-month (1..31, e.g. 21..31)
+    // was placed in farmerCode by an external OCR JSON response and doesn't match any farmer code
+    if (
+      !matchedFarmer &&
+      !cleanedRowName &&
+      cleanedRowCode &&
+      /^\d{1,2}$/.test(cleanedRowCode) &&
+      Number(cleanedRowCode) >= 1 &&
+      Number(cleanedRowCode) <= 31 &&
+      (!row.date || normalizeScannedDate(row.date, date) === date) &&
+      (Boolean(fallbackFarmerId) || Boolean(carryForwardFarmer) || scannedRows.length >= 3)
+    ) {
+      entryDate = normalizeScannedDate(cleanedRowCode, date);
+      cleanedRowCode = undefined;
+    }
 
     // 3. If row has no farmer name/code of its own (e.g. subsequent date/shift row on a single farmer's card),
     //    reuse the farmer matched on the previous row of the same photo/slip
@@ -3246,7 +3442,7 @@ export function buildCollectionEntriesFromScannedSlip(
     if (!existingCheck.allowed) {
       skippedDuplicates.push(candidateEntry);
       errors.push(
-        `${matchedFarmer.code}-${matchedFarmer.name} (${entryDate} ${
+        `${matchedFarmer.code}-${matchedFarmer.name} (${formatDateDMY(entryDate)} ${
           entryShift === 'morning' ? 'सुबह' : 'शाम'
         }): ${animalHi} दूध की एंट्री पहले से मौजूद है — यह एंट्री सेव नहीं होगी।`
       );
@@ -3260,7 +3456,7 @@ export function buildCollectionEntriesFromScannedSlip(
     } else if (!batchCheck.allowed) {
       skippedDuplicates.push(candidateEntry);
       errors.push(
-        `${matchedFarmer.code}-${matchedFarmer.name} (${entryDate} ${
+        `${matchedFarmer.code}-${matchedFarmer.name} (${formatDateDMY(entryDate)} ${
           entryShift === 'morning' ? 'सुबह' : 'शाम'
         }): फोटो में ${animalHi} दूध की एंट्री दोबारा आई है — यह एंट्री सेव नहीं होगी।`
       );
@@ -3452,7 +3648,7 @@ export function generateTenDaySaleBillData(
     `*${dairyName} — 10-दिन का दूध बिक्री बिल*`,
     `बिल नं: ${billNumber}`,
     `ग्राहक: *${buyerLabelHi}*`,
-    `अवधि: ${fromDate} से ${toDate}`,
+    `अवधि: ${formatDateDMY(fromDate)} से ${formatDateDMY(toDate)}`,
     `------------------------`,
     `सुबह की बिक्री: ${morningSummary.totalLiters.toFixed(3)} L (₹${morningSummary.totalNetReceivable.toFixed(2)})`,
     `शाम की बिक्री: ${eveningSummary.totalLiters.toFixed(3)} L (₹${eveningSummary.totalNetReceivable.toFixed(2)})`,
@@ -3470,7 +3666,7 @@ export function generateTenDaySaleBillData(
     `*${dairyName} — 10-Day Milk Sale Bill*`,
     `Bill No: ${billNumber}`,
     `Customer: *${buyerLabelEn}*`,
-    `Period: ${fromDate} to ${toDate}`,
+    `Period: ${formatDateDMY(fromDate)} to ${formatDateDMY(toDate)}`,
     `------------------------`,
     `Morning Sale: ${morningSummary.totalLiters.toFixed(3)} L (₹${morningSummary.totalNetReceivable.toFixed(2)})`,
     `Evening Sale: ${eveningSummary.totalLiters.toFixed(3)} L (₹${eveningSummary.totalNetReceivable.toFixed(2)})`,

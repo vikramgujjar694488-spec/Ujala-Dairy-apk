@@ -186,15 +186,17 @@ type ReportPreset =
 
 export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
   state,
-  initialSub = 'reports',
+  initialSub = 'backup',
   onRestoreState,
   onUpdateSettings,
 }) => {
   const lang = state.language;
-  const [subTab, setSubTab] = useState<'reports' | 'backup' | 'settings'>(initialSub);
+  const [subTab, setSubTab] = useState<'reports' | 'backup' | 'settings'>(
+    initialSub === 'settings' ? 'settings' : 'backup'
+  );
 
   React.useEffect(() => {
-    setSubTab(initialSub);
+    setSubTab(initialSub === 'settings' ? 'settings' : 'backup');
   }, [initialSub]);
 
   // Multi-filter state for Reports
@@ -921,21 +923,8 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Sub-navigation bar */}
+      {/* Sub-navigation bar (Clean Backup & Settings only) */}
       <div className="bg-white border border-slate-200 rounded-2xl p-2 flex flex-wrap items-center gap-2 no-print">
-        <button
-          type="button"
-          onClick={() => setSubTab('reports')}
-          className={`min-h-[42px] px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 ${
-            subTab === 'reports' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <FileText className="w-4 h-4" />
-          {lang === 'hi'
-            ? '14 & 15. सभी रिपोर्ट और फ़िल्टर (Reports)'
-            : '14 & 15. Reports & Filters'}
-        </button>
-
         <button
           type="button"
           onClick={() => setSubTab('backup')}
@@ -945,8 +934,8 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
         >
           <Download className="w-4 h-4" />
           {lang === 'hi'
-            ? '19. बैकअप, Restore और HTML डाउनलोड'
-            : '19. Backup, Restore & HTML Export'}
+            ? 'बैकअप, Restore और APK/HTML डाउनलोड'
+            : 'Backup, Restore & Export'}
         </button>
 
         <button
@@ -961,8 +950,8 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
         </button>
       </div>
 
-      {/* SUBTAB 1: REPORTS & MULTI-FILTER (Section 14 & 15) */}
-      {subTab === 'reports' && (
+      {/* Legacy reports section disabled — moved to 10-Day Billing & Reports */}
+      {false && subTab === 'reports' && (
         <div className="space-y-5">
           {/* 13 Report Presets + Combinable Multi-Filter Bar */}
           <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4 no-print">
