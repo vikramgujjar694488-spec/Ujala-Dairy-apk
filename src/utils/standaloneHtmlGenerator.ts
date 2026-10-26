@@ -217,12 +217,22 @@ export function generateStandaloneHtmlApp(
     let manualFatCol = 0, manualSnfCol = 1, manualRateCol = 2;
     let pendingExcelPreview = null;
 
+    function getTodayStr() {
+      const now = new Date();
+      return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    }
+    function getAutoShift() {
+      return new Date().getHours() < 12 ? 'morning' : 'evening';
+    }
     function loadState() {
+      let loaded = JSON.parse(JSON.stringify(INITIAL_SEED));
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) return Object.assign({}, INITIAL_SEED, JSON.parse(raw));
+        if (raw) loaded = Object.assign({}, INITIAL_SEED, JSON.parse(raw));
       } catch (e) {}
-      return JSON.parse(JSON.stringify(INITIAL_SEED));
+      loaded.selectedDate = getTodayStr();
+      loaded.selectedShift = getAutoShift();
+      return loaded;
     }
     function saveState() {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}

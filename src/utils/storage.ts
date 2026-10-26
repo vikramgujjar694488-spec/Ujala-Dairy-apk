@@ -1,20 +1,23 @@
-import { DairyAppState } from '../types/dairy';
+import { DairyAppState, Farmer } from '../types/dairy';
+import { normalizeFarmerShiftSchedule } from './dairyCalculations';
 
 const STORAGE_KEY = 'ujalaa_dairy_state_v1';
 const IDB_NAME = 'UjalaaDairyDB';
 const IDB_STORE = 'appState';
 
-export function getTodayDateString(): string {
-  const now = new Date();
+export function getTodayDateString(now: Date = new Date()): string {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, '0');
   const d = String(now.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 }
 
-export function getCurrentShiftByHour(): 'morning' | 'evening' {
-  const hour = new Date().getHours();
-  return hour < 14 ? 'morning' : 'evening';
+/**
+ * Returns 'morning' before 12:00 PM (noon) and 'evening' from 12:00 PM onwards.
+ */
+export function getCurrentShiftByHour(now: Date = new Date()): 'morning' | 'evening' {
+  const hour = now.getHours();
+  return hour < 12 ? 'morning' : 'evening';
 }
 
 export function createInitialEmptyState(): DairyAppState {
@@ -90,7 +93,8 @@ export function loadStateFromIndexedDB(): Promise<DairyAppState | null> {
         const tx = db.transaction(IDB_STORE, 'readonly');
         const getReq = tx.objectStore(IDB_STORE).get(STORAGE_KEY);
         getReq.onsuccess = () => {
-          resolve((getReq.result as DairyAppState) || null);
+          const res = getReq.result;
+          resolve(res ? sanitizeAndMergeState(res) : null);
         };
         getReq.onerror = () => resolve(null);
       };
@@ -124,6 +128,21 @@ export function saveDairyState(state: DairyAppState): void {
   }
 }
 
+function normalizeFarmerRecord(f: any): Farmer {
+  return {
+    ...f,
+    code: String(f?.code || '').trim(),
+    name: String(f?.name || '').trim(),
+    mobile: typeof f?.mobile === 'string' ? f.mobile : '',
+    village: typeof f?.village === 'string' ? f.village : '',
+    shiftSchedule: normalizeFarmerShiftSchedule(f?.shiftSchedule),
+    openingBalance: Number(f?.openingBalance) || 0,
+    notes: typeof f?.notes === 'string' ? f.notes : '',
+    active: f?.active !== false,
+    createdAt: typeof f?.createdAt === 'string' ? f.createdAt : '',
+  };
+}
+
 export function sanitizeAndMergeState(raw: any): DairyAppState {
   const base = createInitialEmptyState();
   if (!raw || typeof raw !== 'object') return base;
@@ -145,16 +164,14 @@ export function sanitizeAndMergeState(raw: any): DairyAppState {
     dairyPhone: typeof raw.dairyPhone === 'string' ? raw.dairyPhone : '',
     dairyAddress: typeof raw.dairyAddress === 'string' ? raw.dairyAddress : '',
     language: raw.language === 'en' ? 'en' : 'hi',
-    selectedDate:
-      typeof raw.selectedDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.selectedDate)
-        ? raw.selectedDate
-        : base.selectedDate,
-    selectedShift: raw.selectedShift === 'evening' ? 'evening' : 'morning',
+    // Always sync to today's real local date and current shift (before 12 PM = morning, after 12 PM = evening)
+    selectedDate: getTodayDateString(),
+    selectedShift: getCurrentShiftByHour(),
     expenseCategories:
       Array.isArray(raw.expenseCategories) && raw.expenseCategories.length > 0
         ? Array.from(new Set(raw.expenseCategories.map(String)))
         : base.expenseCategories,
-    farmers: dedup(raw.farmers),
+    farmers: dedup<Farmer>(raw.farmers).map(normalizeFarmerRecord),
     customers: dedup(raw.customers),
     collections: dedup(raw.collections),
     leaves: dedup(raw.leaves),
@@ -203,6 +220,8 @@ export function mergeDairyStates(
 
   return {
     ...current,
+    selectedDate: getTodayDateString(),
+    selectedShift: getCurrentShiftByHour(),
     dairyName:
       incoming.dairyName && incoming.dairyName !== 'Ujalaa Dairy'
         ? incoming.dairyName
@@ -212,7 +231,7 @@ export function mergeDairyStates(
     expenseCategories: Array.from(
       new Set([...(current.expenseCategories || []), ...(incoming.expenseCategories || [])])
     ),
-    farmers: mergeById(current.farmers, incoming.farmers),
+    farmers: mergeById(current.farmers, incoming.farmers).map(normalizeFarmerRecord),
     customers: mergeById(current.customers || [], incoming.customers || []),
     collections: mergeById(current.collections, incoming.collections),
     leaves: mergeById(current.leaves, incoming.leaves),

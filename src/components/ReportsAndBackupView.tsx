@@ -307,10 +307,11 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
         return;
       }
 
-      const relRes = await fetch(`https://api.github.com/repos/${repo}/releases/latest`);
+      const relRes = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=1`);
       if (relRes.ok) {
-        const relData = await relRes.json();
-        const apkAsset = Array.isArray(relData.assets)
+        const relList = await relRes.json();
+        const relData = Array.isArray(relList) ? relList[0] : relList;
+        const apkAsset = Array.isArray(relData?.assets)
           ? relData.assets.find((a: { name?: string; browser_download_url?: string }) =>
               String(a.name || '').endsWith('.apk')
             )
@@ -321,8 +322,8 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
             repoExists: true,
             releaseReady: true,
             apkDownloadUrl: apkAsset.browser_download_url,
-            messageHi: `APK तैयार है! (${relData.tag_name || 'Latest'}) — आप नीचे से सीधा Ujalaa-Dairy-debug.apk डाउनलोड कर सकते हैं।`,
-            messageEn: `APK is ready! (${relData.tag_name || 'Latest'}) — You can download Ujalaa-Dairy-debug.apk directly below.`,
+            messageHi: `APK तैयार है! (${relData.tag_name || 'Latest'} · ${relData.name || ''}) — आप नीचे से सीधा Ujalaa-Dairy-debug.apk डाउनलोड कर सकते हैं।`,
+            messageEn: `APK is ready! (${relData.tag_name || 'Latest'} · ${relData.name || ''}) — You can download Ujalaa-Dairy-debug.apk directly below.`,
           });
           return;
         }
@@ -2550,18 +2551,18 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               </span>
             </div>
 
-            {/* Direct In-App APK Download (v1.0.4 - Build #4 - 4.2 MB) */}
+            {/* Direct In-App APK Download (v1.0.5 - Build #5 - 4.3 MB) */}
             <div className="bg-emerald-50 border-2 border-emerald-400 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <strong className="text-xs sm:text-sm text-emerald-950 block">
                   {lang === 'hi'
-                    ? 'नया Ujalaa-Dairy-debug.apk तैयार है! (GitHub Release v1.0.4 · Build #4 · 4.2 MB):'
-                    : 'New Ujalaa-Dairy-debug.apk is Ready! (GitHub Release v1.0.4 · Build #4 · 4.2 MB):'}
+                    ? 'नया Ujalaa-Dairy-debug.apk तैयार है! (GitHub Release v1.0.5 · Build #5 · 4.3 MB):'
+                    : 'New Ujalaa-Dairy-debug.apk is Ready! (GitHub Release v1.0.5 · Build #5 · 4.3 MB):'}
                 </strong>
                 <span className="text-xs text-emerald-800">
                   {lang === 'hi'
-                    ? 'आपके सभी नए बदलावों (डैशबोर्ड क्लीनअप, शुद्ध दूध लाभ-हानि रिपोर्ट और बिक्री ग्राहक + रेट चार्ट) वाला नया APK (v1.0.4) तैयार हो चुका है। इस हरे बटन को दबाकर तुरंत डाउनलोड करें।'
-                    : 'Your updated APK (v1.0.4 Build #4) with all recent changes is ready. Click the green button to download Ujalaa-Dairy-debug.apk (4.2 MB).'}
+                    ? 'आपके सभी नए फीचर्स (बिक्री का 10-दिन का बिल, 4-तरीकों वाला ऑल-इन-वन बैकअप/Restore सिस्टम, कैमरा स्लिप स्कैनर, शिफ्ट-वार लाभ/हानि और पूर्ण संख्या किसान खरीद हिसाब) वाला नया APK (v1.0.5 · Build #5) तैयार हो चुका है। इस हरे बटन को दबाकर तुरंत डाउनलोड करें।'
+                    : 'Your updated APK (v1.0.5 Build #5) with 10-Day Wholesale Sale Bill, 4-Method Backup/Restore System, Camera Slip Scanner, Shift-wise P&L, and Whole-Number Farmer Purchase is ready. Click the green button to download Ujalaa-Dairy-debug.apk (4.3 MB).'}
                 </span>
               </div>
               <a
@@ -2571,8 +2572,8 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               >
                 <Download className="w-4 h-4" />
                 {lang === 'hi'
-                  ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (v1.0.4 · 4.2 MB)'
-                  : 'Download Ujalaa-Dairy-debug.apk (v1.0.4 · 4.2 MB)'}
+                  ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (v1.0.5 · 4.3 MB)'
+                  : 'Download Ujalaa-Dairy-debug.apk (v1.0.5 · 4.3 MB)'}
               </a>
             </div>
 

@@ -33,6 +33,11 @@ import {
   formatNumber,
   formatWholeCurrency,
   generateTenDayBillData,
+  getAdvancePaymentEffectiveCycle,
+  getCycleFromDate,
+  getCycleLabelEn,
+  getCycleLabelHi,
+  normalizeFarmerShiftSchedule,
   round2,
   truncatePurchaseAmount,
 } from '../utils/dairyCalculations';
@@ -96,7 +101,13 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   const [editingAdvId, setEditingAdvId] = useState<string | null>(null);
   const [advDate, setAdvDate] = useState<string>(state.selectedDate);
   const [advFarmerId, setAdvFarmerId] = useState<string>('');
-  const [advType, setAdvType] = useState<'advance' | 'payment'>('advance');
+  const [advType, setAdvType] = useState<'advance' | 'payment'>('payment');
+  const [advBillingYearMonth, setAdvBillingYearMonth] = useState<string>(
+    state.selectedDate.slice(0, 7)
+  );
+  const [advBillingCycle, setAdvBillingCycle] = useState<1 | 2 | 3>(
+    getCycleFromDate(state.selectedDate).cycle
+  );
   const [advTxnCode, setAdvTxnCode] = useState<string>('');
   const [advAmount, setAdvAmount] = useState<string>('');
   const [advMethod, setAdvMethod] = useState<PaymentMethod>('cash');
@@ -119,8 +130,13 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   // 5. 10-Day Billing State
   const [billFarmerId, setBillFarmerId] = useState<string>(state.farmers[0]?.id || '');
   const [billYearMonth, setBillYearMonth] = useState<string>(state.selectedDate.slice(0, 7));
-  const [billCycle, setBillCycle] = useState<1 | 2 | 3>(1);
+  const [billCycle, setBillCycle] = useState<1 | 2 | 3>(
+    getCycleFromDate(state.selectedDate).cycle
+  );
   const [activeBill, setActiveBill] = useState<TenDayBill | null>(null);
+  const [quickBillPayAmount, setQuickBillPayAmount] = useState<string>('');
+  const [quickBillPayMethod, setQuickBillPayMethod] = useState<PaymentMethod>('cash');
+  const [quickBillPayNotes, setQuickBillPayNotes] = useState<string>('');
 
   // WhatsApp Preview Modal
   const [waModal, setWaModal] = useState<{ open: boolean; phone: string; message: string }>({
@@ -130,8 +146,9 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   });
 
   const scheduleLabel = (sched: FarmerShiftSchedule) => {
-    if (sched === 'morning') return lang === 'hi' ? 'केवल सुबह' : 'Morning Only';
-    if (sched === 'evening') return lang === 'hi' ? 'केवल शाम' : 'Evening Only';
+    const norm = normalizeFarmerShiftSchedule(sched);
+    if (norm === 'morning') return lang === 'hi' ? 'केवल सुबह' : 'Morning Only';
+    if (norm === 'evening') return lang === 'hi' ? 'केवल शाम' : 'Evening Only';
     return lang === 'hi' ? 'सुबह और शाम दोनों समय' : 'Morning & Evening';
   };
 
@@ -156,7 +173,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
     setFMobile(f.mobile);
     setFVillage(f.village);
     setFMilkType(f.defaultMilkType || 'cow');
-    setFSchedule(f.shiftSchedule);
+    setFSchedule(normalizeFarmerShiftSchedule(f.shiftSchedule));
     setFOpeningBal(String(f.openingBalance || 0));
     setFNotes(f.notes || '');
     setFarmerError(null);
@@ -200,10 +217,10 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
       mobile: fMobile.trim(),
       village: fVillage.trim(),
       defaultMilkType: fMilkType,
-      shiftSchedule: fSchedule,
+      shiftSchedule: normalizeFarmerShiftSchedule(fSchedule),
       openingBalance: truncatePurchaseAmount(Number(fOpeningBal) || 0),
       notes: fNotes.trim(),
-      active: existing ? existing.active : true,
+      active: existing ? existing.active !== false : true,
       createdAt: existing ? existing.createdAt : new Date().toISOString(),
     };
 
@@ -272,6 +289,8 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
       type: advType,
       amount: round2(amt),
       paymentMethod: advMethod,
+      billingYearMonth: advBillingYearMonth || advDate.slice(0, 7),
+      billingCycle: advBillingCycle,
       notes: advNotes.trim(),
       createdAt: new Date().toISOString(),
     };
@@ -358,25 +377,89 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
     setActiveBill(newBill);
   };
 
+  const handleQuickBillPayment = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeBill) return;
+    const farmer = state.farmers.find((f) => f.id === activeBill.farmerId);
+    const amt = Number(quickBillPayAmount);
+    if (!farmer || !Number.isFinite(amt) || amt <= 0) return;
+
+    const cycleLabel = getCycleLabelHi(activeBill.cycle);
+    const entry: AdvancePaymentEntry = {
+      id: `adv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      txnCode: `PAY-${Date.now().toString().slice(-5)}`,
+      date: state.selectedDate,
+      farmerId: farmer.id,
+      farmerName: farmer.name,
+      type: 'payment',
+      amount: round2(amt),
+      paymentMethod: quickBillPayMethod,
+      billingYearMonth: activeBill.yearMonth,
+      billingCycle: activeBill.cycle,
+      notes: quickBillPayNotes.trim() || `बिल भुगतान (${cycleLabel})`,
+      createdAt: new Date().toISOString(),
+    };
+
+    const nextAdvances = [entry, ...state.advancesAndPayments];
+    onSaveAdvancePayment(entry, false);
+
+    // Immediately recalculate and save the updated bill
+    const updatedData = generateTenDayBillData(
+      farmer,
+      activeBill.yearMonth,
+      activeBill.cycle,
+      state.collections,
+      nextAdvances,
+      state.cattleFeed
+    );
+    const updatedBill: TenDayBill = {
+      ...updatedData,
+      id: activeBill.id,
+      billNumber: activeBill.billNumber,
+      createdAt: new Date().toISOString(),
+    };
+    onSaveBill(updatedBill);
+    setActiveBill(updatedBill);
+    setQuickBillPayAmount('');
+    setQuickBillPayNotes('');
+  };
+
   const openBillWhatsApp = (bill: TenDayBill) => {
     const farmer = state.farmers.find((f) => f.id === bill.farmerId);
+    const cycleLabel = getCycleLabelHi(bill.cycle);
+    const payableBeforePayment =
+      bill.billPayableBeforePayment ?? bill.netPayable + bill.paymentsInPeriod;
+    const prevAdjLine =
+      bill.previousBalance > 0
+        ? `पिछली अवधि का कम भुगतान / बकाया (+): +${formatWholeCurrency(bill.previousBalance)}`
+        : bill.previousBalance < 0
+        ? `पिछली अवधि का ज्यादा भुगतान समायोजन (-): -${formatWholeCurrency(Math.abs(bill.previousBalance))}`
+        : `पिछला बकाया / समायोजन: ₹0`;
+    const carryForwardLine =
+      bill.netPayable > 0
+        ? `*शेष देय राशि (अगली अवधि में जुड़ेगा): ${formatWholeCurrency(bill.netPayable)}*`
+        : bill.netPayable < 0
+        ? `*अतिरिक्त/ज्यादा भुगतान (अगली अवधि से कटेगा): -${formatWholeCurrency(Math.abs(bill.netPayable))}*`
+        : `*अंतिम देय राशि: ₹0 (चुकता)*`;
+
     const msg = [
       `*${state.dairyName || 'Ujalaa Dairy'} — 10-दिन का दूध बिल*`,
       `बिल नं: ${bill.billNumber}`,
       `किसान: ${bill.farmerCode} - ${bill.farmerName}`,
-      `अवधि: ${bill.fromDate} से ${bill.toDate}`,
+      `अवधि: ${cycleLabel} (${bill.fromDate} से ${bill.toDate})`,
       `--------------------------------`,
       `सुबह का दूध: ${formatNumber(bill.morningLiters, 3)} L (${formatWholeCurrency(bill.morningAmount)})`,
       `शाम का दूध: ${formatNumber(bill.eveningLiters, 3)} L (${formatWholeCurrency(bill.eveningAmount)})`,
       `कुल दूध: ${formatNumber(bill.totalLiters, 3)} L`,
       `औसत FAT: ${formatNumber(bill.avgFat)} | औसत SNF: ${formatNumber(bill.avgSnf)}`,
       `कुल दूध राशि: ${formatWholeCurrency(bill.totalMilkAmount)}`,
-      `पिछला बकाया: ${formatWholeCurrency(bill.previousBalance)}`,
-      `एडवांस कटौती: ${formatWholeCurrency(bill.advancesInPeriod)}`,
-      `दाना/पशु-आहार कटौती: ${formatWholeCurrency(bill.feedDeductionsInPeriod)}`,
-      `अन्य कटौती/भुगतान: ${formatWholeCurrency(bill.inlineDeductions + bill.paymentsInPeriod)}`,
+      prevAdjLine,
+      `एडवांस कटौती (-): ${formatWholeCurrency(bill.advancesInPeriod)}`,
+      `दाना/पशु-आहार कटौती (-): ${formatWholeCurrency(bill.feedDeductionsInPeriod)}`,
+      `कुल देय बिल राशि: ${formatWholeCurrency(payableBeforePayment)}`,
+      `इस अवधि में भुगतान (-): ${formatWholeCurrency(bill.paymentsInPeriod)}`,
       `--------------------------------`,
-      `*अंतिम देय राशि (Net Payable): ${formatWholeCurrency(bill.netPayable)}*`,
+      carryForwardLine,
     ].join('\n');
 
     setWaModal({
@@ -990,25 +1073,33 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           <div className="bg-white border border-slate-200 rounded-2xl p-5">
             <h2 className="text-base font-bold text-slate-900 mb-1">
               {lang === 'hi'
-                ? 'किसान एडवांस और भुगतान एंट्री (Advance & Payment)'
-                : 'Farmer Advance & Settlement Payment'}
+                ? 'किसान एडवांस और 10-दिन अवधि भुगतान एंट्री (Advance & Period Payment)'
+                : 'Farmer Advance & 10-Day Period Settlement Payment'}
             </h2>
             <p className="text-xs text-slate-500 mb-4">
               {lang === 'hi'
-                ? 'प्रत्येक लेन-देन की यूनिक ID बनती है ताकि एक ही एडवांस दो बार न जुड़े और दूध खरीद राशि में दोबारा न गिना जाए'
-                : 'Each transaction has a unique ID to prevent duplicate entry'}
+                ? 'चुनें कि यह भुगतान 1 से 10 तारीख, 11 से 20 तारीख या 21 से महीने के अंत में से किस अवधि का हो रहा है। कम या ज्यादा भुगतान होने पर अंतर अगली अवधि के बिल में स्वतः जुड़ या कट जाएगा।'
+                : 'Select which 10-day period (1–10, 11–20, or 21–End of Month) is being paid. Any short or excess payment automatically adjusts in the next period bill.'}
             </p>
 
             <form onSubmit={handleSaveAdvSubmit} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    {lang === 'hi' ? 'तारीख *' : 'Date *'}
+                    {lang === 'hi' ? 'भुगतान की तारीख *' : 'Payment Date *'}
                   </label>
                   <input
                     type="date"
                     value={advDate}
-                    onChange={(e) => setAdvDate(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setAdvDate(val);
+                      if (val && val.length >= 10) {
+                        const info = getCycleFromDate(val);
+                        setAdvBillingYearMonth(info.yearMonth);
+                        setAdvBillingCycle(info.cycle);
+                      }
+                    }}
                     className="w-full min-h-[44px] px-3 py-2 text-sm border border-slate-300 rounded-xl tabular-nums"
                   />
                 </div>
@@ -1017,6 +1108,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     {lang === 'hi' ? 'किसान चुनें *' : 'Farmer *'}
                   </label>
                   <select
+                    data-testid="adv-farmer-select"
                     value={advFarmerId}
                     onChange={(e) => setAdvFarmerId(e.target.value)}
                     className="w-full min-h-[44px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
@@ -1034,15 +1126,16 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     {lang === 'hi' ? 'लेन-देन का प्रकार *' : 'Transaction Type *'}
                   </label>
                   <select
+                    data-testid="adv-type-select"
                     value={advType}
                     onChange={(e) => setAdvType(e.target.value as 'advance' | 'payment')}
                     className="w-full min-h-[44px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
                   >
-                    <option value="advance">
-                      {lang === 'hi' ? 'एडवांस दिया (Advance Given)' : 'Advance Given'}
-                    </option>
                     <option value="payment">
                       {lang === 'hi' ? 'बिल भुगतान किया (Settlement Payment)' : 'Bill Payment'}
+                    </option>
+                    <option value="advance">
+                      {lang === 'hi' ? 'एडवांस दिया (Advance Given)' : 'Advance Given'}
                     </option>
                   </select>
                 </div>
@@ -1052,7 +1145,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   </label>
                   <input
                     type="text"
-                    placeholder={lang === 'hi' ? 'स्वतः या कस्टम (जैसे ADV-101)' : 'Auto or custom'}
+                    placeholder={lang === 'hi' ? 'स्वतः या कस्टम (जैसे PAY-101)' : 'Auto or custom'}
                     value={advTxnCode}
                     onChange={(e) => setAdvTxnCode(e.target.value)}
                     className="w-full min-h-[44px] px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl"
@@ -1060,16 +1153,145 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 </div>
               </div>
 
+              {/* 10-Day Billing Period Selection Box */}
+              <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <span className="text-xs font-bold text-blue-950 block">
+                      {lang === 'hi'
+                        ? 'यह भुगतान / एडवांस किस 10-दिन की अवधि का हो रहा है? *'
+                        : 'Which 10-Day Billing Period is this payment for? *'}
+                    </span>
+                    <span className="text-[11px] text-blue-800">
+                      {lang === 'hi'
+                        ? 'कम भुगतान होने पर बकाया अगली अवधि में जुड़ जाएगा और ज्यादा भुगतान होने पर अगली अवधि से कट जाएगा'
+                        : 'Underpayment adds to next period; overpayment deducts from next period'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold text-blue-900">
+                      {lang === 'hi' ? 'महीना:' : 'Month:'}
+                    </label>
+                    <input
+                      type="month"
+                      data-testid="adv-billing-month-input"
+                      value={advBillingYearMonth}
+                      onChange={(e) => setAdvBillingYearMonth(e.target.value)}
+                      className="min-h-[38px] px-2.5 py-1.5 text-xs font-mono bg-white border border-blue-300 rounded-lg tabular-nums"
+                    />
+                  </div>
+                </div>
+
+                <div
+                  data-testid="adv-billing-cycle-selector"
+                  className="grid grid-cols-1 sm:grid-cols-3 gap-2"
+                >
+                  {([1, 2, 3] as const).map((c) => {
+                    const active = advBillingCycle === c;
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        data-testid={`adv-cycle-btn-${c}`}
+                        onClick={() => setAdvBillingCycle(c)}
+                        className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-bold border text-left flex items-center justify-between ${
+                          active
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                            : 'bg-white text-slate-800 border-slate-300 hover:bg-blue-50'
+                        }`}
+                      >
+                        <span>
+                          {lang === 'hi'
+                            ? `अवधि ${c}: ${getCycleLabelHi(c)}`
+                            : `Cycle ${c}: ${getCycleLabelEn(c)}`}
+                        </span>
+                        {active && <CheckCircle2 className="w-4 h-4 shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Live Period Bill & Carry-Forward Adjustment Preview */}
+                {(() => {
+                  const selFarmer = state.farmers.find((f) => f.id === advFarmerId);
+                  if (!selFarmer || !advBillingYearMonth) return null;
+                  const periodBill = generateTenDayBillData(
+                    selFarmer,
+                    advBillingYearMonth,
+                    advBillingCycle,
+                    state.collections,
+                    state.advancesAndPayments,
+                    state.cattleFeed
+                  );
+                  const enteredAmt = truncatePurchaseAmount(Number(advAmount) || 0);
+                  const projectedNetAfterThisEntry = periodBill.netPayable - enteredAmt;
+                  const payableBeforePay =
+                    periodBill.billPayableBeforePayment ??
+                    periodBill.netPayable + periodBill.paymentsInPeriod;
+
+                  return (
+                    <div
+                      data-testid="adv-period-live-summary"
+                      className="p-3 bg-white border border-blue-200 rounded-xl grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs tabular-nums"
+                    >
+                      <div>
+                        <span className="text-slate-500 block">
+                          {getCycleLabelHi(advBillingCycle)} का कुल बिल
+                        </span>
+                        <span className="font-bold text-slate-900">
+                          {formatWholeCurrency(payableBeforePay)}
+                        </span>
+                        {periodBill.previousBalance !== 0 && (
+                          <span className="text-[11px] text-slate-500 block">
+                            (पिछला समायोजन:{' '}
+                            {periodBill.previousBalance > 0
+                              ? `+${formatWholeCurrency(periodBill.previousBalance)}`
+                              : `-${formatWholeCurrency(Math.abs(periodBill.previousBalance))}`}
+                            )
+                          </span>
+                        )}
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">पहले से भुगतान / अभी शेष</span>
+                        <span className="font-bold text-slate-900">
+                          {formatWholeCurrency(periodBill.paymentsInPeriod)} /{' '}
+                          {formatWholeCurrency(periodBill.netPayable)}
+                        </span>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <span className="text-slate-500 block">
+                          इस भुगतान के बाद अगली अवधि में समायोजन:
+                        </span>
+                        {projectedNetAfterThisEntry > 0 ? (
+                          <span className="font-bold text-amber-800 block">
+                            कम भुगतान बकाया: +{formatWholeCurrency(projectedNetAfterThisEntry)} (अगली अवधि के बिल में जुड़ेगा)
+                          </span>
+                        ) : projectedNetAfterThisEntry < 0 ? (
+                          <span className="font-bold text-indigo-700 block">
+                            ज्यादा/अतिरिक्त भुगतान: -{formatWholeCurrency(Math.abs(projectedNetAfterThisEntry))} (अगली अवधि के बिल से कटेगा)
+                          </span>
+                        ) : (
+                          <span className="font-bold text-emerald-700 block">
+                            ₹0 — इस अवधि का बिल पूरा चुकता (बराबर)
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    {lang === 'hi' ? 'राशि (₹) *' : 'Amount (₹) *'}
+                    {lang === 'hi' ? 'भुगतान राशि (₹) *' : 'Amount (₹) *'}
                   </label>
                   <input
                     type="number"
                     step="0.01"
                     min="0"
-                    placeholder="500.00"
+                    data-testid="adv-amount-input"
+                    placeholder="500"
                     value={advAmount}
                     onChange={(e) => setAdvAmount(e.target.value)}
                     className="w-full min-h-[44px] px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl tabular-nums"
@@ -1111,6 +1333,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
 
               <button
                 type="submit"
+                data-testid="save-adv-payment-btn"
                 className="min-h-[46px] px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl"
               >
                 {editingAdvId
@@ -1134,6 +1357,9 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   <th className="py-2 px-3 text-left">ID</th>
                   <th className="py-2 px-3 text-left">{lang === 'hi' ? 'तारीख' : 'Date'}</th>
                   <th className="py-2 px-3 text-left">{lang === 'hi' ? 'किसान' : 'Farmer'}</th>
+                  <th className="py-2 px-3 text-left">
+                    {lang === 'hi' ? 'भुगतान अवधि (10-दिन)' : '10-Day Period'}
+                  </th>
                   <th className="py-2 px-3 text-left">{lang === 'hi' ? 'प्रकार' : 'Type'}</th>
                   <th className="py-2 px-3 text-left">{lang === 'hi' ? 'तरीका' : 'Method'}</th>
                   <th className="py-2 px-3 text-right">{lang === 'hi' ? 'राशि' : 'Amount'}</th>
@@ -1143,34 +1369,42 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
               <tbody className="divide-y divide-slate-100 tabular-nums">
                 {state.advancesAndPayments.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-6 text-center text-slate-500">
+                    <td colSpan={8} className="py-6 text-center text-slate-500">
                       {lang === 'hi' ? 'अभी कोई रिकॉर्ड नहीं है' : 'No records yet'}
                     </td>
                   </tr>
                 ) : (
-                  state.advancesAndPayments.map((a) => (
-                    <tr key={a.id}>
-                      <td className="py-2 px-3 font-mono">{a.txnCode}</td>
-                      <td className="py-2 px-3">{a.date}</td>
-                      <td className="py-2 px-3 font-bold">{a.farmerName}</td>
-                      <td className="py-2 px-3">
-                        {a.type === 'advance' ? 'एडवांस (Advance)' : 'भुगतान (Payment)'}
-                      </td>
-                      <td className="py-2 px-3 uppercase">{a.paymentMethod}</td>
-                      <td className="py-2 px-3 text-right font-bold">
-                        {formatCurrency(a.amount)}
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        <button
-                          type="button"
-                          onClick={() => setDeleteAdvId(a.id)}
-                          className="px-2 py-1 bg-red-50 text-red-600 rounded-lg"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                  state.advancesAndPayments.map((a) => {
+                    const eff = getAdvancePaymentEffectiveCycle(a);
+                    return (
+                      <tr key={a.id}>
+                        <td className="py-2 px-3 font-mono">{a.txnCode}</td>
+                        <td className="py-2 px-3">{a.date}</td>
+                        <td className="py-2 px-3 font-bold">{a.farmerName}</td>
+                        <td className="py-2 px-3">
+                          <span className="px-2 py-0.5 bg-blue-50 text-blue-800 border border-blue-200 rounded-md font-semibold">
+                            {getCycleLabelHi(eff.cycle)} ({eff.yearMonth})
+                          </span>
+                        </td>
+                        <td className="py-2 px-3">
+                          {a.type === 'advance' ? 'एडवांस (Advance)' : 'भुगतान (Payment)'}
+                        </td>
+                        <td className="py-2 px-3 uppercase">{a.paymentMethod}</td>
+                        <td className="py-2 px-3 text-right font-bold">
+                          {formatCurrency(a.amount)}
+                        </td>
+                        <td className="py-2 px-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => setDeleteAdvId(a.id)}
+                            className="px-2 py-1 bg-red-50 text-red-600 rounded-lg"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -1565,41 +1799,233 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs tabular-nums">
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">पिछला बकाया (+)</span>
-                  <span className="font-bold text-slate-900 mt-0.5 block">
-                    {formatWholeCurrency(activeBill.previousBalance)}
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs tabular-nums">
+                <div
+                  data-testid="bill-previous-adjustment-box"
+                  className={`p-3 rounded-xl border ${
+                    activeBill.previousBalance > 0
+                      ? 'bg-amber-50 border-amber-300'
+                      : activeBill.previousBalance < 0
+                      ? 'bg-indigo-50 border-indigo-300'
+                      : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <span className="text-slate-700 font-semibold block">
+                    {activeBill.previousBalance > 0
+                      ? 'पिछली अवधि का कम भुगतान बकाया (+)'
+                      : activeBill.previousBalance < 0
+                      ? 'पिछली अवधि का ज्यादा भुगतान कटा (-)'
+                      : 'पिछला बकाया / समायोजन'}
                   </span>
+                  <span
+                    data-testid="bill-previous-balance"
+                    className={`font-bold text-sm mt-0.5 block ${
+                      activeBill.previousBalance > 0
+                        ? 'text-amber-900'
+                        : activeBill.previousBalance < 0
+                        ? 'text-indigo-800'
+                        : 'text-slate-900'
+                    }`}
+                  >
+                    {activeBill.previousBalance > 0
+                      ? `+${formatWholeCurrency(activeBill.previousBalance)}`
+                      : activeBill.previousBalance < 0
+                      ? `-${formatWholeCurrency(Math.abs(activeBill.previousBalance))}`
+                      : formatWholeCurrency(0)}
+                  </span>
+                  {activeBill.previousCycleLabelHi && (
+                    <span className="text-[10px] text-slate-600 block mt-0.5">
+                      ({activeBill.previousCycleLabelHi})
+                    </span>
+                  )}
                 </div>
+
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">एडवांस (-)</span>
+                  <span className="text-slate-500 block">एडवांस कटौती (-)</span>
                   <span className="font-bold text-red-600 mt-0.5 block">
                     {formatWholeCurrency(activeBill.advancesInPeriod)}
                   </span>
                 </div>
+
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">दाना/पशु-आहार (-)</span>
+                  <span className="text-slate-500 block">दाना/अन्य कटौती (-)</span>
                   <span className="font-bold text-red-600 mt-0.5 block">
-                    {formatWholeCurrency(activeBill.feedDeductionsInPeriod)}
+                    {formatWholeCurrency(
+                      activeBill.feedDeductionsInPeriod + activeBill.inlineDeductions
+                    )}
                   </span>
                 </div>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">अन्य कटौती/भुगतान (-)</span>
-                  <span className="font-bold text-red-600 mt-0.5 block">
-                    {formatWholeCurrency(activeBill.inlineDeductions + activeBill.paymentsInPeriod)}
+
+                <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
+                  <span className="text-blue-950 font-semibold block">
+                    कुल देय बिल (भुगतान पूर्व)
+                  </span>
+                  <span
+                    data-testid="bill-payable-before-payment"
+                    className="font-bold text-blue-900 text-sm mt-0.5 block"
+                  >
+                    {formatWholeCurrency(
+                      activeBill.billPayableBeforePayment ??
+                        activeBill.netPayable + activeBill.paymentsInPeriod
+                    )}
                   </span>
                 </div>
-                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-300">
-                  <span className="text-emerald-900 font-bold block">अंतिम देय राशि</span>
+
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <span className="text-slate-600 font-semibold block">
+                    इस अवधि ({getCycleLabelHi(activeBill.cycle)}) का भुगतान (-)
+                  </span>
+                  <span
+                    data-testid="bill-payments-in-period"
+                    className="font-bold text-emerald-700 text-sm mt-0.5 block"
+                  >
+                    {formatWholeCurrency(activeBill.paymentsInPeriod)}
+                  </span>
+                </div>
+
+                <div
+                  className={`p-3 rounded-xl border ${
+                    activeBill.netPayable > 0
+                      ? 'bg-emerald-50 border-emerald-300'
+                      : activeBill.netPayable < 0
+                      ? 'bg-indigo-50 border-indigo-300'
+                      : 'bg-slate-100 border-slate-300'
+                  }`}
+                >
+                  <span className="text-slate-900 font-bold block">
+                    {activeBill.netPayable > 0
+                      ? 'अंतिम शेष देय (कम भुगतान)'
+                      : activeBill.netPayable < 0
+                      ? 'अतिरिक्त/ज्यादा भुगतान (-)'
+                      : 'अंतिम देय राशि (चुकता)'}
+                  </span>
                   <span
                     data-testid="bill-net-payable"
-                    className="font-bold text-emerald-800 text-base mt-0.5 block"
+                    className={`font-bold text-base mt-0.5 block ${
+                      activeBill.netPayable > 0
+                        ? 'text-emerald-800'
+                        : activeBill.netPayable < 0
+                        ? 'text-indigo-800'
+                        : 'text-slate-800'
+                    }`}
                   >
-                    {formatWholeCurrency(activeBill.netPayable)}
+                    {activeBill.netPayable < 0
+                      ? `-${formatWholeCurrency(Math.abs(activeBill.netPayable))}`
+                      : formatWholeCurrency(activeBill.netPayable)}
+                  </span>
+                  <span
+                    data-testid="bill-carry-forward-note"
+                    className="text-[10px] font-semibold text-slate-700 block mt-0.5"
+                  >
+                    {activeBill.netPayable > 0
+                      ? 'अगली अवधि के बिल में जुड़ेगा (+)'
+                      : activeBill.netPayable < 0
+                      ? 'अगली अवधि के बिल से कटेगा (-)'
+                      : 'हिसाब बराबर'}
                   </span>
                 </div>
               </div>
+
+              {/* Explicit Previous & Next Period Adjustment Explanation Banner on Bill */}
+              <div
+                data-testid="bill-adjustment-banner"
+                className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1 tabular-nums"
+              >
+                <div className="font-bold text-slate-800">
+                  10-दिन अवधि ({getCycleLabelHi(activeBill.cycle)}) भुगतान व समायोजन विवरण:
+                </div>
+                {activeBill.previousBalance !== 0 ? (
+                  <div className="text-slate-700">
+                    • पिछली अवधि ({activeBill.previousCycleLabelHi || 'पिछला चक्र'}) से समायोजन:{' '}
+                    {activeBill.previousBalance > 0 ? (
+                      <strong className="text-amber-800">
+                        कम भुगतान का बकाया +{formatWholeCurrency(activeBill.previousBalance)} इस बिल में जोड़ा गया है।
+                      </strong>
+                    ) : (
+                      <strong className="text-indigo-700">
+                        ज्यादा भुगतान का -{formatWholeCurrency(Math.abs(activeBill.previousBalance))} इस बिल से घटाया गया है।
+                      </strong>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-slate-600">
+                    • पिछली अवधि से कोई कम या ज्यादा भुगतान समायोजन बकाया नहीं है (₹0)।
+                  </div>
+                )}
+                <div className="text-slate-700">
+                  • इस अवधि ({getCycleLabelHi(activeBill.cycle)}) का कुल देय बिल:{' '}
+                  <strong>
+                    {formatWholeCurrency(
+                      activeBill.billPayableBeforePayment ??
+                        activeBill.netPayable + activeBill.paymentsInPeriod
+                    )}
+                  </strong>{' '}
+                  | भुगतान हुआ: <strong>{formatWholeCurrency(activeBill.paymentsInPeriod)}</strong>{' '}
+                  |{' '}
+                  {activeBill.netPayable > 0 ? (
+                    <strong className="text-emerald-800">
+                      शेष +{formatWholeCurrency(activeBill.netPayable)} (यदि कम भुगतान रहता है तो अगली अवधि में जुड़ेगा)
+                    </strong>
+                  ) : activeBill.netPayable < 0 ? (
+                    <strong className="text-indigo-700">
+                      अतिरिक्त भुगतान -{formatWholeCurrency(Math.abs(activeBill.netPayable))} (अगली अवधि के बिल से कटेगा)
+                    </strong>
+                  ) : (
+                    <strong className="text-emerald-700">बिल पूर्ण रूप से चुकता (₹0)</strong>
+                  )}
+                </div>
+              </div>
+
+              {/* Inline Quick Payment for this 10-Day Bill Period */}
+              <form
+                onSubmit={handleQuickBillPayment}
+                className="p-3.5 bg-blue-50/60 border border-blue-200 rounded-xl flex flex-col sm:flex-row items-stretch sm:items-end gap-3 no-print"
+              >
+                <div className="flex-1">
+                  <label className="block text-xs font-bold text-blue-950 mb-1">
+                    इस अवधि ({getCycleLabelHi(activeBill.cycle)}) का भुगतान सीधे दर्ज करें (₹)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    data-testid="quick-bill-pay-amount"
+                    placeholder={`जैसे ${Math.max(0, activeBill.netPayable)}`}
+                    value={quickBillPayAmount}
+                    onChange={(e) => setQuickBillPayAmount(e.target.value)}
+                    className="w-full min-h-[40px] px-3 py-1.5 text-xs font-mono bg-white border border-blue-300 rounded-lg tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-blue-950 mb-1">तरीका</label>
+                  <select
+                    value={quickBillPayMethod}
+                    onChange={(e) => setQuickBillPayMethod(e.target.value as PaymentMethod)}
+                    className="min-h-[40px] px-3 py-1.5 text-xs bg-white border border-blue-300 rounded-lg"
+                  >
+                    <option value="cash">नकद (Cash)</option>
+                    <option value="upi">UPI</option>
+                    <option value="bank">बैंक (Bank)</option>
+                  </select>
+                </div>
+                <div className="flex-1">
+                  <label className="block text-xs font-bold text-blue-950 mb-1">टिप्पणी</label>
+                  <input
+                    type="text"
+                    placeholder="वैकल्पिक नोट"
+                    value={quickBillPayNotes}
+                    onChange={(e) => setQuickBillPayNotes(e.target.value)}
+                    className="w-full min-h-[40px] px-3 py-1.5 text-xs bg-white border border-blue-300 rounded-lg"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  data-testid="quick-bill-pay-submit-btn"
+                  className="min-h-[40px] px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold rounded-lg shrink-0"
+                >
+                  भुगतान जोड़ें और बिल अपडेट करें
+                </button>
+              </form>
             </div>
           )}
 

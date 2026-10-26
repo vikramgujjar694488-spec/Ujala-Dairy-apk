@@ -479,6 +479,50 @@ export interface ShiftAttendanceSummary {
   notScheduledFarmers: Farmer[];
 }
 
+export function normalizeFarmerShiftSchedule(
+  rawSchedule: unknown
+): 'morning' | 'evening' | 'both' {
+  if (typeof rawSchedule !== 'string') return 'both';
+  const cleaned = rawSchedule.trim().toLowerCase();
+  if (!cleaned) return 'both';
+  if (
+    cleaned === 'both' ||
+    cleaned.includes('both') ||
+    cleaned.includes('दोनों') ||
+    (cleaned.includes('सुबह') && cleaned.includes('शाम')) ||
+    (cleaned.includes('morning') && cleaned.includes('evening'))
+  ) {
+    return 'both';
+  }
+  if (
+    cleaned === 'morning' ||
+    cleaned === 'am' ||
+    cleaned === 'केवल सुबह' ||
+    cleaned === 'सुबह' ||
+    cleaned.startsWith('1.')
+  ) {
+    return 'morning';
+  }
+  if (
+    cleaned === 'evening' ||
+    cleaned === 'pm' ||
+    cleaned === 'केवल शाम' ||
+    cleaned === 'शाम' ||
+    cleaned.startsWith('2.')
+  ) {
+    return 'evening';
+  }
+  return 'both';
+}
+
+export function isFarmerScheduledForShift(
+  farmer: { shiftSchedule?: unknown },
+  shift: ShiftType
+): boolean {
+  const sched = normalizeFarmerShiftSchedule(farmer?.shiftSchedule);
+  return sched === 'both' || sched === shift;
+}
+
 export function calculateShiftAttendance(
   farmers: Farmer[],
   collections: MilkCollectionEntry[],
@@ -486,7 +530,12 @@ export function calculateShiftAttendance(
   date: string,
   shift: ShiftType
 ): ShiftAttendanceSummary {
-  const activeFarmers = farmers.filter((f) => f.active);
+  const activeFarmers = farmers
+    .filter((f) => f && f.active !== false)
+    .map((f) => ({
+      ...f,
+      shiftSchedule: normalizeFarmerShiftSchedule(f.shiftSchedule),
+    }));
   const shiftCollections = collections.filter((c) => c.date === date && c.shift === shift);
   const shiftLeaves = new Set(
     leaves.filter((l) => l.date === date && l.shift === shift).map((l) => l.farmerId)
@@ -507,8 +556,7 @@ export function calculateShiftAttendance(
   let rawScheduledCount = 0;
 
   for (const farmer of activeFarmers) {
-    const isScheduledForShift =
-      farmer.shiftSchedule === 'both' || farmer.shiftSchedule === shift;
+    const isScheduledForShift = isFarmerScheduledForShift(farmer, shift);
     const farmerEntries = entriesByFarmer.get(farmer.id) || [];
 
     if (isScheduledForShift) {
@@ -836,6 +884,16 @@ export function calculateFarmerLedger(
   for (const ap of farmerAdvPay) {
     const isAdv = ap.type === 'advance';
     const amt = truncatePurchaseAmount(ap.amount);
+    const periodTagHi =
+      ap.billingCycle && ap.billingYearMonth
+        ? ` [अवधि: ${getCycleLabelHi(ap.billingCycle, ap.billingYearMonth)}]`
+        : ap.billingCycle
+        ? ` [अवधि: ${getCycleLabelHi(ap.billingCycle)}]`
+        : '';
+    const periodTagEn =
+      ap.billingCycle && ap.billingYearMonth
+        ? ` [Period: ${getCycleLabelEn(ap.billingCycle, ap.billingYearMonth)}]`
+        : '';
     events.push({
       sortKey: `${ap.date}_2_${ap.createdAt}_${ap.id}`,
       delta: -amt,
@@ -844,11 +902,11 @@ export function calculateFarmerLedger(
         date: ap.date,
         type: isAdv ? 'advance' : 'payment',
         descriptionHi: isAdv
-          ? `एडवांस दिया (${ap.txnCode}) ${ap.notes ? '- ' + ap.notes : ''}`
-          : `भुगतान किया (${ap.txnCode}) ${ap.notes ? '- ' + ap.notes : ''}`,
+          ? `एडवांस दिया (${ap.txnCode})${periodTagHi} ${ap.notes ? '- ' + ap.notes : ''}`
+          : `भुगतान किया (${ap.txnCode})${periodTagHi} ${ap.notes ? '- ' + ap.notes : ''}`,
         descriptionEn: isAdv
-          ? `Advance Given (${ap.txnCode}) ${ap.notes ? '- ' + ap.notes : ''}`
-          : `Payment Made (${ap.txnCode}) ${ap.notes ? '- ' + ap.notes : ''}`,
+          ? `Advance Given (${ap.txnCode})${periodTagEn} ${ap.notes ? '- ' + ap.notes : ''}`
+          : `Payment Made (${ap.txnCode})${periodTagEn} ${ap.notes ? '- ' + ap.notes : ''}`,
         milkAmount: 0,
         advanceAmount: isAdv ? amt : 0,
         feedAmount: 0,
@@ -945,6 +1003,83 @@ export function calculateFarmerLedger(
   };
 }
 
+export function getCycleFromDate(dateStr: string): { yearMonth: string; cycle: 1 | 2 | 3 } {
+  const safeDate =
+    dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+      ? dateStr
+      : new Date().toISOString().slice(0, 10);
+  const yearMonth = safeDate.slice(0, 7);
+  const day = Number(safeDate.slice(8, 10)) || 1;
+  const cycle: 1 | 2 | 3 = day <= 10 ? 1 : day <= 20 ? 2 : 3;
+  return { yearMonth, cycle };
+}
+
+export function getCycleLabelHi(cycle: 1 | 2 | 3, yearMonth?: string): string {
+  const base =
+    cycle === 1
+      ? '1 से 10 तारीख'
+      : cycle === 2
+      ? '11 से 20 तारीख'
+      : '21 से महीने के अंत तक';
+  return yearMonth ? `${base} (${yearMonth})` : base;
+}
+
+export function getCycleLabelEn(cycle: 1 | 2 | 3, yearMonth?: string): string {
+  const base =
+    cycle === 1
+      ? '1st to 10th'
+      : cycle === 2
+      ? '11th to 20th'
+      : '21st to End of Month';
+  return yearMonth ? `${base} (${yearMonth})` : base;
+}
+
+export function getPreviousTenDayCycle(
+  yearMonth: string,
+  cycle: 1 | 2 | 3
+): { yearMonth: string; cycle: 1 | 2 | 3 } {
+  if (cycle === 3) return { yearMonth, cycle: 2 };
+  if (cycle === 2) return { yearMonth, cycle: 1 };
+  const [yStr, mStr] = (yearMonth || '2026-01').split('-');
+  let y = Number(yStr) || 2026;
+  let m = (Number(mStr) || 1) - 1;
+  if (m < 1) {
+    m = 12;
+    y -= 1;
+  }
+  return {
+    yearMonth: `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`,
+    cycle: 3,
+  };
+}
+
+export function getAdvancePaymentEffectiveCycle(
+  entry: Pick<AdvancePaymentEntry, 'date' | 'billingYearMonth' | 'billingCycle'>
+): { yearMonth: string; cycle: 1 | 2 | 3 } {
+  if (
+    entry.billingYearMonth &&
+    /^\d{4}-\d{2}$/.test(entry.billingYearMonth) &&
+    (entry.billingCycle === 1 || entry.billingCycle === 2 || entry.billingCycle === 3)
+  ) {
+    return { yearMonth: entry.billingYearMonth, cycle: entry.billingCycle };
+  }
+  const fromDate = getCycleFromDate(entry.date);
+  if (entry.billingCycle === 1 || entry.billingCycle === 2 || entry.billingCycle === 3) {
+    return { yearMonth: fromDate.yearMonth, cycle: entry.billingCycle };
+  }
+  return fromDate;
+}
+
+function compareYearMonthCycle(
+  aYm: string,
+  aCycle: 1 | 2 | 3,
+  bYm: string,
+  bCycle: 1 | 2 | 3
+): number {
+  if (aYm !== bYm) return aYm.localeCompare(bYm);
+  return aCycle - bCycle;
+}
+
 export function getTenDayCycleDates(
   yearMonth: string,
   cycle: 1 | 2 | 3
@@ -980,13 +1115,26 @@ export function computeBillSnapshotHash(
   cattleFeed: CattleFeedEntry[],
   toDate: string
 ): string {
+  const targetCycle = getCycleFromDate(toDate);
   const cPart = collections
     .filter((c) => c.farmerId === farmer.id && c.date <= toDate)
-    .map((c) => `${c.id}:${c.liters}:${truncatePurchaseAmount(c.totalAmount)}:${truncatePurchaseAmount(c.deduction || 0)}`)
+    .map(
+      (c) =>
+        `${c.id}:${c.liters}:${truncatePurchaseAmount(c.totalAmount)}:${truncatePurchaseAmount(
+          c.deduction || 0
+        )}`
+    )
     .join('|');
   const aPart = advancesAndPayments
-    .filter((a) => a.farmerId === farmer.id && a.date <= toDate)
-    .map((a) => `${a.id}:${a.type}:${truncatePurchaseAmount(a.amount)}`)
+    .filter((a) => {
+      if (a.farmerId !== farmer.id) return false;
+      const eff = getAdvancePaymentEffectiveCycle(a);
+      return compareYearMonthCycle(eff.yearMonth, eff.cycle, targetCycle.yearMonth, targetCycle.cycle) <= 0;
+    })
+    .map((a) => {
+      const eff = getAdvancePaymentEffectiveCycle(a);
+      return `${a.id}:${a.type}:${eff.yearMonth}-${eff.cycle}:${truncatePurchaseAmount(a.amount)}`;
+    })
     .join('|');
   const fPart = cattleFeed
     .filter((f) => f.farmerId === farmer.id && f.date <= toDate)
@@ -1004,13 +1152,17 @@ export function generateTenDayBillData(
   cattleFeed: CattleFeedEntry[]
 ): Omit<TenDayBill, 'id' | 'billNumber' | 'createdAt'> {
   const { fromDate, toDate } = getTenDayCycleDates(yearMonth, cycle);
+  const prevCycleInfo = getPreviousTenDayCycle(yearMonth, cycle);
+  const prevCycleDates = getTenDayCycleDates(prevCycleInfo.yearMonth, prevCycleInfo.cycle);
 
   const prevCollections = collections.filter(
     (c) => c.farmerId === farmer.id && c.date < fromDate
   );
-  const prevAdvPay = advancesAndPayments.filter(
-    (a) => a.farmerId === farmer.id && a.date < fromDate
-  );
+  const prevAdvPay = advancesAndPayments.filter((a) => {
+    if (a.farmerId !== farmer.id) return false;
+    const eff = getAdvancePaymentEffectiveCycle(a);
+    return compareYearMonthCycle(eff.yearMonth, eff.cycle, yearMonth, cycle) < 0;
+  });
   const prevFeed = cattleFeed.filter(
     (f) => f.farmerId === farmer.id && f.date < fromDate && f.paymentMode === 'deduct_from_milk'
   );
@@ -1035,6 +1187,28 @@ export function generateTenDayBillData(
       prevFeedTotal
   );
 
+  // Also compute the immediate previous 10-day period's payable vs paid breakdown for bill transparency
+  const prevCyclePaidAmount = truncatePurchaseAmount(
+    advancesAndPayments
+      .filter((a) => {
+        if (a.farmerId !== farmer.id || a.type !== 'payment') return false;
+        const eff = getAdvancePaymentEffectiveCycle(a);
+        return (
+          eff.yearMonth === prevCycleInfo.yearMonth && eff.cycle === prevCycleInfo.cycle
+        );
+      })
+      .reduce((s, a) => s + truncatePurchaseAmount(a.amount), 0)
+  );
+  const previousBillPayableBeforePayment = truncatePurchaseAmount(
+    previousBalance + prevCyclePaidAmount
+  );
+  const previousCycleLabelHi =
+    prevCollections.some((c) => c.date >= prevCycleDates.fromDate && c.date <= prevCycleDates.toDate) ||
+    prevCyclePaidAmount > 0 ||
+    previousBalance !== 0
+      ? getCycleLabelHi(prevCycleInfo.cycle, prevCycleInfo.yearMonth)
+      : undefined;
+
   const periodCollections = collections.filter(
     (c) => c.farmerId === farmer.id && c.date >= fromDate && c.date <= toDate
   );
@@ -1047,25 +1221,21 @@ export function generateTenDayBillData(
 
   const periodAdvances = truncatePurchaseAmount(
     advancesAndPayments
-      .filter(
-        (a) =>
-          a.farmerId === farmer.id &&
-          a.type === 'advance' &&
-          a.date >= fromDate &&
-          a.date <= toDate
-      )
+      .filter((a) => {
+        if (a.farmerId !== farmer.id || a.type !== 'advance') return false;
+        const eff = getAdvancePaymentEffectiveCycle(a);
+        return eff.yearMonth === yearMonth && eff.cycle === cycle;
+      })
       .reduce((s, a) => s + truncatePurchaseAmount(a.amount), 0)
   );
 
   const periodPayments = truncatePurchaseAmount(
     advancesAndPayments
-      .filter(
-        (a) =>
-          a.farmerId === farmer.id &&
-          a.type === 'payment' &&
-          a.date >= fromDate &&
-          a.date <= toDate
-      )
+      .filter((a) => {
+        if (a.farmerId !== farmer.id || a.type !== 'payment') return false;
+        const eff = getAdvancePaymentEffectiveCycle(a);
+        return eff.yearMonth === yearMonth && eff.cycle === cycle;
+      })
       .reduce((s, a) => s + truncatePurchaseAmount(a.amount), 0)
   );
 
@@ -1081,14 +1251,15 @@ export function generateTenDayBillData(
       .reduce((s, f) => s + truncatePurchaseAmount(f.totalAmount), 0)
   );
 
-  const netPayable = truncatePurchaseAmount(
+  const billPayableBeforePayment = truncatePurchaseAmount(
     previousBalance +
       periodSummary.totalAmount -
       periodSummary.totalDeductions -
       periodAdvances -
-      periodFeed -
-      periodPayments
+      periodFeed
   );
+
+  const netPayable = truncatePurchaseAmount(billPayableBeforePayment - periodPayments);
 
   const snapshotHash = computeBillSnapshotHash(
     farmer,
@@ -1121,6 +1292,10 @@ export function generateTenDayBillData(
     paymentsInPeriod: periodPayments,
     previousBalance,
     netPayable,
+    billPayableBeforePayment,
+    previousCycleLabelHi,
+    previousBillPayableBeforePayment,
+    previousBillPaidAmount: prevCyclePaidAmount,
     snapshotHash,
   };
 }
@@ -1936,6 +2111,8 @@ export function calculatePureProfitLoss(
 export interface ScannedSlipRawRow {
   farmerCode?: string;
   farmerName?: string;
+  date?: string;
+  shift?: ShiftType | string;
   liters: number;
   fat: number;
   snf: number;
@@ -1943,51 +2120,544 @@ export interface ScannedSlipRawRow {
 }
 
 /**
- * Parses handwritten/printed text lines from a milk slip into ScannedSlipRawRow items.
- * Supports formats like:
- * - "101 रामलाल 5.250 4.5 8.5"
- * - "101 FAT 4.5 SNF 8.5 L 5.25"
- * - "4.5 8.5 5.250" (when farmer is already selected)
- * - "45 85 5.25" (shorthand 2-digit FAT/SNF)
+ * Converts Devanagari digits (०-९) to ASCII digits (0-9).
  */
-export function parseMilkSlipTextToRows(rawText: string): ScannedSlipRawRow[] {
+export function convertDevanagariDigitsToAscii(input: string): string {
+  const map: Record<string, string> = {
+    '०': '0',
+    '१': '1',
+    '२': '2',
+    '३': '3',
+    '४': '4',
+    '५': '5',
+    '६': '6',
+    '७': '7',
+    '८': '8',
+    '९': '9',
+  };
+  return String(input || '').replace(/[०-९]/g, (ch) => map[ch] || ch);
+}
+
+/**
+ * Normalizes a scanned date string from a milk slip/passbook into YYYY-MM-DD.
+ * Supports:
+ * - "2026-10-21", "2026/10/21"
+ * - "21/10/2026", "21-10-2026", "21.10.2026", "21/10/26"
+ * - "21/10", "21-10" (uses fallbackDate's year)
+ * - "21", "दिनांक 21", "21 तारीख", "ता. 21" (uses fallbackDate's year & month)
+ */
+export function normalizeScannedDate(rawDate: string | undefined, fallbackDate: string): string {
+  const safeFallback =
+    fallbackDate && /^\d{4}-\d{2}-\d{2}$/.test(fallbackDate)
+      ? fallbackDate
+      : new Date().toISOString().slice(0, 10);
+  if (!rawDate) return safeFallback;
+
+  const cleaned = convertDevanagariDigitsToAscii(String(rawDate)).trim();
+  if (!cleaned) return safeFallback;
+
+  const [fbYearStr, fbMonthStr] = safeFallback.split('-');
+  const fbYear = Number(fbYearStr) || new Date().getFullYear();
+  const fbMonth = Number(fbMonthStr) || new Date().getMonth() + 1;
+
+  const formatYMD = (y: number, m: number, d: number): string | null => {
+    const year = y < 100 ? 2000 + y : y;
+    if (year < 2000 || year > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return `${String(year).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(
+      2,
+      '0'
+    )}`;
+  };
+
+  // 1. YYYY-MM-DD or YYYY/MM/DD
+  const ymdMatch = cleaned.match(/(?:^|\b)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\b|$)/);
+  if (ymdMatch) {
+    const res = formatYMD(Number(ymdMatch[1]), Number(ymdMatch[2]), Number(ymdMatch[3]));
+    if (res) return res;
+  }
+
+  // 2. DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY or DD/MM/YY
+  const dmyMatch = cleaned.match(/(?:^|\b)(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:\b|$)/);
+  if (dmyMatch) {
+    const res = formatYMD(Number(dmyMatch[3]), Number(dmyMatch[2]), Number(dmyMatch[1]));
+    if (res) return res;
+  }
+
+  // 3. DD/MM or DD-MM
+  const dmMatch = cleaned.match(/(?:^|\b)(\d{1,2})[/-](\d{1,2})(?:\b|$)/);
+  if (dmMatch) {
+    const res = formatYMD(fbYear, Number(dmMatch[2]), Number(dmMatch[1]));
+    if (res) return res;
+  }
+
+  // 4. Day of month only (e.g. "21", "दिनांक 21", "21 तारीख", "ता. 21")
+  const dayOnlyMatch = cleaned.match(
+    /^(?:दिनांक|तारीख|ता\.?|date|dt\.?)?\s*[:=-]?\s*(\d{1,2})\s*(?:तारीख|ता\.?)?$/i
+  );
+  if (dayOnlyMatch) {
+    const res = formatYMD(fbYear, fbMonth, Number(dayOnlyMatch[1]));
+    if (res) return res;
+  }
+
+  return safeFallback;
+}
+
+/**
+ * Normalizes a scanned shift string (Hindi or English) into 'morning' | 'evening'.
+ */
+export function normalizeScannedShift(
+  rawShift: string | undefined,
+  fallbackShift: ShiftType
+): ShiftType {
+  if (!rawShift) return fallbackShift;
+  const s = convertDevanagariDigitsToAscii(String(rawShift)).trim().toLowerCase();
+  if (!s) return fallbackShift;
+
+  if (
+    s === 'morning' ||
+    s === 'm' ||
+    s === 'am' ||
+    s === 'a.m.' ||
+    s === 'subah' ||
+    s === 'savere' ||
+    s.includes('morning') ||
+    s.includes('subah') ||
+    s.includes('सुबह') ||
+    s.includes('सवेरे') ||
+    s.includes('सवेरा') ||
+    s.includes('प्रातः') ||
+    s.includes('प्रात') ||
+    s.includes('मॉर्निंग') ||
+    s === 'सु' ||
+    s === 'स'
+  ) {
+    return 'morning';
+  }
+
+  if (
+    s === 'evening' ||
+    s === 'e' ||
+    s === 'pm' ||
+    s === 'p.m.' ||
+    s === 'sham' ||
+    s === 'shaam' ||
+    s === 'sanjh' ||
+    s.includes('evening') ||
+    s.includes('sham') ||
+    s.includes('shaam') ||
+    s.includes('शाम') ||
+    s.includes('सांझ') ||
+    s.includes('सायं') ||
+    s.includes('इवनिंग') ||
+    s === 'शा'
+  ) {
+    return 'evening';
+  }
+
+  return fallbackShift;
+}
+
+const SLIP_NOISE_WORDS = new Set([
+  'fat',
+  'snf',
+  'clr',
+  'liter',
+  'liters',
+  'ltr',
+  'qty',
+  'wt',
+  'rate',
+  'amt',
+  'amount',
+  'total',
+  'milk',
+  'cow',
+  'buffalo',
+  'buf',
+  'date',
+  'dt',
+  'shift',
+  'morning',
+  'evening',
+  'subah',
+  'sham',
+  'shaam',
+  'am',
+  'pm',
+  'm',
+  'e',
+  'l',
+  'f',
+  's',
+  'rs',
+  'inr',
+  'id',
+  'code',
+  'no',
+  'name',
+  'farmer',
+  'फैट',
+  'फेट',
+  'एसएनएफ',
+  'डिग्री',
+  'मात्रा',
+  'लीटर',
+  'वजन',
+  'दूध',
+  'रेट',
+  'दर',
+  'भाव',
+  'कुल',
+  'रकम',
+  'योग',
+  'राशि',
+  'कोड',
+  'क्र',
+  'क्रमांक',
+  'किसान',
+  'नाम',
+  'दिनांक',
+  'तारीख',
+  'ता',
+  'शिफ्ट',
+  'समय',
+  'सुबह',
+  'सवेरे',
+  'सवेरा',
+  'प्रातः',
+  'प्रात',
+  'मॉर्निंग',
+  'शाम',
+  'सांझ',
+  'सायं',
+  'इवनिंग',
+  'गाय',
+  'भैंस',
+  'पर्ची',
+  'डेयरी',
+  'उजाला',
+]);
+
+export function cleanScannedFarmerName(rawName?: string): string | undefined {
+  if (!rawName) return undefined;
+  const ascii = convertDevanagariDigitsToAscii(String(rawName));
+  const stripped = ascii
+    .replace(/[,:;()[\]{}=+|/\\]+/g, ' ')
+    .replace(/\b\d+(?:\.\d+)?\b/g, ' ')
+    .trim();
+  if (!stripped) return undefined;
+
+  const words = stripped
+    .split(/\s+/)
+    .map((w) => w.replace(/^[.-]+|[.-]+$/g, '').trim())
+    .filter((w) => {
+      if (!w) return false;
+      const lower = w.toLowerCase();
+      if (SLIP_NOISE_WORDS.has(lower)) return false;
+      if (/^[0-9.]+$/.test(lower)) return false;
+      return true;
+    });
+
+  const joined = words.join(' ').trim();
+  return joined.length >= 2 ? joined : undefined;
+}
+
+function normalizeNameForComparison(name: string): string {
+  return convertDevanagariDigitsToAscii(String(name || ''))
+    .toLowerCase()
+    .replace(/[,:;()[\]{}=+|/\\._-]+/g, ' ')
+    .replace(/(?:^|\s)(श्री|श्रीमती|जी|किसान|नाम|shri|smt|mr|mrs|ji)(?=\s|$)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Matches a farmer from the registered farmers list using strict priority:
+ * 1. Farmer Name FIRST ("यदि फोटो में किसान का नाम मैच हो तो नाम से मिलान करके एंट्री सेव करे")
+ * 2. Farmer Code SECOND ("यदि नाम नहीं हो तो फिर कोड से मिलान कर एंट्री सेव करे")
+ */
+export function matchFarmerByNameThenCode(
+  farmers: Farmer[],
+  rawName?: string,
+  rawCode?: string
+): Farmer | undefined {
+  if (!farmers || farmers.length === 0) return undefined;
+
+  // Priority 1: Match by Farmer Name FIRST
+  const cleanedRawName = cleanScannedFarmerName(rawName);
+  if (cleanedRawName) {
+    const targetName = normalizeNameForComparison(cleanedRawName);
+    if (targetName.length >= 2) {
+      // 1a. Exact normalized name match
+      const exactMatch = farmers.find(
+        (f) => normalizeNameForComparison(f.name) === targetName
+      );
+      if (exactMatch) return exactMatch;
+
+      // 1b. Substring / containment match (e.g. "रामलाल" in "रामलाल गुर्जर" or vice versa)
+      const substringMatch = farmers.find((f) => {
+        const fNorm = normalizeNameForComparison(f.name);
+        if (!fNorm || fNorm.length < 2) return false;
+        return fNorm.includes(targetName) || targetName.includes(fNorm);
+      });
+      if (substringMatch) return substringMatch;
+
+      // 1c. First/primary token match (e.g. "रामलाल शर्मा" vs "रामलाल" when first name has >= 2 chars)
+      const targetTokens = targetName.split(' ').filter((t) => t.length >= 2);
+      if (targetTokens.length > 0) {
+        const firstToken = targetTokens[0];
+        const tokenMatch = farmers.find((f) => {
+          const fTokens = normalizeNameForComparison(f.name)
+            .split(' ')
+            .filter((t) => t.length >= 2);
+          return fTokens.length > 0 && fTokens[0] === firstToken;
+        });
+        if (tokenMatch) return tokenMatch;
+      }
+    }
+  }
+
+  // Priority 2: Match by Farmer Code SECOND (when name is absent or did not match any farmer)
+  const candidateCode = rawCode
+    ? convertDevanagariDigitsToAscii(String(rawCode)).trim()
+    : rawName && /^\d+$/.test(convertDevanagariDigitsToAscii(String(rawName)).trim())
+    ? convertDevanagariDigitsToAscii(String(rawName)).trim()
+    : '';
+
+  if (candidateCode) {
+    const cleanCode = candidateCode.toLowerCase();
+    const strippedCode = cleanCode.replace(/^0+/, '') || '0';
+    const codeMatch = farmers.find((f) => {
+      const fCode = convertDevanagariDigitsToAscii(String(f.code || ''))
+        .trim()
+        .toLowerCase();
+      if (!fCode) return false;
+      const fStripped = fCode.replace(/^0+/, '') || '0';
+      return fCode === cleanCode || fStripped === strippedCode;
+    });
+    if (codeMatch) return codeMatch;
+  }
+
+  return undefined;
+}
+
+export function lookupNearestRateFromChart(
+  chart: RateChartMatrix | null | undefined,
+  fat: number,
+  snf: number
+): number | null {
+  if (!chart || !chart.rates) return null;
+  const exact = lookupRateFromChart(chart, fat, snf);
+  if (exact.found && exact.rate !== null) return exact.rate;
+
+  let bestRate: number | null = null;
+  let bestDist = Infinity;
+  for (const [key, val] of Object.entries(chart.rates)) {
+    const r = Number(val);
+    if (!Number.isFinite(r) || r <= 0) continue;
+    const parts = key.split('_');
+    if (parts.length !== 2) continue;
+    const kFat = Number(parts[0]);
+    const kSnf = Number(parts[1]);
+    if (!Number.isFinite(kFat) || !Number.isFinite(kSnf)) continue;
+    const dist = Math.abs(kFat - fat) * 2 + Math.abs(kSnf - snf);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestRate = round2(r);
+    }
+  }
+  return bestRate;
+}
+
+/**
+ * Parses handwritten/printed text lines from a milk slip, multi-farmer register page,
+ * or multi-date morning/evening farmer passbook into ScannedSlipRawRow items.
+ */
+export function parseMilkSlipTextToRows(
+  rawText: string,
+  defaultDate?: string,
+  defaultShift?: ShiftType
+): ScannedSlipRawRow[] {
   if (!rawText || !rawText.trim()) return [];
-  const lines = rawText
+  const asciiText = convertDevanagariDigitsToAscii(rawText);
+  const rawLines = asciiText
     .split(/\r?\n|;/)
     .map((l) => l.trim())
     .filter(Boolean);
 
   const results: ScannedSlipRawRow[] = [];
 
-  for (const line of lines) {
+  const normalizeFat = (v: number): number => {
+    if (v >= 25 && v <= 99 && Number.isInteger(v)) return round2(v / 10);
+    return round2(v);
+  };
+  const normalizeSnf = (v: number): number => {
+    if (v >= 70 && v <= 105 && Number.isInteger(v)) return round2(v / 10);
+    return round2(v);
+  };
+  const normalizeLiters = (v: number): number => {
+    if (v >= 1000 && v <= 9999 && Number.isInteger(v)) return round3(v / 1000);
+    return round3(v);
+  };
+
+  // Sticky context for multi-row passbook / register pages
+  let stickyFarmerName: string | undefined;
+  let stickyFarmerCode: string | undefined;
+  let stickyDate: string | undefined = defaultDate;
+  let stickyShift: ShiftType | undefined = defaultShift;
+  let hasExplicitFarmerHeader = false;
+
+  // Helper to extract date token from a line and return { dateStr, remainingLine }
+  const extractDateFromLine = (
+    inputLine: string
+  ): { dateStr?: string; remainingLine: string } => {
+    let working = inputLine;
+    let foundDate: string | undefined;
+
+    // 1. YYYY-MM-DD or YYYY/MM/DD
+    const ymd = working.match(/\b(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/);
+    if (ymd) {
+      foundDate = ymd[1];
+      working = working.replace(ymd[0], ' ');
+      return { dateStr: foundDate, remainingLine: working };
+    }
+
+    // 2. DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY or DD/MM/YY
+    const dmy = working.match(/\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b/);
+    if (dmy) {
+      foundDate = dmy[1];
+      working = working.replace(dmy[0], ' ');
+      return { dateStr: foundDate, remainingLine: working };
+    }
+
+    // 3. DD/MM or DD-MM (strictly slash or hyphen, NEVER dot so decimals like 5.5 are untouched)
+    const dm = working.match(
+      /(?:(?:दिनांक|तारीख|ता\.?|date|dt\.?)\s*[:=-]?\s*)?\b(\d{1,2}[/-]\d{1,2})\b/i
+    );
+    if (dm) {
+      const parts = dm[1].split(/[/-]/);
+      const d = Number(parts[0]);
+      const m = Number(parts[1]);
+      if (d >= 1 && d <= 31 && m >= 1 && m <= 12) {
+        foundDate = dm[1];
+        working = working.replace(dm[0], ' ');
+        return { dateStr: foundDate, remainingLine: working };
+      }
+    }
+
+    // 4. Labeled day-of-month: "दिनांक 21", "तारीख 21", "21 तारीख", "ता. 21"
+    const dayLabeled = working.match(
+      /(?:(?:दिनांक|तारीख|ता\.?|date|dt\.?)\s*[:=-]?\s*(\d{1,2})|(?:^|\s)(\d{1,2})\s*(?:तारीख))(?=\s|$|[,;:|])/i
+    );
+    if (dayLabeled) {
+      const dayVal = Number(dayLabeled[1] || dayLabeled[2]);
+      if (dayVal >= 1 && dayVal <= 31) {
+        foundDate = String(dayVal);
+        working = working.replace(dayLabeled[0], ' ');
+        return { dateStr: foundDate, remainingLine: working };
+      }
+    }
+
+    return { dateStr: undefined, remainingLine: working };
+  };
+
+  // Expand dual-shift lines (where a single line has both Morning and Evening entries for a date)
+  const expandedSegments: {
+    text: string;
+    lineDate?: string;
+    forcedShift?: ShiftType;
+  }[] = [];
+
+  for (const rawLine of rawLines) {
+    const { dateStr, remainingLine } = extractDateFromLine(rawLine);
+    if (dateStr) {
+      stickyDate = dateStr;
+    }
+    const effectiveLineDate = dateStr || stickyDate;
+
+    // Check if the line has both Morning and Evening segments on the same row:
+    // e.g. "रामलाल 21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6"
+    const dualShiftRegex =
+      /^(.*?)(?:^|[\s,;:()[\]-])(सुबह|सवेरे|सवेरा|प्रातः|प्रात|मॉर्निंग|morning|subah|am)(?=[\s,;:()[\]-])([\s\S]+?)(?:^|[\s,;:()[\]-])(शाम|सांझ|सायं|इवनिंग|evening|sham|shaam|pm)(?=[\s,;:()[\]-])([\s\S]+)$/i;
+    const dualMatch = remainingLine.match(dualShiftRegex);
+    if (dualMatch) {
+      const prefix = dualMatch[1].trim();
+      const mornBody = dualMatch[3].trim();
+      const eveBody = dualMatch[5].trim();
+      expandedSegments.push({
+        text: `${prefix} ${mornBody}`.trim(),
+        lineDate: effectiveLineDate,
+        forcedShift: 'morning',
+      });
+      expandedSegments.push({
+        text: `${prefix} ${eveBody}`.trim(),
+        lineDate: effectiveLineDate,
+        forcedShift: 'evening',
+      });
+    } else {
+      expandedSegments.push({
+        text: remainingLine.trim(),
+        lineDate: effectiveLineDate,
+      });
+    }
+  }
+
+  for (const seg of expandedSegments) {
+    const line = seg.text;
+    if (!line) continue;
+
+    // Detect shift on this segment
+    let lineShift: ShiftType | undefined = seg.forcedShift;
+    if (!lineShift) {
+      if (
+        /(?:^|\s|[(:,-])(सुबह|सवेरे|सवेरा|प्रातः|प्रात|मॉर्निंग|morning|subah|am)(?:$|\s|[):,-])/i.test(
+          line
+        )
+      ) {
+        lineShift = 'morning';
+      } else if (
+        /(?:^|\s|[(:,-])(शाम|सांझ|सायं|इवनिंग|evening|sham|shaam|pm)(?:$|\s|[):,-])/i.test(
+          line
+        )
+      ) {
+        lineShift = 'evening';
+      }
+    }
+    if (lineShift) {
+      stickyShift = lineShift;
+    }
+    const effectiveShift = lineShift || stickyShift;
+
     // Extract labeled values first if present
     const fatMatch = line.match(/(?:fat|फैट|फेट|f)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
-    const snfMatch = line.match(/(?:snf|एसएनएफ|डिग्री|s)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
-    const litMatch = line.match(/(?:liters?|ltr|qty|मात्रा|लीटर|वजन|दूध|l)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+    const snfMatch = line.match(/(?:snf|एसएनएफ|डिग्री|s|clr)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+    const litMatch = line.match(
+      /(?:liters?|ltr|qty|मात्रा|लीटर|वजन|दूध|l|wt)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i
+    );
     const rateMatch = line.match(/(?:rate|रेट|दर|भाव)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
-    const codeMatch = line.match(/(?:id|code|कोड|क्र\.?|किसान)\s*[:=-]?\s*([A-Za-z0-9]+)/i);
+    const codeMatch = line.match(/(?:id|code|कोड|क्र\.?|no)\s*[:=-]?\s*([A-Za-z0-9]+)/i);
+    const nameLabelMatch = line.match(
+      /(?:किसान(?:\s*का\s*नाम)?|नाम|farmer(?:\s*name)?|name)\s*[:=-]\s*([^\d,;:|/]+)/i
+    );
 
-    const normalizeFat = (v: number): number => {
-      if (v >= 25 && v <= 99 && Number.isInteger(v)) return round2(v / 10);
-      return round2(v);
-    };
-    const normalizeSnf = (v: number): number => {
-      if (v >= 70 && v <= 105 && Number.isInteger(v)) return round2(v / 10);
-      return round2(v);
-    };
-    const normalizeLiters = (v: number): number => {
-      if (v >= 1000 && v <= 9999 && Number.isInteger(v)) return round3(v / 1000);
-      return round3(v);
-    };
-
-    if (fatMatch && snfMatch && litMatch) {
+    if (fatMatch && litMatch) {
       const fat = normalizeFat(Number(fatMatch[1]));
-      const snf = normalizeSnf(Number(snfMatch[1]));
+      const snf = snfMatch ? normalizeSnf(Number(snfMatch[1])) : 8.5;
       const liters = normalizeLiters(Number(litMatch[1]));
       const rate = rateMatch ? round2(Number(rateMatch[1])) : undefined;
+      const cleanedName = cleanScannedFarmerName(
+        nameLabelMatch ? nameLabelMatch[1] : line.replace(/(?:fat|फैट|फेट|snf|एसएनएफ|डिग्री|clr|liters?|ltr|qty|मात्रा|लीटर|वजन|दूध|rate|रेट|दर|भाव|id|code|कोड|क्र\.?|no)\s*[:=-]?\s*[A-Za-z0-9.]+/gi, ' ')
+      );
+      const rowCode = codeMatch ? codeMatch[1] : undefined;
+      if (cleanedName) stickyFarmerName = cleanedName;
+      if (rowCode) stickyFarmerCode = rowCode;
+
       if (fat > 0 && snf > 0 && liters > 0) {
         results.push({
-          farmerCode: codeMatch ? codeMatch[1] : undefined,
+          farmerCode: rowCode || stickyFarmerCode,
+          farmerName: cleanedName || stickyFarmerName,
+          date: seg.lineDate,
+          shift: effectiveShift,
           liters,
           fat,
           snf,
@@ -1997,32 +2667,130 @@ export function parseMilkSlipTextToRows(rawText: string): ScannedSlipRawRow[] {
       }
     }
 
-    // Otherwise extract all numbers from the line
-    const tokens = line.split(/[\s,|/]+/).filter(Boolean);
+    // Otherwise extract all numbers and words from the line
+    const tokens = line.split(/[\s,|/:-]+/).filter(Boolean);
     const numbers: number[] = [];
     const textWords: string[] = [];
 
     for (const tok of tokens) {
-      const cleanedNum = tok.replace(/[^0-9.]/g, '');
+      const cleanedTok = tok.replace(/[L₹lkgKGलीटर()[\]]/g, '');
+      const cleanedNum = cleanedTok.replace(/[^0-9.]/g, '');
       const numVal = Number(cleanedNum);
-      if (cleanedNum !== '' && Number.isFinite(numVal) && numVal > 0 && /^[0-9.]+$/.test(tok.replace(/[L₹l]/g, ''))) {
+      if (
+        cleanedNum !== '' &&
+        Number.isFinite(numVal) &&
+        numVal > 0 &&
+        /^[0-9]+(?:\.[0-9]+)?$/.test(cleanedTok)
+      ) {
         numbers.push(numVal);
       } else {
         textWords.push(tok);
       }
     }
 
+    const lineFarmerName = cleanScannedFarmerName(textWords.join(' '));
+
+    // If this line has fewer than 2 numbers, it may be a header line (e.g., "किसान: रामलाल गुर्जर (101)" or "दिनांक 21/10/2026")
+    if (numbers.length < 2) {
+      if (lineFarmerName) {
+        stickyFarmerName = lineFarmerName;
+        hasExplicitFarmerHeader = true;
+      }
+      if (numbers.length === 1 && Number.isInteger(numbers[0])) {
+        if (lineFarmerName || codeMatch) {
+          stickyFarmerCode = String(numbers[0]);
+          hasExplicitFarmerHeader = true;
+        } else if (numbers[0] >= 1 && numbers[0] <= 31 && !seg.lineDate) {
+          stickyDate = String(numbers[0]);
+        } else {
+          stickyFarmerCode = String(numbers[0]);
+        }
+      }
+      continue;
+    }
+
+    let rowDate = seg.lineDate;
+
     if (numbers.length >= 3) {
-      let farmerCode: string | undefined;
+      let farmerCode: string | undefined = codeMatch ? codeMatch[1] : undefined;
       let nums = [...numbers];
 
-      // If 4+ numbers and first is an integer (e.g. 101, 1, 2), treat first as farmerCode
+      // If 4+ numbers and first is an integer:
+      // Check if it's a day-of-month (1..31) in a passbook with an active farmer header, or a farmer code
       if (nums.length >= 4 && Number.isInteger(nums[0])) {
-        farmerCode = String(nums[0]);
-        nums = nums.slice(1);
+        if (
+          !rowDate &&
+          nums[0] >= 1 &&
+          nums[0] <= 31 &&
+          (hasExplicitFarmerHeader || lineFarmerName)
+        ) {
+          rowDate = String(nums[0]);
+          nums = nums.slice(1);
+        } else {
+          farmerCode = String(nums[0]);
+          nums = nums.slice(1);
+        }
+      } else if (nums.length === 3 && Number.isInteger(nums[0])) {
+        // Check if nums[0] is either a 3-digit farmer code (100..999) OR a day-of-month/code followed by (Liters, FAT) without SNF
+        const c1 = normalizeFat(nums[1]);
+        const c2 = normalizeFat(nums[2]);
+        const hasSnf =
+          (nums[1] >= 7.5 && nums[1] <= 10.2) || (nums[2] >= 7.5 && nums[2] <= 10.2);
+
+        if (
+          !rowDate &&
+          nums[0] >= 1 &&
+          nums[0] <= 31 &&
+          (hasExplicitFarmerHeader || Boolean(lineShift)) &&
+          !hasSnf &&
+          ((c1 >= 2.5 && c1 <= 11.0) || (c2 >= 2.5 && c2 <= 11.0))
+        ) {
+          rowDate = String(nums[0]);
+          const isSecondFat = c2 >= 2.5 && c2 <= 11.0;
+          const fat = isSecondFat ? c2 : c1;
+          const liters = isSecondFat ? normalizeLiters(nums[1]) : normalizeLiters(nums[2]);
+          if (fat > 0 && liters > 0) {
+            const resolvedName = lineFarmerName || stickyFarmerName;
+            const resolvedCode = farmerCode || stickyFarmerCode;
+            results.push({
+              farmerCode: resolvedCode,
+              farmerName: resolvedName,
+              date: rowDate,
+              shift: effectiveShift,
+              liters,
+              fat,
+              snf: 8.5,
+            });
+            continue;
+          }
+        } else if (
+          nums[0] >= 100 &&
+          nums[0] <= 999 &&
+          !hasSnf &&
+          ((c1 >= 2.5 && c1 <= 11.0) || (c2 >= 2.5 && c2 <= 11.0))
+        ) {
+          // e.g. "101 5.5 4.5" -> Farmer Code 101, Liters 5.5, FAT 4.5 (default SNF 8.5)
+          farmerCode = String(nums[0]);
+          const isSecondFat = c2 >= 2.5 && c2 <= 11.0;
+          const fat = isSecondFat ? c2 : c1;
+          const liters = isSecondFat ? normalizeLiters(nums[1]) : normalizeLiters(nums[2]);
+          if (fat > 0 && liters > 0) {
+            if (lineFarmerName) stickyFarmerName = lineFarmerName;
+            stickyFarmerCode = farmerCode;
+            results.push({
+              farmerCode,
+              farmerName: lineFarmerName || (hasExplicitFarmerHeader ? stickyFarmerName : undefined),
+              date: rowDate,
+              shift: effectiveShift,
+              liters,
+              fat,
+              snf: 8.5,
+            });
+            continue;
+          }
+        }
       }
 
-      // Now find FAT (typically 2.5 - 11.0 with 1 decimal place), SNF (7.0 - 10.5 with 1 decimal place), and Liters
       const isOneDecimal = (val: number) =>
         Math.abs(val * 10 - Math.round(val * 10)) < 0.001;
 
@@ -2033,22 +2801,64 @@ export function parseMilkSlipTextToRows(rawText: string): ScannedSlipRawRow[] {
         asLiters: normalizeLiters(n),
       }));
 
-      // Prefer 1-decimal-place numbers in 7.0..10.5 for SNF, and 1-decimal-place numbers in 2.5..11.0 for FAT
-      let snfIdx = converted.findIndex(
-        (c) => c.asSnf >= 7.0 && c.asSnf <= 10.5 && isOneDecimal(c.asSnf)
-      );
-      if (snfIdx === -1) {
-        snfIdx = converted.findIndex((c) => c.asSnf >= 7.0 && c.asSnf <= 10.5);
-      }
+      let fatIdx = -1;
+      let snfIdx = -1;
 
-      let fatIdx = converted.findIndex(
-        (c, idx) =>
-          idx !== snfIdx && c.asFat >= 2.5 && c.asFat <= 11.0 && isOneDecimal(c.asFat)
-      );
-      if (fatIdx === -1) {
-        fatIdx = converted.findIndex(
-          (c, idx) => idx !== snfIdx && c.asFat >= 2.5 && c.asFat <= 11.0
+      const isValidFat = (v: number) => v >= 2.5 && v <= 11.0;
+      const isValidSnf = (v: number) => v >= 7.0 && v <= 10.5;
+
+      // Check standard [Liters, FAT, SNF] pattern first (where index 1 is FAT and index 2 is SNF, with FAT <= SNF)
+      if (
+        converted.length >= 3 &&
+        isValidFat(converted[1].asFat) &&
+        isValidSnf(converted[2].asSnf) &&
+        isOneDecimal(converted[2].asSnf) &&
+        converted[1].asFat <= converted[2].asSnf &&
+        !(
+          converted[0].asFat >= 2.5 &&
+          converted[0].asFat < converted[1].asSnf &&
+          isValidSnf(converted[1].asSnf) &&
+          converted[2].raw > 10.5
+        )
+      ) {
+        fatIdx = 1;
+        snfIdx = 2;
+      } else if (
+        converted.length >= 3 &&
+        isValidFat(converted[0].asFat) &&
+        isValidSnf(converted[1].asSnf) &&
+        isOneDecimal(converted[1].asSnf) &&
+        converted[0].asFat <= converted[1].asSnf
+      ) {
+        // Standard [FAT, SNF, Liters] pattern
+        fatIdx = 0;
+        snfIdx = 1;
+      } else {
+        snfIdx = converted.findIndex(
+          (c) => isValidSnf(c.asSnf) && isOneDecimal(c.asSnf)
         );
+        if (snfIdx === -1) {
+          snfIdx = converted.findIndex((c) => isValidSnf(c.asSnf));
+        }
+
+        if (
+          snfIdx > 0 &&
+          isValidFat(converted[snfIdx - 1].asFat) &&
+          isOneDecimal(converted[snfIdx - 1].asFat)
+        ) {
+          fatIdx = snfIdx - 1;
+        }
+        if (fatIdx === -1) {
+          fatIdx = converted.findIndex(
+            (c, idx) =>
+              idx !== snfIdx && isValidFat(c.asFat) && isOneDecimal(c.asFat)
+          );
+        }
+        if (fatIdx === -1) {
+          fatIdx = converted.findIndex(
+            (c, idx) => idx !== snfIdx && isValidFat(c.asFat)
+          );
+        }
       }
 
       if (snfIdx === -1) snfIdx = 1;
@@ -2068,9 +2878,18 @@ export function parseMilkSlipTextToRows(rawText: string): ScannedSlipRawRow[] {
             : undefined;
 
         if (fat > 0 && snf > 0 && liters > 0) {
+          const resolvedName =
+            lineFarmerName || (!farmerCode ? stickyFarmerName : undefined);
+          const resolvedCode =
+            farmerCode || (!lineFarmerName ? stickyFarmerCode : undefined);
+          if (lineFarmerName) stickyFarmerName = lineFarmerName;
+          if (farmerCode) stickyFarmerCode = farmerCode;
+
           results.push({
-            farmerCode,
-            farmerName: textWords.join(' ').trim() || undefined,
+            farmerCode: resolvedCode,
+            farmerName: resolvedName,
+            date: rowDate,
+            shift: effectiveShift,
             liters,
             fat,
             snf,
@@ -2078,15 +2897,142 @@ export function parseMilkSlipTextToRows(rawText: string): ScannedSlipRawRow[] {
           });
         }
       }
+    } else if (numbers.length === 2) {
+      // 2 numbers on a line: e.g. "5.5 4.5" or "रामलाल 5.5 4.5" (Liters + FAT, default SNF 8.5)
+      const n0Fat = normalizeFat(numbers[0]);
+      const n1Fat = normalizeFat(numbers[1]);
+      let fat = 4.5;
+      let liters = 1;
+      if (n1Fat >= 2.5 && n1Fat <= 11.0) {
+        fat = n1Fat;
+        liters = normalizeLiters(numbers[0]);
+      } else if (n0Fat >= 2.5 && n0Fat <= 11.0) {
+        fat = n0Fat;
+        liters = normalizeLiters(numbers[1]);
+      } else {
+        liters = normalizeLiters(numbers[0]);
+        fat = n1Fat;
+      }
+      if (fat > 0 && liters > 0) {
+        const rowCode = codeMatch ? codeMatch[1] : undefined;
+        const resolvedName = lineFarmerName || (!rowCode ? stickyFarmerName : undefined);
+        const resolvedCode = rowCode || (!lineFarmerName ? stickyFarmerCode : undefined);
+        if (lineFarmerName) stickyFarmerName = lineFarmerName;
+        if (rowCode) stickyFarmerCode = rowCode;
+
+        results.push({
+          farmerCode: resolvedCode,
+          farmerName: resolvedName,
+          date: rowDate,
+          shift: effectiveShift,
+          liters,
+          fat,
+          snf: 8.5,
+        });
+      }
     }
   }
 
   return results;
 }
 
+export interface ShiftMilkEntryValidationResult {
+  allowed: boolean;
+  reasonHi?: string;
+  reasonEn?: string;
+  existingConflict?: MilkCollectionEntry;
+  existingCowEntry?: MilkCollectionEntry;
+  existingBuffaloEntry?: MilkCollectionEntry;
+}
+
 /**
- * Matches scanned slip rows to registered farmers, looks up rate chart (or fallback rate),
- * truncates totalAmount to a whole integer (e.g., 253.85 -> 253), and builds MilkCollectionEntry items.
+ * Enforces the rule:
+ * "किसी भी किसान की एक शिफ्ट में केवल दो दूध एंट्री ही हो एक भैंस की और एक गाय की
+ *  यदि किसान की एंट्री पहले से मौजूद हो व फोटो से एंट्री में उसी शिफ्ट तारीख में उसी पशु की एंट्री आ जाए तो वह एंट्री सेव नहीं हो"
+ */
+export function canSaveFarmerShiftMilkEntry(
+  existingCollections: MilkCollectionEntry[],
+  candidate: {
+    farmerId: string;
+    date: string;
+    shift: ShiftType;
+    milkType: MilkType;
+  },
+  editingEntryId?: string
+): ShiftMilkEntryValidationResult {
+  const sameShiftEntries = (existingCollections || []).filter(
+    (c) =>
+      c.farmerId === candidate.farmerId &&
+      c.date === candidate.date &&
+      c.shift === candidate.shift &&
+      (!editingEntryId || c.id !== editingEntryId)
+  );
+
+  const existingCowEntry = sameShiftEntries.find((c) => c.milkType === 'cow');
+  const existingBuffaloEntry = sameShiftEntries.find((c) => c.milkType === 'buffalo');
+
+  if (candidate.milkType === 'cow' && existingCowEntry) {
+    return {
+      allowed: false,
+      existingConflict: existingCowEntry,
+      existingCowEntry,
+      existingBuffaloEntry,
+      reasonHi: `इस किसान की इस तारीख (${candidate.date}) और शिफ्ट (${
+        candidate.shift === 'morning' ? 'सुबह' : 'शाम'
+      }) में गाय (Cow) के दूध की एंट्री पहले से मौजूद है! किसी भी किसान की एक शिफ्ट में केवल दो दूध एंट्री ही हो सकती हैं (एक भैंस की और एक गाय की)।`,
+      reasonEn:
+        'A Cow milk entry already exists for this farmer in this date & shift! Only 2 entries per shift (1 Buffalo and 1 Cow) are allowed.',
+    };
+  }
+
+  if (candidate.milkType === 'buffalo' && existingBuffaloEntry) {
+    return {
+      allowed: false,
+      existingConflict: existingBuffaloEntry,
+      existingCowEntry,
+      existingBuffaloEntry,
+      reasonHi: `इस किसान की इस तारीख (${candidate.date}) और शिफ्ट (${
+        candidate.shift === 'morning' ? 'सुबह' : 'शाम'
+      }) में भैंस (Buffalo) के दूध की एंट्री पहले से मौजूद है! किसी भी किसान की एक शिफ्ट में केवल दो दूध एंट्री ही हो सकती हैं (एक भैंस की और एक गाय की)।`,
+      reasonEn:
+        'A Buffalo milk entry already exists for this farmer in this date & shift! Only 2 entries per shift (1 Buffalo and 1 Cow) are allowed.',
+    };
+  }
+
+  if (sameShiftEntries.length >= 2) {
+    return {
+      allowed: false,
+      existingConflict: sameShiftEntries[0],
+      existingCowEntry,
+      existingBuffaloEntry,
+      reasonHi: `इस किसान की इस शिफ्ट में पहले से दो दूध एंट्री (एक गाय और एक भैंस) मौजूद हैं! एक शिफ्ट में अधिकतम दो एंट्री ही हो सकती हैं।`,
+      reasonEn:
+        'This farmer already has 2 milk entries (1 Cow and 1 Buffalo) in this shift!',
+    };
+  }
+
+  return {
+    allowed: true,
+    existingCowEntry,
+    existingBuffaloEntry,
+  };
+}
+
+export interface ScannedSlipPreviewItem {
+  entry: MilkCollectionEntry;
+  isDuplicate: boolean;
+  duplicateSource?: 'existing' | 'batch';
+  statusHi: string;
+  statusEn: string;
+}
+
+/**
+ * Matches scanned slip rows to registered farmers (strictly matching by Name FIRST, then Code SECOND),
+ * resolves per-row Date and Morning/Evening Shift (for multi-date / multi-shift passbook photos),
+ * looks up rate chart (or nearest/standard fallback rate),
+ * truncates totalAmount to a whole integer (e.g., 253.85 -> 253),
+ * enforces max 2 entries per farmer per shift (1 Cow + 1 Buffalo) and blocks duplicate same-animal entries in the same date+shift,
+ * and builds both previewItems and savable MilkCollectionEntry items.
  */
 export function buildCollectionEntriesFromScannedSlip(
   scannedRows: ScannedSlipRawRow[],
@@ -2094,81 +3040,177 @@ export function buildCollectionEntriesFromScannedSlip(
   rateCharts: { cow: RateChartMatrix | null; buffalo: RateChartMatrix | null },
   date: string,
   shift: ShiftType,
-  fallbackFarmerId?: string
+  fallbackFarmerId?: string,
+  existingCollections: MilkCollectionEntry[] = []
 ): {
   entries: MilkCollectionEntry[];
   savedEntries: MilkCollectionEntry[];
+  previewItems: ScannedSlipPreviewItem[];
+  skippedDuplicates: MilkCollectionEntry[];
+  autoCreatedFarmers: Farmer[];
   warningsHi: string[];
   errors: string[];
 } {
   const savedEntries: MilkCollectionEntry[] = [];
+  const previewItems: ScannedSlipPreviewItem[] = [];
+  const skippedDuplicates: MilkCollectionEntry[] = [];
+  const autoCreatedFarmers: Farmer[] = [];
   const errors: string[] = [];
-  const activeFarmers = farmers.filter((f) => f.active);
+  const allFarmers = [...farmers];
+  const activeFarmers = allFarmers.filter((f) => f && f.active !== false);
+
+  let carryForwardFarmer: Farmer | undefined;
 
   for (let i = 0; i < scannedRows.length; i++) {
     const row = scannedRows[i];
-    const fat = row.fat >= 25 && row.fat <= 99 && Number.isInteger(row.fat) ? round2(row.fat / 10) : round2(row.fat);
-    const snf = row.snf >= 70 && row.snf <= 105 && Number.isInteger(row.snf) ? round2(row.snf / 10) : round2(row.snf);
-    const liters =
-      row.liters >= 1000 && row.liters <= 9999 && Number.isInteger(row.liters)
-        ? round3(row.liters / 1000)
-        : round3(row.liters);
+    const rawFat = Number(row.fat) || 0;
+    const rawSnf = Number(row.snf) || 8.5;
+    const rawLiters = Number(row.liters) || 0;
 
-    if (!Number.isFinite(fat) || fat <= 0 || !Number.isFinite(snf) || snf <= 0 || !Number.isFinite(liters) || liters <= 0) {
-      errors.push(`पंक्ति ${i + 1}: अमान्य FAT (${row.fat}), SNF (${row.snf}) या मात्रा (${row.liters})`);
+    const fat =
+      rawFat >= 25 && rawFat <= 99 && Number.isInteger(rawFat)
+        ? round2(rawFat / 10)
+        : round2(rawFat);
+    const snf =
+      rawSnf >= 70 && rawSnf <= 105 && Number.isInteger(rawSnf)
+        ? round2(rawSnf / 10)
+        : rawSnf > 0
+        ? round2(rawSnf)
+        : 8.5;
+    const liters =
+      rawLiters >= 1000 && rawLiters <= 9999 && Number.isInteger(rawLiters)
+        ? round3(rawLiters / 1000)
+        : round3(rawLiters);
+
+    if (
+      !Number.isFinite(fat) ||
+      fat <= 0 ||
+      !Number.isFinite(snf) ||
+      snf <= 0 ||
+      !Number.isFinite(liters) ||
+      liters <= 0
+    ) {
+      errors.push(
+        `पंक्ति ${i + 1}: अमान्य FAT (${row.fat}), SNF (${row.snf}) या मात्रा (${row.liters})`
+      );
       continue;
     }
 
-    // Match Farmer:
-    // 1. Exact farmer code match
-    // 2. Farmer name match
-    // 3. Fallback selected farmer in form
-    // 4. First active farmer if only 1 farmer exists
-    let matchedFarmer: Farmer | undefined;
-    if (row.farmerCode) {
-      const cleanCode = row.farmerCode.trim().toLowerCase();
-      matchedFarmer = farmers.find(
-        (f) =>
-          f.code.toLowerCase() === cleanCode ||
-          f.code.replace(/^0+/, '').toLowerCase() === cleanCode.replace(/^0+/, '')
-      );
+    // Resolve per-row Date and Shift (falls back to current selected date & shift)
+    const entryDate = normalizeScannedDate(row.date, date);
+    const entryShift = normalizeScannedShift(
+      row.shift ? String(row.shift) : undefined,
+      shift
+    );
+
+    const cleanedRowName = cleanScannedFarmerName(row.farmerName);
+    const cleanedRowCode = row.farmerCode
+      ? convertDevanagariDigitsToAscii(String(row.farmerCode)).trim()
+      : undefined;
+
+    // Match Farmer with strict priority:
+    // 1. Farmer Name match FIRST ("यदि फोटो में किसान का नाम मैच हो तो नाम से मिलान करके एंट्री सेव करे")
+    // 2. Farmer Code match SECOND ("यदि नाम नहीं हो तो फिर कोड से मिलान कर एंट्री सेव करे")
+    let matchedFarmer = matchFarmerByNameThenCode(
+      allFarmers,
+      cleanedRowName,
+      cleanedRowCode
+    );
+
+    // 3. If row has no farmer name/code of its own (e.g. subsequent date/shift row on a single farmer's card),
+    //    reuse the farmer matched on the previous row of the same photo/slip
+    if (!matchedFarmer && !cleanedRowName && !cleanedRowCode && carryForwardFarmer) {
+      matchedFarmer = carryForwardFarmer;
     }
-    if (!matchedFarmer && row.farmerName) {
-      const cleanName = row.farmerName.trim().toLowerCase();
-      matchedFarmer = farmers.find(
-        (f) =>
-          f.name.toLowerCase().includes(cleanName) ||
-          cleanName.includes(f.name.toLowerCase())
-      );
+
+    // 4. If row has an explicit farmerName or farmerCode that doesn't exist in allFarmers yet:
+    //    In multi-farmer slips or when no farmers exist (or no fallbackFarmerId), auto-create the farmer
+    //    so multi-farmer pages never merge distinct farmers into one.
+    if (!matchedFarmer && (cleanedRowName || cleanedRowCode)) {
+      if (allFarmers.length === 0 || scannedRows.length > 1 || !fallbackFarmerId) {
+        const existingCodes = new Set(allFarmers.map((f) => String(f.code).trim()));
+        let newCode = cleanedRowCode || String(101 + allFarmers.length);
+        if (!cleanedRowCode && existingCodes.has(newCode)) {
+          newCode = String(101 + allFarmers.length + i);
+        }
+        const newName = cleanedRowName || `किसान ${newCode}`;
+        const newFarmer: Farmer = {
+          id: `farmer_auto_${Date.now()}_${i}`,
+          code: newCode,
+          name: newName,
+          mobile: '',
+          village: '',
+          defaultMilkType: classifyMilkType(fat),
+          shiftSchedule: 'both',
+          openingBalance: 0,
+          notes: 'फोटो पर्ची से स्वतः जोड़ा गया किसान',
+          active: true,
+          createdAt: new Date().toISOString(),
+        };
+        allFarmers.push(newFarmer);
+        activeFarmers.push(newFarmer);
+        autoCreatedFarmers.push(newFarmer);
+        matchedFarmer = newFarmer;
+      }
     }
+
+    // 5. Fallback to selected farmer in form or first active farmer
     if (!matchedFarmer && fallbackFarmerId) {
-      matchedFarmer = farmers.find((f) => f.id === fallbackFarmerId);
+      matchedFarmer = allFarmers.find((f) => f.id === fallbackFarmerId);
+    }
+    if (!matchedFarmer && carryForwardFarmer) {
+      matchedFarmer = carryForwardFarmer;
     }
     if (!matchedFarmer && activeFarmers.length > 0) {
       matchedFarmer = activeFarmers[0];
     }
-
+    if (!matchedFarmer && allFarmers.length > 0) {
+      matchedFarmer = allFarmers[0];
+    }
     if (!matchedFarmer) {
-      errors.push(`पंक्ति ${i + 1}: कोई पंजीकृत किसान नहीं मिला। कृपया पहले किसान जोड़ें या चुनें।`);
-      continue;
+      const newCode = cleanedRowCode || String(101 + i);
+      const newName = cleanedRowName || `किसान ${newCode}`;
+      const newFarmer: Farmer = {
+        id: `farmer_auto_${Date.now()}_${i}`,
+        code: newCode,
+        name: newName,
+        mobile: '',
+        village: '',
+        defaultMilkType: classifyMilkType(fat),
+        shiftSchedule: 'both',
+        openingBalance: 0,
+        notes: 'फोटो पर्ची से स्वतः जोड़ा गया किसान',
+        active: true,
+        createdAt: new Date().toISOString(),
+      };
+      allFarmers.push(newFarmer);
+      activeFarmers.push(newFarmer);
+      autoCreatedFarmers.push(newFarmer);
+      matchedFarmer = newFarmer;
     }
 
+    carryForwardFarmer = matchedFarmer;
+
     const milkType = classifyMilkType(fat);
-    const chart = rateCharts[milkType];
-    const lookup = lookupRateFromChart(chart, fat, snf);
+    const chart = rateCharts[milkType] || rateCharts.cow || rateCharts.buffalo;
+    const exactLookup = lookupRateFromChart(rateCharts[milkType], fat, snf);
 
-    const rate =
-      lookup.found && lookup.rate !== null
-        ? lookup.rate
-        : row.rate && Number.isFinite(row.rate) && row.rate > 0
-        ? round2(row.rate)
-        : null;
-
-    if (rate === null) {
-      errors.push(
-        `पंक्ति ${i + 1} (${matchedFarmer.code} - ${matchedFarmer.name}): FAT ${fat} / SNF ${snf} का रेट चार्ट में रेट नहीं मिला।`
-      );
-      continue;
+    let rate: number | null = null;
+    if (exactLookup.found && exactLookup.rate !== null) {
+      rate = exactLookup.rate;
+    } else if (row.rate && Number.isFinite(Number(row.rate)) && Number(row.rate) > 0) {
+      rate = round2(Number(row.rate));
+    } else {
+      const nearest = lookupNearestRateFromChart(chart, fat, snf);
+      if (nearest !== null && nearest > 0) {
+        rate = nearest;
+      } else {
+        // Standard dairy fallback rate so photo auto-entry works even before rate chart import
+        rate =
+          milkType === 'buffalo'
+            ? round2(Math.max(25, fat * 7.5 + (snf - 8.5) * 2.0))
+            : round2(Math.max(22, fat * 6.5 + (snf - 8.5) * 1.8));
+      }
     }
 
     // Whole-integer truncation for farmer milk purchase: 253.85 -> 253
@@ -2176,11 +3218,11 @@ export function buildCollectionEntriesFromScannedSlip(
     const now = new Date();
     const timeStr = now.toTimeString().slice(0, 8);
 
-    savedEntries.push({
+    const candidateEntry: MilkCollectionEntry = {
       id: `col_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
-      date,
+      date: entryDate,
       time: timeStr,
-      shift,
+      shift: entryShift,
       farmerId: matchedFarmer.id,
       farmerName: matchedFarmer.name,
       farmerCode: matchedFarmer.code,
@@ -2192,14 +3234,60 @@ export function buildCollectionEntriesFromScannedSlip(
       totalAmount,
       deduction: 0,
       netPayable: totalAmount,
-      notes: 'फोटो/कैमरा से ऑटो-सेव',
+      notes: 'फोटो/कैमरा से प्रिव्यू के बाद सेव',
       createdAt: now.toISOString(),
-    });
+    };
+
+    const animalHi = milkType === 'cow' ? 'गाय' : 'भैंस';
+    const animalEn = milkType === 'cow' ? 'Cow' : 'Buffalo';
+    const existingCheck = canSaveFarmerShiftMilkEntry(existingCollections, candidateEntry);
+    const batchCheck = canSaveFarmerShiftMilkEntry(savedEntries, candidateEntry);
+
+    if (!existingCheck.allowed) {
+      skippedDuplicates.push(candidateEntry);
+      errors.push(
+        `${matchedFarmer.code}-${matchedFarmer.name} (${entryDate} ${
+          entryShift === 'morning' ? 'सुबह' : 'शाम'
+        }): ${animalHi} दूध की एंट्री पहले से मौजूद है — यह एंट्री सेव नहीं होगी।`
+      );
+      previewItems.push({
+        entry: candidateEntry,
+        isDuplicate: true,
+        duplicateSource: 'existing',
+        statusHi: `पहले से मौजूद (${animalHi}) — सेव नहीं होगी`,
+        statusEn: `Already Exists (${animalEn}) — Will Not Save`,
+      });
+    } else if (!batchCheck.allowed) {
+      skippedDuplicates.push(candidateEntry);
+      errors.push(
+        `${matchedFarmer.code}-${matchedFarmer.name} (${entryDate} ${
+          entryShift === 'morning' ? 'सुबह' : 'शाम'
+        }): फोटो में ${animalHi} दूध की एंट्री दोबारा आई है — यह एंट्री सेव नहीं होगी।`
+      );
+      previewItems.push({
+        entry: candidateEntry,
+        isDuplicate: true,
+        duplicateSource: 'batch',
+        statusHi: `फोटो में दोबारा (${animalHi}) — सेव नहीं होगी`,
+        statusEn: `Duplicate in Photo (${animalEn}) — Will Not Save`,
+      });
+    } else {
+      savedEntries.push(candidateEntry);
+      previewItems.push({
+        entry: candidateEntry,
+        isDuplicate: false,
+        statusHi: `सेव के लिए तैयार (${animalHi})`,
+        statusEn: `Ready to Save (${animalEn})`,
+      });
+    }
   }
 
   return {
     entries: savedEntries,
     savedEntries,
+    previewItems,
+    skippedDuplicates,
+    autoCreatedFarmers,
     warningsHi: errors,
     errors,
   };

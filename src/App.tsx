@@ -25,8 +25,10 @@ import {
   TenDayBill,
   WholesaleSaleEntry,
 } from './types/dairy';
-import { lookupRateFromChart, round2 } from './utils/dairyCalculations';
+import { canSaveFarmerShiftMilkEntry, lookupRateFromChart, round2 } from './utils/dairyCalculations';
 import {
+  getCurrentShiftByHour,
+  getTodayDateString,
   loadDairyState,
   loadStateFromIndexedDB,
   saveDairyState,
@@ -58,7 +60,13 @@ export default function App() {
   const [rateSubTab, setRateSubTab] = useState<'ratechart' | 'expenses'>('ratechart');
   const [reportSubTab, setReportSubTab] = useState<'reports' | 'backup' | 'settings'>('reports');
 
-  // Recover from IndexedDB if LocalStorage was empty
+  // Track whether the user manually changed date or shift during the current clock window
+  const manualDateOverrideRef = React.useRef<boolean>(false);
+  const manualShiftOverrideRef = React.useRef<boolean>(false);
+  const lastObservedTodayRef = React.useRef<string>(getTodayDateString());
+  const lastObservedAutoShiftRef = React.useRef<ShiftType>(getCurrentShiftByHour());
+
+  // Recover from IndexedDB if LocalStorage was empty, always keeping today's date & current shift
   useEffect(() => {
     let mounted = true;
     loadStateFromIndexedDB().then((idbState) => {
@@ -69,13 +77,67 @@ export default function App() {
           prev.collections.length === 0 &&
           (idbState.farmers.length > 0 || idbState.collections.length > 0)
         ) {
-          return idbState;
+          return {
+            ...idbState,
+            selectedDate: getTodayDateString(),
+            selectedShift: getCurrentShiftByHour(),
+          };
         }
         return prev;
       });
     });
     return () => {
       mounted = false;
+    };
+  }, []);
+
+  // Automatically sync Today's Date and Current Shift (Before 12:00 PM = Morning, 12:00 PM onwards = Evening)
+  // on app open, tab focus/resume, and clock rollover
+  useEffect(() => {
+    const syncDateAndShiftWithClock = () => {
+      const nowToday = getTodayDateString();
+      const nowShift = getCurrentShiftByHour();
+
+      const dateRolledOver = nowToday !== lastObservedTodayRef.current;
+      const shiftRolledOver = nowShift !== lastObservedAutoShiftRef.current;
+
+      if (dateRolledOver) {
+        lastObservedTodayRef.current = nowToday;
+        manualDateOverrideRef.current = false;
+      }
+      if (shiftRolledOver) {
+        lastObservedAutoShiftRef.current = nowShift;
+        manualShiftOverrideRef.current = false;
+      }
+
+      setState((prev) => {
+        const nextDate = !manualDateOverrideRef.current ? nowToday : prev.selectedDate;
+        const nextShift = !manualShiftOverrideRef.current ? nowShift : prev.selectedShift;
+        if (prev.selectedDate === nextDate && prev.selectedShift === nextShift) {
+          return prev;
+        }
+        return {
+          ...prev,
+          selectedDate: nextDate,
+          selectedShift: nextShift,
+        };
+      });
+    };
+
+    syncDateAndShiftWithClock();
+    const intervalId = window.setInterval(syncDateAndShiftWithClock, 20000);
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        syncDateAndShiftWithClock();
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
     };
   }, []);
 
@@ -126,10 +188,12 @@ export default function App() {
 
   // --- State Updaters ---
   const handleChangeDate = (date: string) => {
+    manualDateOverrideRef.current = date !== getTodayDateString();
     setState((prev) => ({ ...prev, selectedDate: date }));
   };
 
   const handleChangeShift = (shift: ShiftType) => {
+    manualShiftOverrideRef.current = shift !== getCurrentShiftByHour();
     setState((prev) => ({ ...prev, selectedShift: shift }));
   };
 
@@ -141,12 +205,22 @@ export default function App() {
   };
 
   const handleSaveCollection = (entry: MilkCollectionEntry, isEdit: boolean) => {
-    setState((prev) => ({
-      ...prev,
-      collections: isEdit
-        ? prev.collections.map((c) => (c.id === entry.id ? entry : c))
-        : [...prev.collections, entry],
-    }));
+    setState((prev) => {
+      const check = canSaveFarmerShiftMilkEntry(
+        prev.collections,
+        entry,
+        isEdit ? entry.id : undefined
+      );
+      if (!check.allowed) {
+        return prev;
+      }
+      return {
+        ...prev,
+        collections: isEdit
+          ? prev.collections.map((c) => (c.id === entry.id ? entry : c))
+          : [...prev.collections, entry],
+      };
+    });
   };
 
   const handleDeleteCollection = (id: string) => {
@@ -484,6 +558,7 @@ export default function App() {
             onSaveEntry={handleSaveCollection}
             onDeleteEntry={handleDeleteCollection}
             onToggleFarmerLeave={handleToggleFarmerLeave}
+            onSaveFarmer={handleSaveFarmer}
             onNavigate={handleNavigate}
           />
         )}
@@ -531,7 +606,15 @@ export default function App() {
           <ReportsAndBackupView
             state={state}
             initialSub={reportSubTab}
-            onRestoreState={(newState) => setState(newState)}
+            onRestoreState={(newState) => {
+              manualDateOverrideRef.current = false;
+              manualShiftOverrideRef.current = false;
+              setState({
+                ...newState,
+                selectedDate: getTodayDateString(),
+                selectedShift: getCurrentShiftByHour(),
+              });
+            }}
             onUpdateSettings={handleUpdateSettings}
           />
         )}

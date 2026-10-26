@@ -105,6 +105,8 @@ export interface AdvancePaymentEntry {
   paymentMethod: PaymentMethod;
   notes: string;
   createdAt: string;
+  billingYearMonth?: string; // YYYY-MM (10-day period month this payment/advance is for)
+  billingCycle?: 1 | 2 | 3; // 1 = 1 से 10 तारीख, 2 = 11 से 20 तारीख, 3 = 21 से महीने के अंत
 }
 
 export interface CattleFeedEntry {
@@ -158,6 +160,10 @@ export interface TenDayBill {
   paymentsInPeriod: number;
   previousBalance: number;
   netPayable: number;
+  billPayableBeforePayment?: number;
+  previousCycleLabelHi?: string;
+  previousBillPayableBeforePayment?: number;
+  previousBillPaidAmount?: number;
   snapshotHash: string; // used to detect if underlying entries changed after bill generation
   createdAt: string;
 }

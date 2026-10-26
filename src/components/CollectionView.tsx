@@ -5,6 +5,7 @@ import {
   Camera,
   CheckCircle2,
   Edit2,
+  Image as ImageIcon,
   Keyboard,
   Loader2,
   MessageSquare,
@@ -27,16 +28,20 @@ import {
   buildCollectionEntriesFromScannedSlip,
   calculateCollectionSummary,
   calculateShiftAttendance,
+  canSaveFarmerShiftMilkEntry,
   classifyMilkType,
   formatAutoDecimalFatSnf,
   formatCurrency,
   formatNumber,
   formatSmartMilkQuantity,
   formatWholeCurrency,
+  isFarmerScheduledForShift,
   lookupRateFromChart,
+  normalizeFarmerShiftSchedule,
   parseMilkSlipTextToRows,
   round2,
   round3,
+  ScannedSlipPreviewItem,
   ScannedSlipRawRow,
   truncatePurchaseAmount,
 } from '../utils/dairyCalculations';
@@ -49,7 +54,58 @@ interface CollectionViewProps {
   onSaveEntry: (entry: MilkCollectionEntry, isEdit: boolean) => void;
   onDeleteEntry: (id: string) => void;
   onToggleFarmerLeave: (date: string, shift: ShiftType, farmerId: string, reason?: string) => void;
+  onSaveFarmer?: (farmer: Farmer, isEdit: boolean) => void;
   onNavigate: (tab: string) => void;
+}
+
+const CLOUD_API_FALLBACK_URL =
+  'https://ais-pre-e3mxmzlp33iv72t4v7ccb2-270490902491.asia-east1.run.app/api/scan-milk-slip';
+
+async function compressImageFileToDataUrl(
+  file: File,
+  maxDimension = 1280,
+  quality = 0.84
+): Promise<{ dataUrl: string; mimeType: string }> {
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('File read error'));
+    reader.readAsDataURL(file);
+  });
+
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = (err) => reject(err);
+      image.src = rawDataUrl;
+    });
+
+    const width = img.naturalWidth || img.width || 800;
+    const height = img.naturalHeight || img.height || 600;
+    const scale = Math.min(1, maxDimension / Math.max(width, height));
+    const targetW = Math.max(1, Math.round(width * scale));
+    const targetH = Math.max(1, Math.round(height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return { dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' };
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, targetW, targetH);
+    ctx.drawImage(img, 0, 0, targetW, targetH);
+    const compressed = canvas.toDataURL('image/jpeg', quality);
+    if (compressed && compressed.startsWith('data:image/')) {
+      return { dataUrl: compressed, mimeType: 'image/jpeg' };
+    }
+  } catch {
+    // Fallback to rawDataUrl if canvas fails (e.g. non-standard image in test)
+  }
+
+  return { dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' };
 }
 
 export const CollectionView: React.FC<CollectionViewProps> = ({
@@ -59,6 +115,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
   onSaveEntry,
   onDeleteEntry,
   onToggleFarmerLeave,
+  onSaveFarmer,
   onNavigate,
 }) => {
   const lang = state.language;
@@ -118,24 +175,45 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     source: 'manual' | 'camera';
   } | null>(null);
 
-  // Camera / Photo Upload Auto-Entry state
+  // Camera / Gallery Photo Upload & Preview state
   const [showCameraModal, setShowCameraModal] = useState<boolean>(false);
   const [isScanningSlip, setIsScanningSlip] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraPreviewUrl, setCameraPreviewUrl] = useState<string | null>(null);
   const [slipManualText, setSlipManualText] = useState<string>('');
   const [isLiveCameraActive, setIsLiveCameraActive] = useState<boolean>(false);
+  // Quick 1-tap / multi-row photo assist fields when a photo is loaded
+  const [photoQuickFarmerId, setPhotoQuickFarmerId] = useState<string>('');
+  const [photoQuickDate, setPhotoQuickDate] = useState<string>(date);
+  const [photoQuickShift, setPhotoQuickShift] = useState<ShiftType>(shift);
+  const [photoQuickLiters, setPhotoQuickLiters] = useState<string>('');
+  const [photoQuickFat, setPhotoQuickFat] = useState<string>('');
+  const [photoQuickSnf, setPhotoQuickSnf] = useState<string>('8.5');
+  const [photoStagedRows, setPhotoStagedRows] = useState<ScannedSlipRawRow[]>([]);
+  // Photo Entry Preview Items (shown BEFORE saving so user can inspect Date, Code, Name, FAT, SNF, Liters, Rate, Amount & Duplicates)
+  const [photoPreviewItems, setPhotoPreviewItems] = useState<ScannedSlipPreviewItem[]>([]);
+  const [photoPendingAutoFarmers, setPhotoPendingAutoFarmers] = useState<Farmer[]>([]);
+
+  React.useEffect(() => {
+    setPhotoQuickDate(date);
+  }, [date]);
+
+  React.useEffect(() => {
+    setPhotoQuickShift(shift);
+  }, [shift]);
 
   const fatInputRef = useRef<HTMLInputElement | null>(null);
   const snfInputRef = useRef<HTMLInputElement | null>(null);
   const litersInputRef = useRef<HTMLInputElement | null>(null);
   const saveBtnRef = useRef<HTMLButtonElement | null>(null);
   const formCardRef = useRef<HTMLDivElement | null>(null);
+  // Separate refs for Camera Capture (with capture="environment") and Gallery Picker (without capture)
   const cameraFileInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryFileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
-  // Shift attendance calculation
+  // Shift attendance calculation (normalizes 'both' / 'सुबह और शाम' so both-shift farmers are always in pendingFarmers)
   const attendance = calculateShiftAttendance(
     state.farmers,
     state.collections,
@@ -144,14 +222,12 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     shift
   );
 
-  // Active farmers eligible for this shift shown first in dropdown
-  const activeFarmers = state.farmers.filter((f) => f.active);
-  const scheduledForShiftFarmers = activeFarmers.filter(
-    (f) => f.shiftSchedule === 'both' || f.shiftSchedule === shift
+  // Active farmers eligible for this shift shown first in dropdown (both-shift farmers included in BOTH shifts)
+  const activeFarmers = state.farmers.filter((f) => f.active !== false);
+  const scheduledForShiftFarmers = activeFarmers.filter((f) =>
+    isFarmerScheduledForShift(f, shift)
   );
-  const otherShiftFarmers = activeFarmers.filter(
-    (f) => f.shiftSchedule !== 'both' && f.shiftSchedule !== shift
-  );
+  const otherShiftFarmers = activeFarmers.filter((f) => !isFarmerScheduledForShift(f, shift));
 
   const selectedFarmerObj = state.farmers.find((f) => f.id === farmerId) || null;
 
@@ -326,8 +402,8 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setCameraError(
           lang === 'hi'
-            ? 'इस ब्राउज़र में लाइव कैमरा उपलब्ध नहीं है। कृपया नीचे से फोटो अपलोड करें।'
-            : 'Live camera is not supported here. Please upload a photo below.'
+            ? 'इस ब्राउज़र में लाइव कैमरा उपलब्ध नहीं है। कृपया "कैमरा से फोटो खींचें" या "गैलरी से फोटो चुनें" बटन दबाएँ।'
+            : 'Live camera is not supported here. Please use Camera or Gallery button.'
         );
         return;
       }
@@ -346,14 +422,14 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     } catch {
       setCameraError(
         lang === 'hi'
-          ? 'कैमरा अनुमति नहीं मिली। कृपया "फोटो चुनें / अपलोड करें" बटन का उपयोग करें।'
-          : 'Camera permission denied. Please use the Upload Photo button.'
+          ? 'कैमरा अनुमति नहीं मिली। कृपया "कैमरा से फोटो खींचें" या "गैलरी से फोटो चुनें" बटन का उपयोग करें।'
+          : 'Camera permission denied. Please use the Take Photo or Gallery button.'
       );
     }
   };
 
-  // Auto-save extracted rows from slip photo or slip text
-  const processAndAutoSaveScannedRows = (
+  // Stage extracted rows into Photo Preview Table BEFORE saving (shows Date, Farmer Code, Name, FAT, SNF, Liters, Rate, Amount, and Duplicate status)
+  const stageScannedRowsForPreview = (
     rawRows: ScannedSlipRawRow[],
     fallbackFarmerId?: string
   ): boolean => {
@@ -363,66 +439,145 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       state.rateCharts,
       date,
       shift,
-      fallbackFarmerId || farmerId || undefined
+      fallbackFarmerId || photoQuickFarmerId || farmerId || undefined,
+      state.collections
     );
-    if (built.entries.length === 0) {
+    if (built.previewItems.length === 0) {
       setCameraError(
         built.warningsHi[0] ||
           (lang === 'hi'
-            ? 'फोटो में दूध एंट्री के नंबर (लीटर, FAT, SNF) स्पष्ट नहीं मिले। कृपया साफ फोटो लें या नीचे पर्ची के नंबर लिखें।'
-            : 'Could not detect valid milk entry numbers from photo.')
+            ? 'फोटो लोड हो गया है! फोटो में हस्तलिखित नंबर अस्पष्ट होने के कारण नीचे फोटो देखकर मात्रा (लीटर) और FAT भरकर प्रिव्यू देखें।'
+            : 'Photo loaded! Please confirm Liters and FAT below to preview and save.')
       );
       return false;
     }
 
-    built.entries.forEach((entry) => {
+    setPhotoPreviewItems(built.previewItems);
+    setPhotoPendingAutoFarmers(built.autoCreatedFarmers || []);
+    if (built.skippedDuplicates.length > 0 && built.entries.length === 0) {
+      setCameraError(
+        lang === 'hi'
+          ? 'प्रिव्यू तैयार है: फोटो की सभी एंट्रियाँ (उसी तारीख, शिफ्ट और पशु प्रकार — गाय/भैंस) पहले से मौजूद हैं, इसलिए दोबारा सेव नहीं होंगी।'
+          : 'Preview ready: All entries in the photo already exist for the same farmer, date, shift & animal type.'
+      );
+    } else if (built.skippedDuplicates.length > 0) {
+      setCameraError(
+        lang === 'hi'
+          ? `नोट: ${built.skippedDuplicates.length} एंट्री पहले से उसी तारीख/शिफ्ट/पशु (गाय/भैंस) में मौजूद होने के कारण सेव नहीं होगी। बाकी ${built.entries.length} एंट्री नीचे सेव बटन दबाकर सेव करें।`
+          : `Note: ${built.skippedDuplicates.length} duplicate entry will be skipped. Click Save below to save the remaining ${built.entries.length} entries.`
+      );
+    } else {
+      setCameraError(null);
+    }
+    return true;
+  };
+
+  // Confirm and save non-duplicate entries from Photo Preview Table
+  const handleConfirmSavePhotoPreview = () => {
+    const savableEntries = photoPreviewItems
+      .filter((item) => !item.isDuplicate)
+      .map((item) => item.entry);
+
+    if (savableEntries.length === 0) {
+      setCameraError(
+        lang === 'hi'
+          ? 'सेव करने के लिए कोई नई एंट्री नहीं है (सभी एंट्रियाँ पहले से उसी शिफ्ट और पशु प्रकार में मौजूद हैं)।'
+          : 'No new entries to save (all entries already exist for the same shift and animal type).'
+      );
+      return;
+    }
+
+    if (photoPendingAutoFarmers.length > 0 && onSaveFarmer) {
+      const usedFarmerIds = new Set(savableEntries.map((e) => e.farmerId));
+      photoPendingAutoFarmers.forEach((nf) => {
+        if (usedFarmerIds.has(nf.id)) {
+          onSaveFarmer(nf, false);
+        }
+      });
+    }
+
+    savableEntries.forEach((entry) => {
       onSaveEntry(entry, false);
     });
+
+    // Automatically adjust Saved Entries table filters if entries span multiple dates or shifts
+    const uniqueDates = Array.from(new Set(savableEntries.map((e) => e.date)));
+    const uniqueShifts = Array.from(new Set(savableEntries.map((e) => e.shift)));
+    if (uniqueDates.length > 1) {
+      setListDateFilter('');
+    } else if (uniqueDates.length === 1 && uniqueDates[0] !== date) {
+      setListDateFilter(uniqueDates[0]);
+    }
+    if (uniqueShifts.length > 1 || (uniqueShifts.length === 1 && uniqueShifts[0] !== shift)) {
+      setListShiftFilter('all');
+    }
+
     setLastSavedNotice({
-      entries: built.entries,
+      entries: savableEntries,
       source: 'camera',
     });
     stopLiveCamera();
     setShowCameraModal(false);
     setSlipManualText('');
-    return true;
+    setPhotoQuickLiters('');
+    setPhotoQuickFat('');
+    setPhotoStagedRows([]);
+    setPhotoPreviewItems([]);
+    setPhotoPendingAutoFarmers([]);
   };
 
-  // Handle photo file (from camera capture or file upload)
+  // Handle photo file (from camera capture or gallery selection)
   const handleSlipPhotoFile = async (file: File) => {
     setCameraError(null);
+    setShowCameraModal(true);
     setIsScanningSlip(true);
+    if (!photoQuickFarmerId) {
+      setPhotoQuickFarmerId(farmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id || '');
+    }
 
     try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('File read error'));
-        reader.readAsDataURL(file);
-      });
+      const { dataUrl, mimeType } = await compressImageFileToDataUrl(file, 1280, 0.84);
       setCameraPreviewUrl(dataUrl);
 
       let extractedRows: ScannedSlipRawRow[] = [];
 
       // 1. Call Server-Side Gemini Vision OCR endpoint (/api/scan-milk-slip)
-      try {
-        const resp = await fetch('/api/scan-milk-slip', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: dataUrl,
-            mimeType: file.type || 'image/jpeg',
-            farmers: state.farmers.map((f) => ({ code: f.code, name: f.name })),
-          }),
-        });
-        if (resp.ok) {
-          const json = await resp.json();
-          if (Array.isArray(json?.entries) && json.entries.length > 0) {
-            extractedRows = json.entries;
+      // Also fallback to Cloud Run endpoint if running inside standalone Android APK (https://localhost)
+      const endpointsToTry = ['/api/scan-milk-slip'];
+      if (
+        typeof window !== 'undefined' &&
+        (window.location.hostname === 'localhost' || window.location.protocol === 'file:' || window.location.protocol === 'capacitor:')
+      ) {
+        endpointsToTry.push(CLOUD_API_FALLBACK_URL);
+      }
+
+      const payload = JSON.stringify({
+        imageBase64: dataUrl,
+        mimeType,
+        farmers: state.farmers.map((f) => ({ code: f.code, name: f.name })),
+        defaultDate: date,
+        defaultShift: shift,
+      });
+
+      for (const endpoint of endpointsToTry) {
+        if (extractedRows.length > 0) break;
+        try {
+          const resp = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+          });
+          if (resp.ok) {
+            const json = await resp.json();
+            if (Array.isArray(json?.entries) && json.entries.length > 0) {
+              extractedRows = json.entries;
+            } else if (typeof json?.rawTextSummary === 'string' && json.rawTextSummary.trim()) {
+              extractedRows = parseMilkSlipTextToRows(json.rawTextSummary, date, shift);
+            }
           }
+        } catch {
+          // Try next endpoint or local fallback
         }
-      } catch {
-        // Fallback if offline or server route unavailable
       }
 
       // 2. Fallback: Browser native TextDetector API if available
@@ -439,7 +594,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
           const detected = await detector.detect(img);
           const rawText = detected.map((d: { rawValue?: string }) => d.rawValue || '').join('\n');
           if (rawText.trim()) {
-            extractedRows = parseMilkSlipTextToRows(rawText);
+            extractedRows = parseMilkSlipTextToRows(rawText, date, shift);
           }
         } catch {
           // ignore
@@ -448,36 +603,41 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
 
       // 3. Fallback: If user typed slip text or if filename encodes slip values (e.g. "101_6.55_4.5_8.5.jpg")
       if (extractedRows.length === 0 && slipManualText.trim()) {
-        extractedRows = parseMilkSlipTextToRows(slipManualText);
+        extractedRows = parseMilkSlipTextToRows(slipManualText, date, shift);
       }
       if (extractedRows.length === 0 && file.name) {
         const nameClean = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ');
-        const fromName = parseMilkSlipTextToRows(nameClean);
+        const fromName = parseMilkSlipTextToRows(nameClean, date, shift);
         if (fromName.length > 0) {
           extractedRows = fromName;
         }
       }
 
-      // 4. Fallback: If current form has partial/valid numbers or farmer selected, use them
-      if (extractedRows.length === 0 && hasValidLiters && hasValidFat && hasValidSnf) {
+      // 4. Fallback: If current form has valid numbers entered before clicking photo, use them
+      if (extractedRows.length === 0 && hasValidLiters && hasValidFat) {
         extractedRows = [
           {
             farmerCode: selectedFarmerObj?.code || state.farmers[0]?.code,
             farmerName: selectedFarmerObj?.name || state.farmers[0]?.name,
+            date,
+            shift,
             liters: litersNum,
             fat: fatNum,
-            snf: snfNum,
+            snf: hasValidSnf ? snfNum : 8.5,
             rate: liveRate ?? undefined,
           },
         ];
       }
 
-      processAndAutoSaveScannedRows(extractedRows, farmerId || state.farmers[0]?.id);
+      stageScannedRowsForPreview(
+        extractedRows,
+        farmerId || photoQuickFarmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id
+      );
     } catch {
       setCameraError(
         lang === 'hi'
-          ? 'फोटो स्कैन करने में समस्या आई। कृपया दोबारा प्रयास करें।'
-          : 'Error scanning photo. Please try again.'
+          ? 'फोटो स्कैन करने में समस्या आई। कृपया नीचे फोटो देखकर मात्रा व FAT भरें।'
+          : 'Error scanning photo. Please enter Liters and FAT below.'
       );
     } finally {
       setIsScanningSlip(false);
@@ -567,21 +727,19 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       createdAt: existingEntry ? existingEntry.createdAt : now.toISOString(),
     };
 
-    // Duplicate entry protection when adding a new entry
-    if (!editingId) {
-      const existingSameShift = state.collections.find(
-        (c) =>
-          c.date === date &&
-          c.shift === shift &&
-          c.farmerId === selectedFarmer.id &&
-          Math.abs(c.liters - entry.liters) < 0.001 &&
-          Math.abs(c.fat - entry.fat) < 0.01 &&
-          Math.abs(c.snf - entry.snf) < 0.01
+    // Enforce max 2 milk entries per farmer per shift: 1 Cow ('cow') and 1 Buffalo ('buffalo').
+    // Strictly block if the same animal type already exists in this date + shift.
+    const shiftValidation = canSaveFarmerShiftMilkEntry(
+      state.collections,
+      entry,
+      editingId || undefined
+    );
+    if (!shiftValidation.allowed) {
+      setFormError(
+        (lang === 'hi' ? shiftValidation.reasonHi : shiftValidation.reasonEn) ||
+          'किसी भी किसान की एक शिफ्ट में केवल दो दूध एंट्री ही हो सकती हैं (एक भैंस की और एक गाय की)।'
       );
-      if (existingSameShift) {
-        setPendingDuplicateEntry(entry);
-        return;
-      }
+      return;
     }
 
     commitSaveEntry(entry, Boolean(editingId), liveRawTotalAmount ?? undefined);
@@ -662,9 +820,10 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
   );
 
   const scheduleBadgeText = (sched: Farmer['shiftSchedule']) => {
-    if (sched === 'morning') return lang === 'hi' ? 'केवल सुबह' : 'Morning Only';
-    if (sched === 'evening') return lang === 'hi' ? 'केवल शाम' : 'Evening Only';
-    return lang === 'hi' ? 'सुबह और शाम' : 'Morning & Evening';
+    const norm = normalizeFarmerShiftSchedule(sched);
+    if (norm === 'morning') return lang === 'hi' ? 'केवल सुबह' : 'Morning Only';
+    if (norm === 'evening') return lang === 'hi' ? 'केवल शाम' : 'Evening Only';
+    return lang === 'hi' ? 'सुबह और शाम दोनों समय' : 'Morning & Evening';
   };
 
   return (
@@ -1065,18 +1224,23 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 </span>
               </button>
 
-              {/* Camera / Photo Auto-Entry Button */}
+              {/* Camera / Photo Auto-Entry Modal Button */}
               <button
                 type="button"
                 data-testid="camera-slip-btn"
                 onClick={() => {
                   setCameraError(null);
+                  if (!photoQuickFarmerId) {
+                    setPhotoQuickFarmerId(
+                      farmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id || ''
+                    );
+                  }
                   setShowCameraModal(true);
                 }}
                 title={
                   lang === 'hi'
-                    ? 'लिखी हुई दूध पर्ची का फोटो खींचकर या अपलोड करके ऑटोमैटिक सेव करें'
-                    : 'Take or upload a photo of written milk entry to auto-save'
+                    ? 'लिखी हुई दूध पर्ची का कैमरा से फोटो खींचकर या गैलरी से अपलोड करके ऑटोमैटिक सेव करें'
+                    : 'Take a camera photo or pick from gallery to auto-save milk entry'
                 }
                 className="h-10 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1 shrink-0"
               >
@@ -1084,13 +1248,48 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 <span>{lang === 'hi' ? 'कैमरा / फोटो' : 'Camera'}</span>
               </button>
 
-              {/* Hidden direct file input for quick photo upload / camera capture */}
+              {/* Direct Gallery Photo Picker Button (Opens Phone Gallery without Camera forced) */}
+              <button
+                type="button"
+                data-testid="direct-gallery-slip-btn"
+                onClick={() => {
+                  setCameraError(null);
+                  galleryFileInputRef.current?.click();
+                }}
+                title={
+                  lang === 'hi'
+                    ? 'गैलरी से लिखी हुई दूध पर्ची का फोटो चुनें'
+                    : 'Choose milk slip photo from Gallery'
+                }
+                className="h-10 px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1 shrink-0"
+              >
+                <ImageIcon className="w-4 h-4 shrink-0" />
+                <span>{lang === 'hi' ? 'गैलरी से फोटो' : 'Gallery'}</span>
+              </button>
+
+              {/* Hidden file input 1: Direct Camera Capture (capture="environment") */}
               <input
                 ref={cameraFileInputRef}
                 data-testid="camera-file-input"
                 type="file"
                 accept="image/*"
                 capture="environment"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    handleSlipPhotoFile(file);
+                  }
+                  e.target.value = '';
+                }}
+              />
+
+              {/* Hidden file input 2: Phone Gallery / File Picker (NO capture attribute) */}
+              <input
+                ref={galleryFileInputRef}
+                data-testid="gallery-file-input"
+                type="file"
+                accept="image/*"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -1135,7 +1334,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               >
                 <div className="flex items-center gap-1.5 min-w-0">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span className="font-bold truncate">
+                  <span className="font-bold">
                     {lastSavedNotice.source === 'camera'
                       ? lang === 'hi'
                         ? `कैमरा/फोटो से ${lastSavedNotice.entries.length} दूध एंट्री अपने-आप सेव हो गई:`
@@ -1146,10 +1345,11 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                     {lastSavedNotice.entries
                       .map(
                         (en) =>
-                          `${en.farmerCode}-${en.farmerName} (${formatNumber(
-                            en.liters,
-                            3
-                          )}L · कुल ${formatWholeCurrency(en.totalAmount)})`
+                          `${en.farmerCode}-${en.farmerName} [${en.date} ${
+                            en.shift === 'morning' ? 'सुबह' : 'शाम'
+                          }: ${formatNumber(en.liters, 3)}L · कुल ${formatWholeCurrency(
+                            en.totalAmount
+                          )}]`
                       )
                       .join(', ')}
                   </span>
@@ -1274,21 +1474,23 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
           <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
             <button
               type="button"
+              data-testid="attendance-tab-pending"
               onClick={() => setAttendanceTab('pending')}
-              className={`min-h-[34px] px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+              className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[11px] sm:text-xs font-bold transition-colors ${
                 attendanceTab === 'pending'
                   ? 'bg-white text-amber-800 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               {lang === 'hi'
-                ? `बाकी है (${attendance.pendingCount})`
+                ? `अभी दूध आना बाकी है (${attendance.pendingCount})`
                 : `Pending (${attendance.pendingCount})`}
             </button>
             <button
               type="button"
+              data-testid="attendance-tab-present"
               onClick={() => setAttendanceTab('present')}
-              className={`min-h-[34px] px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+              className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[11px] sm:text-xs font-bold transition-colors ${
                 attendanceTab === 'present'
                   ? 'bg-white text-emerald-800 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
@@ -1300,8 +1502,9 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
             </button>
             <button
               type="button"
+              data-testid="attendance-tab-other"
               onClick={() => setAttendanceTab('other')}
-              className={`min-h-[34px] px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+              className={`min-h-[34px] px-1.5 py-1 rounded-lg text-[11px] sm:text-xs font-bold transition-colors ${
                 attendanceTab === 'other'
                   ? 'bg-white text-slate-900 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
@@ -1387,6 +1590,8 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               ) : (
                 filteredPresentFarmers.map((pf) => {
                   const lastEntry = pf.entries[pf.entries.length - 1];
+                  const hasCow = pf.entries.some((e) => e.milkType === 'cow');
+                  const hasBuffalo = pf.entries.some((e) => e.milkType === 'buffalo');
                   return (
                     <div
                       key={pf.farmer.id}
@@ -1395,20 +1600,47 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                       <div className="min-w-0">
                         <p className="text-xs font-bold text-slate-900 truncate">
                           {pf.farmer.code} — {pf.farmer.name}
+                          <span className="ml-1.5 text-[10px] font-semibold text-emerald-800">
+                            ({hasCow && hasBuffalo ? 'गाय + भैंस (2/2)' : hasCow ? 'गाय (1/2)' : 'भैंस (1/2)'})
+                          </span>
                         </p>
                         <p className="text-[11px] text-slate-600 tabular-nums">
                           {formatNumber(pf.totalLiters, 3)} L · F:{lastEntry.fat} · S:{lastEntry.snf} ·{' '}
                           <strong>{formatWholeCurrency(pf.totalAmount)}</strong>
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleEditEntry(lastEntry)}
-                        className="h-7 px-2 bg-white border border-slate-200 text-xs font-semibold text-slate-700 rounded-lg shrink-0 flex items-center gap-1"
-                      >
-                        <Edit2 className="w-3 h-3" />
-                        {lang === 'hi' ? 'एडिट' : 'Edit'}
-                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {(!hasCow || !hasBuffalo) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingId(null);
+                              setFarmerId(pf.farmer.id);
+                              setMilkTypeOverride(hasCow ? 'buffalo' : 'cow');
+                              setFormError(null);
+                              window.scrollTo({ top: 0, behavior: 'smooth' });
+                              setTimeout(() => fatInputRef.current?.focus(), 80);
+                            }}
+                            className="h-7 px-2 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold rounded-lg shrink-0"
+                          >
+                            {hasCow
+                              ? lang === 'hi'
+                                ? '+ भैंस एंट्री'
+                                : '+ Buffalo'
+                              : lang === 'hi'
+                              ? '+ गाय एंट्री'
+                              : '+ Cow'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleEditEntry(lastEntry)}
+                          className="h-7 px-2 bg-white border border-slate-200 text-xs font-semibold text-slate-700 rounded-lg shrink-0 flex items-center gap-1"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                          {lang === 'hi' ? 'एडिट' : 'Edit'}
+                        </button>
+                      </div>
                     </div>
                   );
                 })
@@ -1845,13 +2077,13 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
         </div>
       </div>
 
-      {/* Camera / Photo Upload Auto-Entry Modal */}
+      {/* Camera / Gallery Photo Upload & Preview Modal */}
       {showCameraModal && (
         <div
           data-testid="camera-slip-modal"
-          className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
         >
-          <div className="bg-white rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-xl border border-slate-200 max-h-[92vh] overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-3xl w-full p-4 sm:p-5 space-y-4 shadow-xl border border-slate-200 max-h-[94vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
@@ -1860,13 +2092,13 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 <div>
                   <h3 className="text-sm sm:text-base font-bold text-slate-900">
                     {lang === 'hi'
-                      ? 'कैमरा / फोटो से दूध एंट्री ऑटो-सेव करें'
-                      : 'Camera / Photo Milk Entry Auto-Save'}
+                      ? 'कैमरा / गैलरी फोटो से दूध खरीद प्रिव्यू एवं सेव'
+                      : 'Camera or Gallery Photo Milk Entry Preview & Save'}
                   </h3>
                   <p className="text-[11px] text-slate-500">
                     {lang === 'hi'
-                      ? 'लिखी हुई दूध पर्ची का फोटो खींचें या अपलोड करें — एंट्री अपने-आप सेव हो जाएगी'
-                      : 'Take a photo or upload a written milk slip to automatically extract & save'}
+                      ? 'सेव करने से पहले तारीख, किसान कोड, नाम, फैट, SNF, लीटर, रेट और अमाउंट का प्रिव्यू देखें — फिर सेव बटन दबाकर सेव करें'
+                      : 'Preview Date, Farmer Code, Name, FAT, SNF, Liters, Rate & Amount before clicking Save'}
                   </p>
                 </div>
               </div>
@@ -1882,28 +2114,44 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               </button>
             </div>
 
-            {/* Option 1: Upload Photo or Capture from Camera */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {/* Option 1: Separate Camera Capture, Gallery Picker, and Live Camera Buttons */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <button
                 type="button"
                 data-testid="upload-slip-photo-btn"
                 disabled={isScanningSlip}
                 onClick={() => cameraFileInputRef.current?.click()}
-                className="min-h-[48px] px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs sm:text-sm font-bold rounded-xl flex items-center justify-center gap-2 shadow-xs"
+                className="min-h-[46px] px-3 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-xs"
               >
                 {isScanningSlip ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>{lang === 'hi' ? 'फोटो स्कैन हो रहा है...' : 'Scanning Photo...'}</span>
+                    <span>{lang === 'hi' ? 'स्कैन हो रहा...' : 'Scanning...'}</span>
                   </>
                 ) : (
                   <>
-                    <Upload className="w-4 h-4" />
-                    <span>
-                      {lang === 'hi'
-                        ? 'फोटो खींचें / गैलरी से अपलोड करें'
-                        : 'Take / Upload Slip Photo'}
-                    </span>
+                    <Camera className="w-4 h-4 shrink-0" />
+                    <span>{lang === 'hi' ? 'कैमरा से फोटो खींचें' : 'Take Camera Photo'}</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                data-testid="gallery-slip-photo-btn"
+                disabled={isScanningSlip}
+                onClick={() => galleryFileInputRef.current?.click()}
+                className="min-h-[46px] px-3 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-xs"
+              >
+                {isScanningSlip ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>{lang === 'hi' ? 'स्कैन हो रहा...' : 'Scanning...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <ImageIcon className="w-4 h-4 shrink-0" />
+                    <span>{lang === 'hi' ? 'गैलरी से फोटो चुनें' : 'Pick from Gallery'}</span>
                   </>
                 )}
               </button>
@@ -1914,16 +2162,16 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   data-testid="start-live-camera-btn"
                   disabled={isScanningSlip}
                   onClick={startLiveCamera}
-                  className="min-h-[48px] px-4 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs sm:text-sm font-bold rounded-xl flex items-center justify-center gap-2 shadow-xs"
+                  className="min-h-[46px] px-3 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-xs"
                 >
-                  <Camera className="w-4 h-4" />
+                  <Upload className="w-4 h-4 shrink-0" />
                   <span>{lang === 'hi' ? 'लाइव कैमरा चालू करें' : 'Open Live Camera'}</span>
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={stopLiveCamera}
-                  className="min-h-[48px] px-4 py-3 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs sm:text-sm font-bold rounded-xl flex items-center justify-center gap-2"
+                  className="min-h-[46px] px-3 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"
                 >
                   <X className="w-4 h-4" />
                   <span>{lang === 'hi' ? 'कैमरा बंद करें' : 'Stop Camera'}</span>
@@ -1949,43 +2197,453 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 >
                   <Camera className="w-4 h-4" />
                   {lang === 'hi'
-                    ? 'फोटो क्लिक करें और एंट्री ऑटो-सेव करें'
-                    : 'Capture Photo & Auto-Save Entry'}
+                    ? 'फोटो क्लिक करें और प्रिव्यू देखें'
+                    : 'Capture Photo & Show Preview'}
                 </button>
               </div>
             )}
 
-            {/* Preview of uploaded image */}
-            {cameraPreviewUrl && !isLiveCameraActive && (
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 text-center">
-                <img
-                  src={cameraPreviewUrl}
-                  alt="Milk slip preview"
-                  className="max-h-40 mx-auto rounded-lg object-contain"
-                />
+            {/* ========================================================================== */}
+            {/* REQUIREMENT 1, 2 & 3: PHOTO MILK ENTRY PREVIEW TABLE BEFORE SAVING         */}
+            {/* Shows: तारीख, किसान कोड, नाम, फैट, SNF, लीटर, रेट, अमाउंट (for 1 or N rows)  */}
+            {/* Marks duplicates of same animal in same date+shift as NOT savable!         */}
+            {/* ========================================================================== */}
+            {photoPreviewItems.length > 0 && (
+              <div
+                data-testid="photo-preview-section"
+                className="bg-blue-50/80 border-2 border-blue-600 rounded-2xl p-3.5 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-200 pb-2">
+                  <div>
+                    <h4 className="text-xs sm:text-sm font-extrabold text-blue-950">
+                      {lang === 'hi'
+                        ? `दूध खरीद प्रिव्यू (सेव करने से पहले जाँचें — कुल ${photoPreviewItems.length} एंट्री)`
+                        : `Milk Entry Preview Before Saving (${photoPreviewItems.length} entries)`}
+                    </h4>
+                    <p className="text-[11px] text-blue-800">
+                      {lang === 'hi'
+                        ? 'नियम: एक किसान की एक शिफ्ट में अधिकतम 2 एंट्री (1 गाय + 1 भैंस) हो सकती हैं। पहले से मौजूद पशु एंट्री सेव नहीं होगी।'
+                        : 'Rule: Max 2 entries per farmer per shift (1 Cow + 1 Buffalo). Existing same-animal entries are skipped.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhotoPreviewItems([]);
+                      setPhotoPendingAutoFarmers([]);
+                    }}
+                    className="px-2.5 py-1 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-[11px] font-bold rounded-lg"
+                  >
+                    {lang === 'hi' ? 'प्रिव्यू साफ करें' : 'Clear Preview'}
+                  </button>
+                </div>
+
+                <div className="overflow-x-auto bg-white rounded-xl border border-blue-200">
+                  <table
+                    data-testid="photo-entry-preview-table"
+                    className="w-full text-xs border-collapse tabular-nums"
+                  >
+                    <thead>
+                      <tr className="bg-blue-900 text-white">
+                        <th className="py-2 px-2 text-left font-bold">
+                          {lang === 'hi' ? 'तारीख / शिफ्ट' : 'Date / Shift'}
+                        </th>
+                        <th className="py-2 px-2 text-left font-bold">
+                          {lang === 'hi' ? 'किसान कोड' : 'Code'}
+                        </th>
+                        <th className="py-2 px-2 text-left font-bold">
+                          {lang === 'hi' ? 'नाम (पशु)' : 'Farmer Name'}
+                        </th>
+                        <th className="py-2 px-2 text-right font-bold">
+                          {lang === 'hi' ? 'फैट (FAT)' : 'FAT'}
+                        </th>
+                        <th className="py-2 px-2 text-right font-bold">SNF</th>
+                        <th className="py-2 px-2 text-right font-bold">
+                          {lang === 'hi' ? 'लीटर' : 'Liters'}
+                        </th>
+                        <th className="py-2 px-2 text-right font-bold">
+                          {lang === 'hi' ? 'रेट' : 'Rate'}
+                        </th>
+                        <th className="py-2 px-2 text-right font-bold">
+                          {lang === 'hi' ? 'अमाउंट' : 'Amount'}
+                        </th>
+                        <th className="py-2 px-2 text-center font-bold">
+                          {lang === 'hi' ? 'स्थिति' : 'Status'}
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {photoPreviewItems.map((item, idx) => {
+                        const en = item.entry;
+                        const animalLabel =
+                          en.milkType === 'cow'
+                            ? lang === 'hi'
+                              ? 'गाय (Cow)'
+                              : 'Cow'
+                            : lang === 'hi'
+                            ? 'भैंस (Buffalo)'
+                            : 'Buffalo';
+                        return (
+                          <tr
+                            key={en.id || idx}
+                            data-testid={`photo-preview-row-${idx}`}
+                            className={
+                              item.isDuplicate
+                                ? 'bg-red-50/80 text-slate-500 line-through'
+                                : 'hover:bg-blue-50/40 text-slate-900'
+                            }
+                          >
+                            <td className="py-2 px-2 font-semibold whitespace-nowrap">
+                              {en.date}{' '}
+                              <span className="inline-block px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 text-[10px] font-bold">
+                                {en.shift === 'morning'
+                                  ? lang === 'hi'
+                                    ? 'सुबह'
+                                    : 'Morning'
+                                  : lang === 'hi'
+                                  ? 'शाम'
+                                  : 'Evening'}
+                              </span>
+                            </td>
+                            <td className="py-2 px-2 font-bold text-blue-900">
+                              {en.farmerCode}
+                            </td>
+                            <td className="py-2 px-2 font-bold">
+                              {en.farmerName}{' '}
+                              <span
+                                className={`inline-block ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  en.milkType === 'cow'
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : 'bg-indigo-100 text-indigo-800'
+                                }`}
+                              >
+                                {animalLabel}
+                              </span>
+                            </td>
+                            <td className="py-2 px-2 text-right font-bold">
+                              {formatNumber(en.fat, 2)}
+                            </td>
+                            <td className="py-2 px-2 text-right font-bold">
+                              {formatNumber(en.snf, 2)}
+                            </td>
+                            <td className="py-2 px-2 text-right font-extrabold text-slate-900">
+                              {formatNumber(en.liters, 3)} L
+                            </td>
+                            <td className="py-2 px-2 text-right font-semibold text-blue-800">
+                              {formatCurrency(en.rate)}
+                            </td>
+                            <td className="py-2 px-2 text-right font-extrabold text-emerald-700">
+                              {formatWholeCurrency(en.totalAmount)}
+                            </td>
+                            <td className="py-2 px-2 text-center whitespace-nowrap">
+                              {item.isDuplicate ? (
+                                <span
+                                  data-testid={`photo-preview-duplicate-badge-${idx}`}
+                                  className="inline-block px-2 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-extrabold no-underline"
+                                >
+                                  {lang === 'hi' ? item.statusHi : item.statusEn}
+                                </span>
+                              ) : (
+                                <span className="inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-extrabold">
+                                  {lang === 'hi' ? item.statusHi : item.statusEn}
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Preview Summary & Primary Confirm Save Button */}
+                {(() => {
+                  const savable = photoPreviewItems.filter((p) => !p.isDuplicate);
+                  const duplicateCount = photoPreviewItems.length - savable.length;
+                  const totalPreviewLiters = round3(
+                    savable.reduce((s, p) => s + p.entry.liters, 0)
+                  );
+                  const totalPreviewAmount = truncatePurchaseAmount(
+                    savable.reduce((s, p) => s + truncatePurchaseAmount(p.entry.totalAmount), 0)
+                  );
+                  return (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1">
+                      <div className="text-xs font-bold text-slate-800 tabular-nums">
+                        {lang === 'hi' ? (
+                          <>
+                            सेव होने योग्य: <span className="text-emerald-700">{savable.length} एंट्री</span>
+                            {duplicateCount > 0 && (
+                              <span className="text-red-600 ml-2">
+                                (पहले से मौजूद/रोकी गई: {duplicateCount})
+                              </span>
+                            )}{' '}
+                            · कुल लीटर: <span className="text-blue-900">{formatNumber(totalPreviewLiters, 3)} L</span> · कुल अमाउंट:{' '}
+                            <span className="text-emerald-800">{formatWholeCurrency(totalPreviewAmount)}</span>
+                          </>
+                        ) : (
+                          <>
+                            Ready to Save: {savable.length} · Skipped Duplicates: {duplicateCount} · Total:{' '}
+                            {formatNumber(totalPreviewLiters, 3)} L ({formatWholeCurrency(totalPreviewAmount)})
+                          </>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        data-testid="confirm-photo-preview-save-btn"
+                        disabled={savable.length === 0}
+                        onClick={handleConfirmSavePhotoPreview}
+                        className="min-h-[44px] px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:text-slate-600 text-white text-xs sm:text-sm font-extrabold rounded-xl shadow-sm flex items-center justify-center gap-2"
+                      >
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span>
+                          {lang === 'hi'
+                            ? `प्रिव्यू कन्फर्म करें और सेव करें (${savable.length} एंट्री)`
+                            : `Confirm Preview & Save (${savable.length})`}
+                        </span>
+                      </button>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
-            {/* Quick Written Slip Text / OCR Fallback Box (Works offline too) */}
+            {/* Preview of uploaded image + 1-Tap / Multi-Entry Quick Staging from Photo (when photo is loaded) */}
+            {cameraPreviewUrl && !isLiveCameraActive && (
+              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3 space-y-2.5">
+                <div className="text-center bg-white border border-slate-200 rounded-lg p-2">
+                  <img
+                    src={cameraPreviewUrl}
+                    alt="Milk slip preview"
+                    className="max-h-44 mx-auto rounded-lg object-contain"
+                  />
+                </div>
+
+                {/* Quick 1-Tap / Multi-Row Entry right below the photo */}
+                <div className="space-y-2">
+                  <p className="text-xs font-bold text-emerald-950">
+                    {lang === 'hi'
+                      ? 'फोटो से एक या अधिक एंट्री का प्रिव्यू बनाएँ (किसान नाम/कोड, तारीख, शिफ्ट, लीटर व FAT):'
+                      : 'Stage 1 or Multiple Entries from Photo for Preview (Farmer, Date, Shift, Liters & FAT):'}
+                  </p>
+
+                  {/* Row A: Farmer + Date + Shift */}
+                  <div className="grid grid-cols-12 gap-1.5">
+                    <div className="col-span-5">
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'किसान (नाम / कोड)' : 'Farmer'}
+                      </label>
+                      <select
+                        data-testid="photo-quick-farmer-select"
+                        value={photoQuickFarmerId}
+                        onChange={(e) => setPhotoQuickFarmerId(e.target.value)}
+                        className="w-full h-9 px-2 text-xs font-semibold bg-white border border-slate-300 rounded-lg"
+                      >
+                        <option value="">{lang === 'hi' ? 'किसान चुनें / ऑटो' : 'Auto'}</option>
+                        {activeFarmers.map((f) => (
+                          <option key={f.id} value={f.id}>
+                            {f.name} ({f.code})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="col-span-4">
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'तारीख' : 'Date'}
+                      </label>
+                      <input
+                        data-testid="photo-quick-date-input"
+                        type="date"
+                        value={photoQuickDate}
+                        onChange={(e) => setPhotoQuickDate(e.target.value)}
+                        className="w-full h-9 px-2 text-xs font-bold bg-white border border-slate-300 rounded-lg tabular-nums"
+                      />
+                    </div>
+                    <div className="col-span-3">
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'शिफ्ट' : 'Shift'}
+                      </label>
+                      <select
+                        data-testid="photo-quick-shift-select"
+                        value={photoQuickShift}
+                        onChange={(e) => setPhotoQuickShift(e.target.value as ShiftType)}
+                        className="w-full h-9 px-2 text-xs font-bold bg-white border border-slate-300 rounded-lg"
+                      >
+                        <option value="morning">{lang === 'hi' ? 'सुबह' : 'Morning'}</option>
+                        <option value="evening">{lang === 'hi' ? 'शाम' : 'Evening'}</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Row B: Liters + FAT + SNF + Add Another Row button */}
+                  <div className="grid grid-cols-12 gap-1.5 items-end">
+                    <div className="col-span-3">
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        {lang === 'hi' ? 'मात्रा (L)*' : 'Liters*'}
+                      </label>
+                      <input
+                        data-testid="photo-quick-liters-input"
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="6.5"
+                        value={photoQuickLiters}
+                        onChange={(e) => setPhotoQuickLiters(e.target.value)}
+                        className="w-full h-9 px-2 text-xs font-bold font-mono bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                    <div className="col-span-3">
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        FAT*
+                      </label>
+                      <input
+                        data-testid="photo-quick-fat-input"
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="4.5"
+                        value={photoQuickFat}
+                        onChange={(e) => setPhotoQuickFat(e.target.value)}
+                        className="w-full h-9 px-2 text-xs font-bold font-mono bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                        SNF
+                      </label>
+                      <input
+                        data-testid="photo-quick-snf-input"
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="8.5"
+                        value={photoQuickSnf}
+                        onChange={(e) => setPhotoQuickSnf(e.target.value)}
+                        className="w-full h-9 px-2 text-xs font-bold font-mono bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                    <div className="col-span-4">
+                      <button
+                        type="button"
+                        data-testid="photo-add-staged-row-btn"
+                        onClick={() => {
+                          const qLiters = Number(photoQuickLiters);
+                          const qFat = Number(photoQuickFat);
+                          const qSnf = Number(photoQuickSnf) > 0 ? Number(photoQuickSnf) : 8.5;
+                          if (
+                            !Number.isFinite(qLiters) ||
+                            qLiters <= 0 ||
+                            !Number.isFinite(qFat) ||
+                            qFat <= 0
+                          ) {
+                            setCameraError(
+                              lang === 'hi'
+                                ? 'कृपया पहले मात्रा (लीटर) और FAT भरें।'
+                                : 'Please enter valid Liters and FAT first.'
+                            );
+                            return;
+                          }
+                          setCameraError(null);
+                          const chosenFarmer =
+                            state.farmers.find((f) => f.id === photoQuickFarmerId) ||
+                            selectedFarmerObj ||
+                            scheduledForShiftFarmers[0] ||
+                            state.farmers[0];
+                          const nextRows = [
+                            ...photoStagedRows,
+                            {
+                              farmerCode: chosenFarmer?.code,
+                              farmerName: chosenFarmer?.name,
+                              date: photoQuickDate || date,
+                              shift: photoQuickShift || shift,
+                              liters: qLiters,
+                              fat: qFat,
+                              snf: qSnf,
+                            },
+                          ];
+                          setPhotoStagedRows(nextRows);
+                          setPhotoQuickLiters('');
+                          setPhotoQuickFat('');
+                          stageScannedRowsForPreview(nextRows, chosenFarmer?.id);
+                        }}
+                        className="w-full h-9 px-2 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold rounded-lg"
+                      >
+                        {lang === 'hi' ? '+ प्रिव्यू में जोड़ें' : '+ Add to Preview'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    data-testid="photo-quick-save-btn"
+                    onClick={() => {
+                      const qLiters = Number(photoQuickLiters);
+                      const qFat = Number(photoQuickFat);
+                      const qSnf = Number(photoQuickSnf) > 0 ? Number(photoQuickSnf) : 8.5;
+                      const hasCurrentInput =
+                        Number.isFinite(qLiters) &&
+                        qLiters > 0 &&
+                        Number.isFinite(qFat) &&
+                        qFat > 0;
+
+                      if (!hasCurrentInput && photoStagedRows.length === 0) {
+                        setCameraError(
+                          lang === 'hi'
+                            ? 'कृपया फोटो देखकर दूध की मात्रा (लीटर) और FAT दर्ज करें।'
+                            : 'Please enter valid Liters and FAT from the photo.'
+                        );
+                        return;
+                      }
+
+                      const chosenFarmer =
+                        state.farmers.find((f) => f.id === photoQuickFarmerId) ||
+                        selectedFarmerObj ||
+                        scheduledForShiftFarmers[0] ||
+                        state.farmers[0];
+
+                      const rowsToPreview: ScannedSlipRawRow[] = [...photoStagedRows];
+                      if (hasCurrentInput) {
+                        rowsToPreview.push({
+                          farmerCode: chosenFarmer?.code,
+                          farmerName: chosenFarmer?.name,
+                          date: photoQuickDate || date,
+                          shift: photoQuickShift || shift,
+                          liters: qLiters,
+                          fat: qFat,
+                          snf: qSnf,
+                        });
+                      }
+
+                      stageScannedRowsForPreview(rowsToPreview, chosenFarmer?.id);
+                    }}
+                    className="w-full min-h-[40px] px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 shadow-xs"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    {lang === 'hi'
+                      ? 'फोटो से प्रिव्यू दिखाएँ (तारीख, कोड, नाम, फैट, SNF, लीटर, रेट, अमाउंट)'
+                      : 'Show Preview from Photo'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Quick Written Slip Text / OCR Fallback Box (Supports 1 or Many Farmers + Multi-Date Morning/Evening) */}
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
               <label
                 htmlFor="camera-slip-text-input"
                 className="block text-xs font-bold text-slate-800"
               >
                 {lang === 'hi'
-                  ? 'या लिखी हुई पर्ची का विवरण यहाँ लिखें/पेस्ट करें (ऑफलाइन तुरंत ऑटो-सेव):'
-                  : 'Or paste/type written slip text (farmer code, liters, FAT, SNF):'}
+                  ? 'या एक/अधिक किसानों व अलग-अलग तारीख (सुबह/शाम) की पर्ची लिखें/पेस्ट करके प्रिव्यू देखें:'
+                  : 'Or paste/type 1 or multiple farmers & multi-date (Morning/Evening) slip text to preview:'}
               </label>
               <p className="text-[11px] text-slate-500">
                 {lang === 'hi'
-                  ? 'उदाहरण: "101 6.85 4.5 8.5" (किसान कोड, लीटर, FAT, SNF) — एक या अधिक लाइनें'
-                  : 'Example: "101 6.85 4.5 8.5" (Farmer Code, Liters, FAT, SNF)'}
+                  ? 'उदाहरण: "रामलाल 6.5 4.5 8.5" या "102 7.2 5.2 8.8" या "21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6"'
+                  : 'Ex: "Ramlal 6.5 4.5 8.5" or "21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6"'}
               </p>
               <textarea
                 id="camera-slip-text-input"
                 data-testid="camera-slip-text-input"
-                rows={2}
-                placeholder="101 6.955 4.5 8.5"
+                rows={3}
+                placeholder={'रामलाल गुर्जर 6.955 4.5 8.5\n102 7.25 5.2 8.8\n21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6'}
                 value={slipManualText}
                 onChange={(e) => setSlipManualText(e.target.value)}
                 className="w-full p-2.5 text-xs font-mono bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
@@ -1995,24 +2653,27 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 data-testid="camera-slip-text-save-btn"
                 onClick={() => {
                   setCameraError(null);
-                  const rows = parseMilkSlipTextToRows(slipManualText);
-                  processAndAutoSaveScannedRows(rows, farmerId || state.farmers[0]?.id);
+                  const rows = parseMilkSlipTextToRows(slipManualText, date, shift);
+                  stageScannedRowsForPreview(
+                    rows,
+                    photoQuickFarmerId || farmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id
+                  );
                 }}
                 className="w-full min-h-[40px] px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1.5"
               >
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                 {lang === 'hi'
-                  ? 'पर्ची से दूध एंट्री अपने-आप सेव करें'
-                  : 'Auto-Save Milk Entry from Slip'}
+                  ? 'पर्ची से प्रिव्यू तैयार करें (तारीख, कोड, नाम, फैट, SNF, लीटर, रेट, अमाउंट देखें)'
+                  : 'Preview Milk Entries from Slip'}
               </button>
             </div>
 
             {cameraError && (
               <div
                 data-testid="camera-slip-error"
-                className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs font-semibold text-red-700 flex items-center gap-2"
+                className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-xs font-semibold text-amber-900 flex items-center gap-2"
               >
-                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
                 <span>{cameraError}</span>
               </div>
             )}

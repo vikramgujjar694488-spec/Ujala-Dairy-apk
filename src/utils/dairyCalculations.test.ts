@@ -20,9 +20,19 @@ import {
   parseMilkSlipTextToRows,
   buildCollectionEntriesFromScannedSlip,
   generateTenDaySaleBillData,
+  normalizeFarmerShiftSchedule,
+  isFarmerScheduledForShift,
+  matchFarmerByNameThenCode,
+  normalizeScannedDate,
+  normalizeScannedShift,
+  canSaveFarmerShiftMilkEntry,
+  getCycleFromDate,
+  getCycleLabelHi,
 } from './dairyCalculations';
 import {
   createInitialEmptyState,
+  getCurrentShiftByHour,
+  getTodayDateString,
   mergeDairyStates,
   validateBackupJson,
 } from './storage';
@@ -924,4 +934,624 @@ test('NEW FEATURE TEST 22: Backup JSON validation & Merge/Replace Restore works 
   assert.equal(merged.farmers.length, 2);
 });
 
+test('NEW FEATURE TEST 23: Automatic Today Date & 12:00 PM Noon Shift Cutoff (Before 12 PM = Morning, 12 PM onwards = Evening)', () => {
+  // 06:30 AM -> morning
+  assert.equal(getCurrentShiftByHour(new Date(2026, 9, 25, 6, 30, 0)), 'morning');
+  // 11:59 AM -> morning
+  assert.equal(getCurrentShiftByHour(new Date(2026, 9, 25, 11, 59, 59)), 'morning');
+  // 12:00 PM (Noon) -> evening
+  assert.equal(getCurrentShiftByHour(new Date(2026, 9, 25, 12, 0, 0)), 'evening');
+  // 13:30 PM -> evening
+  assert.equal(getCurrentShiftByHour(new Date(2026, 9, 25, 13, 30, 0)), 'evening');
+  // 18:45 PM -> evening
+  assert.equal(getCurrentShiftByHour(new Date(2026, 9, 25, 18, 45, 0)), 'evening');
 
+  // Saved state from yesterday (24th) with 'morning' shift must automatically reset to TODAY's date & current shift on load/validate
+  const staleState = createInitialEmptyState();
+  staleState.selectedDate = '2026-10-24';
+  staleState.selectedShift = 'morning';
+  const validated = validateBackupJson(JSON.stringify(staleState));
+  assert.equal(validated.valid, true);
+  assert.equal(validated.state?.selectedDate, getTodayDateString());
+  assert.equal(validated.state?.selectedShift, getCurrentShiftByHour());
+});
+
+test('NEW FEATURE TEST 24: Farmers with Both Shifts (सुबह और शाम दोनों समय) ALWAYS appear in Pending (अभी दूध आना बाकी है) in BOTH Morning and Evening shifts and NEVER in Other (अन्य)', () => {
+  assert.equal(normalizeFarmerShiftSchedule('both'), 'both');
+  assert.equal(normalizeFarmerShiftSchedule('सुबह और शाम दोनों समय'), 'both');
+  assert.equal(normalizeFarmerShiftSchedule('Morning & Evening'), 'both');
+  assert.equal(normalizeFarmerShiftSchedule(undefined), 'both');
+  assert.equal(normalizeFarmerShiftSchedule(''), 'both');
+  assert.equal(normalizeFarmerShiftSchedule('morning'), 'morning');
+  assert.equal(normalizeFarmerShiftSchedule('केवल सुबह'), 'morning');
+  assert.equal(normalizeFarmerShiftSchedule('evening'), 'evening');
+  assert.equal(normalizeFarmerShiftSchedule('केवल शाम'), 'evening');
+
+  const farmers: Farmer[] = [
+    {
+      id: 'f_both_std',
+      code: '101',
+      name: 'रामलाल (Both)',
+      mobile: '9876543210',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+    {
+      id: 'f_both_hi',
+      code: '102',
+      name: 'श्यामलाल (सुबह और शाम)',
+      mobile: '9876543211',
+      village: 'रामपुर',
+      // Simulate legacy/imported Hindi schedule string or undefined
+      shiftSchedule: ('सुबह और शाम दोनों समय' as unknown) as Farmer['shiftSchedule'],
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+    {
+      id: 'f_both_undef',
+      code: '103',
+      name: 'मोहनलाल (Default Both)',
+      mobile: '9876543212',
+      village: 'रामपुर',
+      shiftSchedule: (undefined as unknown) as Farmer['shiftSchedule'],
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+    {
+      id: 'f_morn_only',
+      code: '104',
+      name: 'सोहन (केवल सुबह)',
+      mobile: '9876543213',
+      village: 'रामपुर',
+      shiftSchedule: 'morning',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+    {
+      id: 'f_eve_only',
+      code: '105',
+      name: 'गोपाल (केवल शाम)',
+      mobile: '9876543214',
+      village: 'रामपुर',
+      shiftSchedule: 'evening',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  // Check isFarmerScheduledForShift
+  assert.equal(isFarmerScheduledForShift(farmers[0], 'morning'), true);
+  assert.equal(isFarmerScheduledForShift(farmers[0], 'evening'), true);
+  assert.equal(isFarmerScheduledForShift(farmers[1], 'morning'), true);
+  assert.equal(isFarmerScheduledForShift(farmers[1], 'evening'), true);
+  assert.equal(isFarmerScheduledForShift(farmers[2], 'morning'), true);
+  assert.equal(isFarmerScheduledForShift(farmers[2], 'evening'), true);
+
+  // Morning attendance: All 3 both-shift farmers + 1 morning-only farmer = 4 in pendingFarmers ("अभी दूध आना बाकी है")
+  // Only the evening-only farmer is in notScheduledFarmers ("अन्य")
+  const mornAtt = calculateShiftAttendance(farmers, [], [], '2026-10-25', 'morning');
+  assert.equal(mornAtt.totalScheduledCount, 4);
+  assert.equal(mornAtt.pendingCount, 4);
+  assert.deepEqual(
+    mornAtt.pendingFarmers.map((f) => f.code),
+    ['101', '102', '103', '104']
+  );
+  assert.equal(mornAtt.notScheduledFarmers.length, 1);
+  assert.equal(mornAtt.notScheduledFarmers[0].code, '105');
+
+  // Evening attendance: All 3 both-shift farmers + 1 evening-only farmer = 4 in pendingFarmers ("अभी दूध आना बाकी है")
+  // Only the morning-only farmer is in notScheduledFarmers ("अन्य")
+  const eveAtt = calculateShiftAttendance(farmers, [], [], '2026-10-25', 'evening');
+  assert.equal(eveAtt.totalScheduledCount, 4);
+  assert.equal(eveAtt.pendingCount, 4);
+  assert.deepEqual(
+    eveAtt.pendingFarmers.map((f) => f.code),
+    ['101', '102', '103', '105']
+  );
+  assert.equal(eveAtt.notScheduledFarmers.length, 1);
+  assert.equal(eveAtt.notScheduledFarmers[0].code, '104');
+});
+
+test('NEW FEATURE TEST 25: Photo Slip OCR parsing supports Devanagari digits, 2-number slips (Liters + FAT), nearest chart rate, and fallback rate when chart is empty', () => {
+  // 1. Devanagari digits + 2 numbers only (Liters + FAT, SNF defaults to 8.5)
+  const devSlip = '१०१ ६.५ ४.५';
+  const rows = parseMilkSlipTextToRows(devSlip);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].farmerCode, '101');
+  assert.equal(rows[0].liters, 6.5);
+  assert.equal(rows[0].fat, 4.5);
+  assert.equal(rows[0].snf, 8.5);
+
+  // 2. Even if rateCharts are completely null/empty, buildCollectionEntriesFromScannedSlip auto-saves using standard dairy rate fallback and auto-creates farmer if none exist
+  const builtNoChart = buildCollectionEntriesFromScannedSlip(
+    rows,
+    [],
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'evening'
+  );
+  assert.equal(builtNoChart.entries.length, 1);
+  assert.equal(builtNoChart.autoCreatedFarmers.length, 1);
+  assert.equal(builtNoChart.entries[0].farmerCode, '101');
+  assert.equal(builtNoChart.entries[0].liters, 6.5);
+  assert.equal(builtNoChart.entries[0].fat, 4.5);
+  assert.equal(builtNoChart.entries[0].snf, 8.5);
+  assert.ok(builtNoChart.entries[0].rate > 0);
+  assert.equal(
+    builtNoChart.entries[0].totalAmount,
+    Math.trunc(builtNoChart.entries[0].totalAmount)
+  );
+});
+
+test('NEW FEATURE TEST 26: Multi-Farmer Photo Slip matches by Farmer Name FIRST, and if Name is absent/unmatched then matches by Farmer Code SECOND', () => {
+  const farmers: Farmer[] = [
+    {
+      id: 'f101',
+      code: '101',
+      name: 'रामलाल गुर्जर',
+      mobile: '9876543210',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+    {
+      id: 'f102',
+      code: '102',
+      name: 'मोहन लाल',
+      mobile: '9876543211',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+    {
+      id: 'f103',
+      code: '103',
+      name: 'श्यामलाल',
+      mobile: '9876543212',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  // 1. Direct helper check: Name match takes priority over Code match when Name matches
+  const matchedByNamePriority = matchFarmerByNameThenCode(farmers, 'मोहन लाल', '101');
+  assert.equal(matchedByNamePriority?.id, 'f102');
+  assert.equal(matchedByNamePriority?.name, 'मोहन लाल');
+
+  // 2. When Name is absent, matches by Code
+  const matchedByCodeWhenNoName = matchFarmerByNameThenCode(farmers, undefined, '103');
+  assert.equal(matchedByCodeWhenNoName?.id, 'f103');
+
+  // 3. When Name does not match any farmer, falls back to matching by Code
+  const matchedByCodeWhenNameUnmatched = matchFarmerByNameThenCode(farmers, 'अंजाना नाम', '101');
+  assert.equal(matchedByCodeWhenNameUnmatched?.id, 'f101');
+
+  // 4. Multi-farmer register page in 1 photo/slip (3 different farmers on one page)
+  const multiFarmerSlip = [
+    'रामलाल गुर्जर 6.5 4.5 8.5',
+    '102 7.25 5.2 8.8',
+    'श्यामलाल 5.0 4.2 8.4',
+  ].join('\n');
+
+  const parsedRows = parseMilkSlipTextToRows(multiFarmerSlip, '2026-10-25', 'morning');
+  assert.equal(parsedRows.length, 3);
+
+  const built = buildCollectionEntriesFromScannedSlip(
+    parsedRows,
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning'
+  );
+  assert.equal(built.entries.length, 3);
+  assert.equal(built.entries[0].farmerId, 'f101');
+  assert.equal(built.entries[0].farmerName, 'रामलाल गुर्जर');
+  assert.equal(built.entries[0].liters, 6.5);
+
+  assert.equal(built.entries[1].farmerId, 'f102');
+  assert.equal(built.entries[1].farmerCode, '102');
+  assert.equal(built.entries[1].liters, 7.25);
+
+  assert.equal(built.entries[2].farmerId, 'f103');
+  assert.equal(built.entries[2].farmerName, 'श्यामलाल');
+  assert.equal(built.entries[2].liters, 5.0);
+});
+
+test('NEW FEATURE TEST 27: Single Photo with Multiple Dates and Morning + Evening Shifts for a Farmer saves each entry with its respective Date and Shift', () => {
+  assert.equal(normalizeScannedDate('21/10/2026', '2026-10-25'), '2026-10-21');
+  assert.equal(normalizeScannedDate('22-10-26', '2026-10-25'), '2026-10-22');
+  assert.equal(normalizeScannedDate('23/10', '2026-10-25'), '2026-10-23');
+  assert.equal(normalizeScannedDate('दिनांक 24', '2026-10-25'), '2026-10-24');
+  assert.equal(normalizeScannedShift('सुबह', 'evening'), 'morning');
+  assert.equal(normalizeScannedShift('शाम', 'morning'), 'evening');
+
+  const farmers: Farmer[] = [
+    {
+      id: 'f101',
+      code: '101',
+      name: 'रामलाल गुर्जर',
+      mobile: '9876543210',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  // Passbook page for farmer रामलाल गुर्जर with:
+  // - 21/10/2026 Morning & Evening on the same line (dual-shift row)
+  // - 22/10/2026 Morning & Evening on separate lines
+  const passbookSlip = [
+    'किसान: रामलाल गुर्जर (101)',
+    '21/10/2026 सुबह 5.5 4.5 8.5 शाम 6.2 4.8 8.6',
+    '22/10/2026 सुबह 5.8 4.6 8.5',
+    '22/10/2026 शाम 6.4 5.1 8.7',
+  ].join('\n');
+
+  const rows = parseMilkSlipTextToRows(passbookSlip, '2026-10-25', 'morning');
+  assert.equal(rows.length, 4);
+
+  const built = buildCollectionEntriesFromScannedSlip(
+    rows,
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning'
+  );
+
+  assert.equal(built.entries.length, 4);
+  // All 4 entries matched to रामलाल गुर्जर (101)
+  assert.ok(built.entries.every((e) => e.farmerId === 'f101' && e.farmerCode === '101'));
+
+  // Entry 1: 2026-10-21 Morning
+  assert.equal(built.entries[0].date, '2026-10-21');
+  assert.equal(built.entries[0].shift, 'morning');
+  assert.equal(built.entries[0].liters, 5.5);
+  assert.equal(built.entries[0].fat, 4.5);
+
+  // Entry 2: 2026-10-21 Evening
+  assert.equal(built.entries[1].date, '2026-10-21');
+  assert.equal(built.entries[1].shift, 'evening');
+  assert.equal(built.entries[1].liters, 6.2);
+  assert.equal(built.entries[1].fat, 4.8);
+
+  // Entry 3: 2026-10-22 Morning
+  assert.equal(built.entries[2].date, '2026-10-22');
+  assert.equal(built.entries[2].shift, 'morning');
+  assert.equal(built.entries[2].liters, 5.8);
+  assert.equal(built.entries[2].fat, 4.6);
+
+  // Entry 4: 2026-10-22 Evening
+  assert.equal(built.entries[3].date, '2026-10-22');
+  assert.equal(built.entries[3].shift, 'evening');
+  assert.equal(built.entries[3].liters, 6.4);
+  assert.equal(built.entries[3].fat, 5.1);
+});
+
+test('NEW FEATURE TEST 28: Max 2 Milk Entries per Farmer per Shift (1 Cow + 1 Buffalo) and strict duplicate blocking by animal type', () => {
+  const existing: MilkCollectionEntry[] = [
+    {
+      id: 'c_cow_1',
+      date: '2026-10-25',
+      time: '07:00:00',
+      shift: 'morning',
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 5.0,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 36,
+      totalAmount: 180,
+      deduction: 0,
+      netPayable: 180,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+
+  // 1. Trying to add another Cow entry in the same shift & date for f101 -> BLOCKED
+  const dupCowCheck = canSaveFarmerShiftMilkEntry(existing, {
+    farmerId: 'f101',
+    date: '2026-10-25',
+    shift: 'morning',
+    milkType: 'cow',
+  });
+  assert.equal(dupCowCheck.allowed, false);
+  assert.ok(dupCowCheck.reasonHi?.includes('गाय'));
+
+  // 2. Trying to add a Buffalo entry in the same shift & date for f101 -> ALLOWED (1 Cow + 1 Buffalo = 2 entries)
+  const buffaloCheck = canSaveFarmerShiftMilkEntry(existing, {
+    farmerId: 'f101',
+    date: '2026-10-25',
+    shift: 'morning',
+    milkType: 'buffalo',
+  });
+  assert.equal(buffaloCheck.allowed, true);
+
+  // 3. Once both Cow and Buffalo exist in that shift, any 3rd entry is BLOCKED
+  const withBoth: MilkCollectionEntry[] = [
+    ...existing,
+    {
+      ...existing[0],
+      id: 'c_buf_1',
+      milkType: 'buffalo',
+      fat: 6.0,
+      rate: 52,
+      totalAmount: 260,
+      netPayable: 260,
+    },
+  ];
+  const thirdCheck = canSaveFarmerShiftMilkEntry(withBoth, {
+    farmerId: 'f101',
+    date: '2026-10-25',
+    shift: 'morning',
+    milkType: 'cow',
+  });
+  assert.equal(thirdCheck.allowed, false);
+});
+
+test('NEW FEATURE TEST 29: Photo Milk Entry Preview Items and Duplicate Entry Blocking against existing collections', () => {
+  const farmers: Farmer[] = [
+    {
+      id: 'f101',
+      code: '101',
+      name: 'रामलाल गुर्जर',
+      mobile: '9876543210',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+    {
+      id: 'f102',
+      code: '102',
+      name: 'मोहन लाल',
+      mobile: '9876543211',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  // Existing collection already has Farmer 101 Cow milk on 2026-10-25 morning
+  const existingCollections: MilkCollectionEntry[] = [
+    {
+      id: 'existing_101_cow',
+      date: '2026-10-25',
+      time: '06:45:00',
+      shift: 'morning',
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 5.0,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 37.5,
+      totalAmount: 187,
+      deduction: 0,
+      netPayable: 187,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+
+  // Photo contains:
+  // Row 1: Farmer 101 Cow milk (FAT 4.6 <= 5.0) on 2026-10-25 morning -> DUPLICATE (already exists!)
+  // Row 2: Farmer 101 Buffalo milk (FAT 6.0 > 5.0) on 2026-10-25 morning -> ALLOWED (different animal in same shift)
+  // Row 3: Farmer 102 Cow milk (FAT 4.4 <= 5.0) on 2026-10-25 morning -> ALLOWED
+  const slipText = [
+    '101 6.0 4.6 8.5',
+    '101 4.0 6.0 8.8',
+    '102 8.0 4.4 8.5',
+  ].join('\n');
+
+  const rows = parseMilkSlipTextToRows(slipText, '2026-10-25', 'morning');
+  const result = buildCollectionEntriesFromScannedSlip(
+    rows,
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning',
+    undefined,
+    existingCollections
+  );
+
+  // All 3 rows appear in previewItems so user can see why Row 1 won't save
+  assert.equal(result.previewItems.length, 3);
+  assert.equal(result.previewItems[0].isDuplicate, true);
+  assert.equal(result.previewItems[0].entry.farmerCode, '101');
+  assert.equal(result.previewItems[0].entry.milkType, 'cow');
+
+  assert.equal(result.previewItems[1].isDuplicate, false);
+  assert.equal(result.previewItems[1].entry.farmerCode, '101');
+  assert.equal(result.previewItems[1].entry.milkType, 'buffalo');
+
+  assert.equal(result.previewItems[2].isDuplicate, false);
+  assert.equal(result.previewItems[2].entry.farmerCode, '102');
+  assert.equal(result.previewItems[2].entry.milkType, 'cow');
+
+  // Only the 2 non-duplicate entries are in result.entries to be saved
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.skippedDuplicates.length, 1);
+  assert.equal(result.entries[0].farmerCode, '101');
+  assert.equal(result.entries[0].milkType, 'buffalo');
+  assert.equal(result.entries[1].farmerCode, '102');
+  assert.equal(result.entries[1].milkType, 'cow');
+});
+
+test('NEW FEATURE TEST 30: 10-Day Billing Period selection in Payments and automatic underpayment/overpayment carry-forward to next period bill', () => {
+  assert.equal(getCycleFromDate('2026-10-05').cycle, 1);
+  assert.equal(getCycleFromDate('2026-10-15').cycle, 2);
+  assert.equal(getCycleFromDate('2026-10-25').cycle, 3);
+  assert.equal(getCycleLabelHi(1), '1 से 10 तारीख');
+  assert.equal(getCycleLabelHi(2), '11 से 20 तारीख');
+  assert.equal(getCycleLabelHi(3), '21 से महीने के अंत तक');
+
+  const farmer: Farmer = {
+    id: 'f101',
+    code: '101',
+    name: 'रामलाल गुर्जर',
+    mobile: '9876543210',
+    village: 'रामपुर',
+    shiftSchedule: 'both',
+    openingBalance: 0,
+    notes: '',
+    active: true,
+    createdAt: '',
+  };
+
+  // Milk collections across Cycle 1 (1-10 Oct), Cycle 2 (11-20 Oct), Cycle 3 (21-31 Oct)
+  const collections: MilkCollectionEntry[] = [
+    {
+      id: 'c_oct_05',
+      date: '2026-10-05',
+      time: '07:00:00',
+      shift: 'morning',
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 25,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 40,
+      totalAmount: 1000,
+      deduction: 0,
+      netPayable: 1000,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 'c_oct_15',
+      date: '2026-10-15',
+      time: '07:00:00',
+      shift: 'morning',
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 25,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 40,
+      totalAmount: 1000,
+      deduction: 0,
+      netPayable: 1000,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 'c_oct_25',
+      date: '2026-10-25',
+      time: '07:00:00',
+      shift: 'morning',
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      farmerCode: '101',
+      milkType: 'cow',
+      liters: 25,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 40,
+      totalAmount: 1000,
+      deduction: 0,
+      netPayable: 1000,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+
+  // Case A: Underpayment in Cycle 1 (1-10 Oct):
+  // Bill for Cycle 1 is ₹1000. Farmer is paid ₹800 on 2026-10-12 but tagged for Cycle 1 (1 से 10 तारीख)!
+  // Remaining ₹200 underpayment (कम भुगतान) must carry forward and ADD to Cycle 2's bill.
+  // Case B: Overpayment in Cycle 2 (11-20 Oct):
+  // Cycle 2 milk is ₹1000 + ₹200 previous balance = ₹1200 payable.
+  // Farmer is paid ₹1500 for Cycle 2 (₹300 extra / ज्यादा भुगतान).
+  // That -₹300 must carry forward and DEDUCT from Cycle 3's bill (₹1000 - ₹300 = ₹700).
+  const payments: AdvancePaymentEntry[] = [
+    {
+      id: 'pay_c1',
+      txnCode: 'PAY-C1',
+      date: '2026-10-12', // Paid on 12th, but explicitly selected for Cycle 1 (1-10)!
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      type: 'payment',
+      amount: 800,
+      paymentMethod: 'cash',
+      billingYearMonth: '2026-10',
+      billingCycle: 1,
+      notes: '1 से 10 तारीख का भुगतान',
+      createdAt: '',
+    },
+    {
+      id: 'pay_c2',
+      txnCode: 'PAY-C2',
+      date: '2026-10-21', // Paid on 21st, but explicitly selected for Cycle 2 (11-20)!
+      farmerId: 'f101',
+      farmerName: 'रामलाल गुर्जर',
+      type: 'payment',
+      amount: 1500,
+      paymentMethod: 'cash',
+      billingYearMonth: '2026-10',
+      billingCycle: 2,
+      notes: '11 से 20 तारीख का भुगतान',
+      createdAt: '',
+    },
+  ];
+
+  // Verify Cycle 1 (1-10 Oct) Bill:
+  const bill1 = generateTenDayBillData(farmer, '2026-10', 1, collections, payments, []);
+  assert.equal(bill1.totalMilkAmount, 1000);
+  assert.equal(bill1.previousBalance, 0);
+  assert.equal(bill1.billPayableBeforePayment, 1000);
+  assert.equal(bill1.paymentsInPeriod, 800);
+  assert.equal(bill1.netPayable, 200); // ₹200 कम भुगतान (short paid)
+
+  // Verify Cycle 2 (11-20 Oct) Bill:
+  const bill2 = generateTenDayBillData(farmer, '2026-10', 2, collections, payments, []);
+  assert.equal(bill2.totalMilkAmount, 1000);
+  assert.equal(bill2.previousBalance, 200); // +₹200 carried forward from Cycle 1
+  assert.equal(bill2.billPayableBeforePayment, 1200); // ₹1000 milk + ₹200 previous short payment
+  assert.equal(bill2.paymentsInPeriod, 1500); // Paid ₹1500 for Cycle 2
+  assert.equal(bill2.netPayable, -300); // -₹300 ज्यादा भुगतान (excess paid)
+
+  // Verify Cycle 3 (21-31 Oct) Bill:
+  const bill3 = generateTenDayBillData(farmer, '2026-10', 3, collections, payments, []);
+  assert.equal(bill3.totalMilkAmount, 1000);
+  assert.equal(bill3.previousBalance, -300); // -₹300 carried forward from Cycle 2
+  assert.equal(bill3.billPayableBeforePayment, 700); // ₹1000 milk - ₹300 excess payment = ₹700
+  assert.equal(bill3.paymentsInPeriod, 0);
+  assert.equal(bill3.netPayable, 700);
+});
