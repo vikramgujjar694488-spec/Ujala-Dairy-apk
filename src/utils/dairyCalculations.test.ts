@@ -31,6 +31,8 @@ import {
   getCycleLabelEn,
   formatDateDMY,
   formatMonthYear,
+  extractTextFromPdfContent,
+  extractTextFromPdfBuffer,
 } from './dairyCalculations';
 import {
   createInitialEmptyState,
@@ -1666,4 +1668,165 @@ test('TEST 28: formatDateDMY and formatMonthYear format all dates in DD-MM-YYYY 
   assert.equal(getCycleLabelHi(1, '2026-10'), '1 से 10 तारीख (10-2026)');
   assert.equal(getCycleLabelHi(3, '2026-10'), '21 से महीने के अंत तक (10-2026)');
   assert.equal(getCycleLabelEn(2, '2026-10'), '11th to 20th (10-2026)');
+});
+
+test('NEW FEATURE TEST 32: Advanced Photo OCR handles vertical multi-line thermal slips, mathematical Liters*Rate=Amount verification, and inline preview editing/overwriting', () => {
+  const farmers: Farmer[] = [
+    {
+      id: 'f101',
+      code: '101',
+      name: 'रामलाल गुर्जर',
+      mobile: '9876543210',
+      village: 'रामपुर',
+      shiftSchedule: 'both',
+      openingBalance: 0,
+      notes: '',
+      active: true,
+      createdAt: '',
+    },
+  ];
+
+  // 1. Vertical multi-line thermal analyzer receipt (each field on its own line)
+  const verticalThermalSlip = [
+    'उजाला डेयरी पर्ची',
+    'दिनांक: 25-10-2026 समय: 07:15:22',
+    'शिफ्ट: सुबह',
+    'कोड: 101',
+    'नाम: रामलाल गुर्जर',
+    'पशु: भैंस',
+    'मात्रा: 6.50 L',
+    'फैट: 6.2',
+    'एसएनएफ: 8.8',
+    'दर: 56.00',
+    'कुल राशि: ₹364',
+  ].join('\n');
+
+  const vRows = parseMilkSlipTextToRows(verticalThermalSlip, '2026-10-26', 'evening');
+  assert.equal(vRows.length, 1);
+  assert.equal(vRows[0].farmerCode, '101');
+  assert.equal(vRows[0].farmerName, 'रामलाल गुर्जर');
+  assert.equal(vRows[0].shift, 'morning');
+  assert.equal(vRows[0].milkType, 'buffalo');
+  assert.equal(vRows[0].liters, 6.5);
+  assert.equal(vRows[0].fat, 6.2);
+  assert.equal(vRows[0].snf, 8.8);
+  assert.equal(vRows[0].rate, 56);
+  assert.equal(vRows[0].amount, 364);
+
+  // 2. Tabular passbook rows with Rate & Amount + mathematical self-correction when decimal in Liters was missed by OCR (e.g. "65" instead of "6.5" where 6.5 * 44 = 286)
+  const tabularWithMathRepair = [
+    'किसान: रामलाल गुर्जर (101)',
+    '21 65 4.5 8.5 44.00 286',
+    '22 5.0 4.6 8.5 45.00 225',
+    'कुल योग 11.5 511',
+  ].join('\n');
+
+  const tRows = parseMilkSlipTextToRows(tabularWithMathRepair, '2026-10-25', 'morning');
+  assert.equal(tRows.length, 2); // Total row is ignored!
+  assert.equal(tRows[0].date, '21');
+  assert.equal(tRows[0].liters, 6.5); // Repaired from 65 -> 6.5 via 286 / 44.00 = 6.5!
+  assert.equal(tRows[0].fat, 4.5);
+  assert.equal(tRows[0].snf, 8.5);
+  assert.equal(tRows[0].rate, 44);
+  assert.equal(tRows[1].date, '22');
+  assert.equal(tRows[1].liters, 5.0);
+  assert.equal(tRows[1].fat, 4.6);
+
+  // 3. Inline Preview Overwrite support: if an entry already exists, setting overwriteExisting: true allows updating it with the same ID
+  const existingBuilt = buildCollectionEntriesFromScannedSlip(
+    [tRows[0]],
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning'
+  );
+  assert.equal(existingBuilt.entries.length, 1);
+  const existingEntry = existingBuilt.entries[0];
+
+  // Without overwriteExisting, duplicate is blocked
+  const dupBlocked = buildCollectionEntriesFromScannedSlip(
+    [{ ...tRows[0], liters: 7.0, amount: undefined }],
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning',
+    undefined,
+    [existingEntry]
+  );
+  assert.equal(dupBlocked.entries.length, 0);
+  assert.equal(dupBlocked.previewItems[0].isDuplicate, true);
+
+  // With overwriteExisting: true, duplicate becomes savable and reuses existingEntry.id
+  const dupOverwritten = buildCollectionEntriesFromScannedSlip(
+    [{ ...tRows[0], liters: 7.0, amount: undefined, overwriteExisting: true }],
+    farmers,
+    { cow: null, buffalo: null },
+    '2026-10-25',
+    'morning',
+    undefined,
+    [existingEntry]
+  );
+  assert.equal(dupOverwritten.entries.length, 1);
+  assert.equal(dupOverwritten.previewItems[0].isDuplicate, false);
+  assert.equal(dupOverwritten.entries[0].id, existingEntry.id);
+  assert.equal(dupOverwritten.entries[0].liters, 7.0);
+});
+
+test('NEW FEATURE TEST 33: Screenshot Card-Style OCR Parsing, Integer-Liter 4-Number Rows, and Offline PDF Text Extraction', async () => {
+  // 1. Card screenshot OCR text (matching user attachment: "1  5 – पवन बैरागी  किसान कोड: 1")
+  const cardScreenshotOcrText = [
+    'आज की दूध कलेक्शन (26-10-2026) कुल किसान: 2',
+    '1 5 – पवन बैरागी किसान कोड: 5',
+    '26-10-2026 | सुबह | भैंस',
+    'लीटर FAT SNF रेट',
+    '1.96 L 5.3 8.3 ₹45.90 कुल रकम: ₹89',
+    '2 3 – रघुवीर जी किसान कोड: 3',
+    '26-10-2026 | सुबह | भैंस',
+    '1.36 L 8.8 9.2 ₹77.40 कुल रकम: ₹105',
+  ].join('\n');
+
+  const cardRows = parseMilkSlipTextToRows(cardScreenshotOcrText, '2026-10-26', 'morning');
+  assert.equal(cardRows.length, 2);
+  assert.equal(cardRows[0].farmerCode, '5');
+  assert.equal(cardRows[0].liters, 1.96);
+  assert.equal(cardRows[0].fat, 5.3);
+  assert.equal(cardRows[0].snf, 8.3);
+  assert.equal(cardRows[0].rate, 45.9);
+  assert.equal(cardRows[1].farmerCode, '3');
+  assert.equal(cardRows[1].liters, 1.36);
+  assert.equal(cardRows[1].fat, 8.8);
+  assert.equal(cardRows[1].snf, 9.2);
+  assert.equal(cardRows[1].rate, 77.4);
+
+  // 2. 4-number row where Liters is a whole integer [Liters, FAT, SNF, Rate]
+  const intLiterRows = parseMilkSlipTextToRows('6 5.3 8.3 45.90', '2026-10-26', 'morning');
+  assert.equal(intLiterRows.length, 1);
+  assert.equal(intLiterRows[0].liters, 6);
+  assert.equal(intLiterRows[0].fat, 5.3);
+  assert.equal(intLiterRows[0].snf, 8.3);
+  assert.equal(intLiterRows[0].rate, 45.9);
+
+  // 3. Offline PDF stream text extraction (extractTextFromPdfContent & extractTextFromPdfBuffer)
+  const samplePdfStream = [
+    '%PDF-1.4',
+    '1 0 obj << /Length 120 >> stream',
+    'BT /F1 12 Tf 50 750 Td (Farmer Code: 101) Tj 0 -20 Td (26-10-2026 Morning) Tj 0 -20 Td (5.50 4.8 8.6 42.50 233) Tj ET',
+    'endstream endobj',
+    '%%EOF',
+  ].join('\n');
+
+  const extractedStr = extractTextFromPdfContent(samplePdfStream);
+  assert.ok(extractedStr.includes('101'));
+  assert.ok(extractedStr.includes('5.50 4.8 8.6 42.50 233'));
+
+  const encoder = new TextEncoder();
+  const pdfBuf = encoder.encode(samplePdfStream).buffer;
+  const extractedFromBuf = await extractTextFromPdfBuffer(pdfBuf);
+  const pdfRows = parseMilkSlipTextToRows(extractedFromBuf, '2026-10-26', 'morning');
+  assert.equal(pdfRows.length, 1);
+  assert.equal(pdfRows[0].farmerCode, '101');
+  assert.equal(pdfRows[0].liters, 5.5);
+  assert.equal(pdfRows[0].fat, 4.8);
+  assert.equal(pdfRows[0].snf, 8.6);
+  assert.equal(pdfRows[0].rate, 42.5);
 });

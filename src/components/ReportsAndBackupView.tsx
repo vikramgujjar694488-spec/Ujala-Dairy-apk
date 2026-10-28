@@ -105,6 +105,7 @@ jobs:
               "lucide-react": "^0.468.0",
               "react": "^19.0.0",
               "react-dom": "^19.0.0",
+              "tesseract.js": "^5.1.1",
               "xlsx": "^0.18.5"
             };
             pkg.devDependencies = {
@@ -2540,18 +2541,18 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               </span>
             </div>
 
-            {/* Direct In-App APK Download (v1.0.5 - Build #5 - 4.3 MB) */}
+            {/* Direct In-App APK Download (v1.0.7 - Build #7 - 4.3 MB) */}
             <div className="bg-emerald-50 border-2 border-emerald-400 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <strong className="text-xs sm:text-sm text-emerald-950 block">
                   {lang === 'hi'
-                    ? 'नया Ujalaa-Dairy-debug.apk तैयार है! (GitHub Release v1.0.5 · Build #5 · 4.3 MB):'
-                    : 'New Ujalaa-Dairy-debug.apk is Ready! (GitHub Release v1.0.5 · Build #5 · 4.3 MB):'}
+                    ? 'नया Ujalaa-Dairy-debug.apk तैयार है! (GitHub Release v1.0.7 · Build #7 · 4.3 MB):'
+                    : 'New Ujalaa-Dairy-debug.apk is Ready! (GitHub Release v1.0.7 · Build #7 · 4.3 MB):'}
                 </strong>
                 <span className="text-xs text-emerald-800">
                   {lang === 'hi'
-                    ? 'आपके सभी नए फीचर्स (बिक्री का 10-दिन का बिल, 4-तरीकों वाला ऑल-इन-वन बैकअप/Restore सिस्टम, कैमरा स्लिप स्कैनर, शिफ्ट-वार लाभ/हानि और पूर्ण संख्या किसान खरीद हिसाब) वाला नया APK (v1.0.5 · Build #5) तैयार हो चुका है। इस हरे बटन को दबाकर तुरंत डाउनलोड करें।'
-                    : 'Your updated APK (v1.0.5 Build #5) with 10-Day Wholesale Sale Bill, 4-Method Backup/Restore System, Camera Slip Scanner, Shift-wise P&L, and Whole-Number Farmer Purchase is ready. Click the green button to download Ujalaa-Dairy-debug.apk (4.3 MB).'}
+                    ? 'आपके सभी नवीनतम अपडेट्स (DD-MM-YYYY तारीख फॉर्मेट, बिना लेफ्ट-राइट स्वाइप वाला साफ बिल व सेव एंट्री टेबल जिसमें FAT/SNF/Rate स्पष्ट लाइनों के साथ बड़े दिखते हैं, ऑफलाइन फोटो स्लिप से 21–31 तारीख की 10–11 एंट्री सेव करने की सुविधा, साफ डैशबोर्ड और 10-दिन की सुबह/शाम/संयुक्त व लाभ-हानि रिपोर्ट) वाला नया APK (v1.0.7 · Build #7) तैयार हो चुका है। इस हरे बटन को दबाकर तुरंत डाउनलोड करें।'
+                    : 'Your latest APK (v1.0.7 Build #7) with DD-MM-YYYY date formatting, single-screen bordered bill & entry tables with larger FAT/SNF/Rate columns, offline photo slip scanner (10-11 multi-date entries), clean dashboard, and 10-day morning/evening/combined & P&L reports is ready. Click the green button to download Ujalaa-Dairy-debug.apk (4.3 MB).'}
                 </span>
               </div>
               <a
@@ -2561,8 +2562,8 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
               >
                 <Download className="w-4 h-4" />
                 {lang === 'hi'
-                  ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (v1.0.5 · 4.3 MB)'
-                  : 'Download Ujalaa-Dairy-debug.apk (v1.0.5 · 4.3 MB)'}
+                  ? 'सीधा Ujalaa-Dairy-debug.apk डाउनलोड करें (v1.0.7 · 4.3 MB)'
+                  : 'Download Ujalaa-Dairy-debug.apk (v1.0.7 · 4.3 MB)'}
               </a>
             </div>
 

@@ -148,11 +148,14 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   const [quickBillPayAmount, setQuickBillPayAmount] = useState<string>('');
   const [quickBillPayMethod, setQuickBillPayMethod] = useState<PaymentMethod>('cash');
   const [quickBillPayNotes, setQuickBillPayNotes] = useState<string>('');
+  const [quickPaySuccessNotice, setQuickPaySuccessNotice] = useState<string | null>(null);
   const [activeCleanReport, setActiveCleanReport] = useState<
     'morning' | 'evening' | 'tenday' | 'profit_loss'
   >('tenday');
   const [reportSingleDate, setReportSingleDate] = useState<string>(state.selectedDate);
-  const [reportFarmerFilter, setReportFarmerFilter] = useState<string>('all');
+  const [reportFarmerFilter, setReportFarmerFilter] = useState<string>(
+    state.farmers[0]?.id || 'all'
+  );
 
   // WhatsApp Preview Modal
   const [waModal, setWaModal] = useState<{ open: boolean; phone: string; message: string }>({
@@ -360,6 +363,33 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
     setFeedNotes('');
   };
 
+  // Auto-sync activeBill when billFarmerId, billYearMonth, or billCycle changes
+  React.useEffect(() => {
+    const farmer = state.farmers.find((f) => f.id === billFarmerId);
+    if (!farmer) return;
+    const existingSaved = state.bills.find(
+      (b) => b.farmerId === farmer.id && b.yearMonth === billYearMonth && b.cycle === billCycle
+    );
+    if (existingSaved) {
+      setActiveBill(existingSaved);
+      return;
+    }
+    const data = generateTenDayBillData(
+      farmer,
+      billYearMonth,
+      billCycle,
+      state.collections,
+      state.advancesAndPayments,
+      state.cattleFeed
+    );
+    setActiveBill({
+      ...data,
+      id: `bill_preview_${farmer.id}_${billYearMonth}_${billCycle}`,
+      billNumber: `UD-${billYearMonth.replace('-', '')}-C${billCycle}-${farmer.code}`,
+      createdAt: new Date().toISOString(),
+    });
+  }, [billFarmerId, billYearMonth, billCycle]);
+
   // --- 10-Day Bill Generation ---
   const handleCreateOrUpdateBill = () => {
     const farmer = state.farmers.find((f) => f.id === billFarmerId);
@@ -393,25 +423,28 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
     setActiveBill(newBill);
   };
 
-  const handleQuickBillPayment = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeBill) return;
-    const farmer = state.farmers.find((f) => f.id === activeBill.farmerId);
+  const executeInlineCyclePayment = (
+    targetFarmer: Farmer,
+    targetYearMonth: string,
+    targetCycle: 1 | 2 | 3,
+    existingBillId?: string,
+    existingBillNum?: string
+  ) => {
     const amt = Number(quickBillPayAmount);
-    if (!farmer || !Number.isFinite(amt) || amt <= 0) return;
+    if (!targetFarmer || !Number.isFinite(amt) || amt <= 0) return;
 
-    const cycleLabel = getCycleLabelHi(activeBill.cycle);
+    const cycleLabel = getCycleLabelHi(targetCycle);
     const entry: AdvancePaymentEntry = {
       id: `adv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       txnCode: `PAY-${Date.now().toString().slice(-5)}`,
       date: state.selectedDate,
-      farmerId: farmer.id,
-      farmerName: farmer.name,
+      farmerId: targetFarmer.id,
+      farmerName: targetFarmer.name,
       type: 'payment',
       amount: round2(amt),
       paymentMethod: quickBillPayMethod,
-      billingYearMonth: activeBill.yearMonth,
-      billingCycle: activeBill.cycle,
+      billingYearMonth: targetYearMonth,
+      billingCycle: targetCycle,
       notes: quickBillPayNotes.trim() || `बिल भुगतान (${cycleLabel})`,
       createdAt: new Date().toISOString(),
     };
@@ -421,23 +454,31 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
 
     // Immediately recalculate and save the updated bill
     const updatedData = generateTenDayBillData(
-      farmer,
-      activeBill.yearMonth,
-      activeBill.cycle,
+      targetFarmer,
+      targetYearMonth,
+      targetCycle,
       state.collections,
       nextAdvances,
       state.cattleFeed
     );
     const updatedBill: TenDayBill = {
       ...updatedData,
-      id: activeBill.id,
-      billNumber: activeBill.billNumber,
+      id: existingBillId || `bill_${Date.now()}`,
+      billNumber:
+        existingBillNum ||
+        `UD-${targetYearMonth.replace('-', '')}-C${targetCycle}-${targetFarmer.code}`,
       createdAt: new Date().toISOString(),
     };
     onSaveBill(updatedBill);
     setActiveBill(updatedBill);
     setQuickBillPayAmount('');
     setQuickBillPayNotes('');
+    setQuickPaySuccessNotice(
+      lang === 'hi'
+        ? `${targetFarmer.name} का ₹${round2(amt)} भुगतान दर्ज हो गया और बिल अपडेट हो गया!`
+        : `Payment of ₹${round2(amt)} saved for ${targetFarmer.name}!`
+    );
+    setTimeout(() => setQuickPaySuccessNotice(null), 5000);
   };
 
   const openBillWhatsApp = (bill: TenDayBill) => {
@@ -458,16 +499,27 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
         ? `*अतिरिक्त/ज्यादा भुगतान (अगली अवधि से कटेगा): -${formatWholeCurrency(Math.abs(bill.netPayable))}*`
         : `*अंतिम देय राशि: ₹0 (चुकता)*`;
 
+    const shiftLines: string[] = [];
+    if (bill.morningLiters > 0 || bill.eveningLiters === 0) {
+      shiftLines.push(
+        `सुबह का दूध: ${formatNumber(bill.morningLiters, 2)} L (${formatWholeCurrency(bill.morningAmount)})`
+      );
+    }
+    if (bill.eveningLiters > 0) {
+      shiftLines.push(
+        `शाम का दूध: ${formatNumber(bill.eveningLiters, 2)} L (${formatWholeCurrency(bill.eveningAmount)})`
+      );
+    }
+
     const msg = [
       `*${state.dairyName || 'Ujalaa Dairy'} — 10-दिन का दूध बिल*`,
       `बिल नं: ${bill.billNumber}`,
       `किसान: ${bill.farmerCode} - ${bill.farmerName}`,
       `अवधि: ${cycleLabel} (${formatDateDMY(bill.fromDate)} से ${formatDateDMY(bill.toDate)})`,
       `--------------------------------`,
-      `सुबह का दूध: ${formatNumber(bill.morningLiters, 3)} L (${formatWholeCurrency(bill.morningAmount)})`,
-      `शाम का दूध: ${formatNumber(bill.eveningLiters, 3)} L (${formatWholeCurrency(bill.eveningAmount)})`,
-      `कुल दूध: ${formatNumber(bill.totalLiters, 3)} L`,
-      `औसत FAT: ${formatNumber(bill.avgFat)} | औसत SNF: ${formatNumber(bill.avgSnf)}`,
+      ...shiftLines,
+      `कुल दूध: ${formatNumber(bill.totalLiters, 2)} L`,
+      `औसत FAT: ${formatNumber(bill.avgFat, 1)} | औसत SNF: ${formatNumber(bill.avgSnf, 1)}`,
       `कुल दूध राशि: ${formatWholeCurrency(bill.totalMilkAmount)}`,
       prevAdjLine,
       `एडवांस कटौती (-): ${formatWholeCurrency(bill.advancesInPeriod)}`,
@@ -1960,56 +2012,61 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 );
               })()}
 
-            {/* REPORT 3: 10 दिन की सुबह-शाम की रिपोर्ट (10-Day Morning-Evening Report) */}
+            {/* REPORT 3: 10 दिन की सुबह-शाम की रिपोर्ट एवं किसान बिल (10-Day Morning-Evening Report & Bill) */}
             {activeCleanReport === 'tenday' &&
               (() => {
                 const { fromDate, toDate } = getTenDayCycleDates(billYearMonth, billCycle);
-                const periodEntries = state.collections.filter(
-                  (c) =>
-                    c.date >= fromDate &&
-                    c.date <= toDate &&
-                    (reportFarmerFilter === 'all' || c.farmerId === reportFarmerFilter)
-                );
+                const periodEntries = state.collections
+                  .filter(
+                    (c) =>
+                      c.date >= fromDate &&
+                      c.date <= toDate &&
+                      (reportFarmerFilter === 'all' || c.farmerId === reportFarmerFilter)
+                  )
+                  .sort((a, b) => a.date.localeCompare(b.date));
+
                 const mornEntries = periodEntries.filter((c) => c.shift === 'morning');
                 const eveEntries = periodEntries.filter((c) => c.shift === 'evening');
                 const mornSum = calculateCollectionSummary(mornEntries);
                 const eveSum = calculateCollectionSummary(eveEntries);
                 const totalSum = calculateCollectionSummary(periodEntries);
 
-                // Build day-by-day rows from fromDate to toDate
-                const startDay = Number(fromDate.slice(8, 10));
-                const endDay = Number(toDate.slice(8, 10));
-                const dayRows: Array<{
-                  date: string;
-                  mornLiters: number;
-                  mornAmt: number;
-                  eveLiters: number;
-                  eveAmt: number;
-                  totLiters: number;
-                  totAmt: number;
-                }> = [];
-                for (let d = startDay; d <= endDay; d++) {
-                  const dStr = `${billYearMonth}-${String(d).padStart(2, '0')}`;
-                  const dMorn = mornEntries.filter((c) => c.date === dStr);
-                  const dEve = eveEntries.filter((c) => c.date === dStr);
-                  const mL = round3(dMorn.reduce((s, c) => s + c.liters, 0));
-                  const mA = truncatePurchaseAmount(
-                    dMorn.reduce((s, c) => s + truncatePurchaseAmount(c.totalAmount), 0)
-                  );
-                  const eL = round3(dEve.reduce((s, c) => s + c.liters, 0));
-                  const eA = truncatePurchaseAmount(
-                    dEve.reduce((s, c) => s + truncatePurchaseAmount(c.totalAmount), 0)
-                  );
-                  dayRows.push({
-                    date: dStr,
-                    mornLiters: mL,
-                    mornAmt: mA,
-                    eveLiters: eL,
-                    eveAmt: eA,
-                    totLiters: round3(mL + eL),
-                    totAmt: mA + eA,
-                  });
-                }
+                const selectedReportFarmer =
+                  reportFarmerFilter !== 'all'
+                    ? state.farmers.find((f) => f.id === reportFarmerFilter) || null
+                    : null;
+                const farmerSched = selectedReportFarmer
+                  ? normalizeFarmerShiftSchedule(selectedReportFarmer.shiftSchedule)
+                  : 'both';
+
+                // Rule: If a farmer only brings milk in Morning (or only Evening), ONLY show that shift's box & table; hide empty shift boxes!
+                const showMorningSection =
+                  mornEntries.length > 0 ||
+                  (mornEntries.length === 0 &&
+                    eveEntries.length === 0 &&
+                    farmerSched !== 'evening');
+                const showEveningSection =
+                  eveEntries.length > 0 ||
+                  (mornEntries.length === 0 &&
+                    eveEntries.length === 0 &&
+                    farmerSched === 'evening');
+
+                // Farmer for inline accounting (Advance / Previous Balance / Inline Payment)
+                const accountingFarmer =
+                  selectedReportFarmer ||
+                  state.farmers.find((f) => f.id === billFarmerId) ||
+                  state.farmers[0] ||
+                  null;
+                const liveFarmerBillData = accountingFarmer
+                  ? generateTenDayBillData(
+                      accountingFarmer,
+                      billYearMonth,
+                      billCycle,
+                      state.collections,
+                      state.advancesAndPayments,
+                      state.cattleFeed
+                    )
+                  : null;
 
                 return (
                   <div
@@ -2044,12 +2101,19 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">
-                          {lang === 'hi' ? 'किसान चुनें (वैकल्पिक)' : 'Filter Farmer'}
+                          {lang === 'hi' ? 'किसान चुनें' : 'Select Farmer'}
                         </label>
                         <select
+                          data-testid="tenday-report-farmer-select"
                           value={reportFarmerFilter}
-                          onChange={(e) => setReportFarmerFilter(e.target.value)}
-                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setReportFarmerFilter(val);
+                            if (val !== 'all') {
+                              setBillFarmerId(val);
+                            }
+                          }}
+                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl font-semibold"
                         >
                           <option value="all">सभी किसान (All Farmers)</option>
                           {state.farmers.map((f) => (
@@ -2061,115 +2125,586 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums">
-                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 block">10-दिन सुबह का दूध / राशि</span>
-                        <span className="text-sm font-bold text-slate-900 mt-0.5 block">
-                          {formatNumber(mornSum.totalLiters, 3)} L ·{' '}
-                          {formatWholeCurrency(mornSum.totalAmount)}
-                        </span>
-                      </div>
-                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 block">10-दिन शाम का दूध / राशि</span>
-                        <span className="text-sm font-bold text-slate-900 mt-0.5 block">
-                          {formatNumber(eveSum.totalLiters, 3)} L ·{' '}
-                          {formatWholeCurrency(eveSum.totalAmount)}
-                        </span>
-                      </div>
+                    {/* Top Summary Cards — Hide empty Evening (or Morning) box when farmer only has one shift */}
+                    <div
+                      className={`grid grid-cols-2 ${
+                        showMorningSection && showEveningSection
+                          ? 'sm:grid-cols-4'
+                          : 'sm:grid-cols-3'
+                      } gap-2.5 text-xs tabular-nums`}
+                    >
+                      {showMorningSection && (
+                        <div
+                          data-testid="tenday-report-morning-summary-box"
+                          className="p-3 bg-amber-50/70 rounded-xl border border-amber-200"
+                        >
+                          <span className="text-amber-950 font-semibold block">
+                            ☀️ 10-दिन सुबह का दूध / टोटल
+                          </span>
+                          <span className="text-sm font-extrabold text-slate-900 mt-0.5 block">
+                            {formatNumber(mornSum.totalLiters, 2)} L ·{' '}
+                            {formatWholeCurrency(mornSum.totalAmount)}
+                          </span>
+                        </div>
+                      )}
+                      {showEveningSection && (
+                        <div
+                          data-testid="tenday-report-evening-summary-box"
+                          className="p-3 bg-indigo-50/70 rounded-xl border border-indigo-200"
+                        >
+                          <span className="text-indigo-950 font-semibold block">
+                            🌙 10-दिन शाम का दूध / टोटल
+                          </span>
+                          <span className="text-sm font-extrabold text-slate-900 mt-0.5 block">
+                            {formatNumber(eveSum.totalLiters, 2)} L ·{' '}
+                            {formatWholeCurrency(eveSum.totalAmount)}
+                          </span>
+                        </div>
+                      )}
                       <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
                         <span className="text-blue-900 font-semibold block">
                           10-दिन कुल दूध · FAT/SNF
                         </span>
                         <span className="text-sm font-bold text-blue-900 mt-0.5 block">
-                          {formatNumber(totalSum.totalLiters, 3)} L ·{' '}
-                          {formatNumber(totalSum.avgFat)}/{formatNumber(totalSum.avgSnf)}
+                          {formatNumber(totalSum.totalLiters, 2)} L ·{' '}
+                          {formatNumber(totalSum.avgFat, 1)}/{formatNumber(totalSum.avgSnf, 1)}
                         </span>
                       </div>
                       <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
                         <span className="text-emerald-900 font-semibold block">
-                          10-दिन कुल खरीद राशि
+                          10-दिन कुल दूध राशि
                         </span>
-                        <span className="text-base font-bold text-emerald-800 mt-0.5 block">
+                        <span className="text-base font-extrabold text-emerald-800 mt-0.5 block">
                           {formatWholeCurrency(totalSum.totalAmount)}
                         </span>
                       </div>
                     </div>
 
-                    <div>
-                      <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
-                        <thead>
-                          <tr className="bg-slate-50">
-                            <th className="py-2 px-1.5 sm:px-2.5 text-left border border-slate-300">तारीख</th>
-                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">सुबह (L / ₹)</th>
-                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">शाम (L / ₹)</th>
-                            <th className="py-2 px-1.5 sm:px-2.5 text-right border border-slate-300">कुल (L / ₹)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {dayRows.map((r) => (
-                            <tr key={r.date} className="hover:bg-slate-50">
-                              <td className="py-1.5 px-1.5 sm:px-2.5 font-mono font-bold text-slate-900 whitespace-nowrap border border-slate-300">
-                                {formatDateDMY(r.date)}
+                    {/* TABLE 1: सुबह का रिकॉर्ड (Morning Record Table — Shown when farmer brings morning milk) */}
+                    {showMorningSection && (
+                      <div
+                        data-testid="tenday-morning-records-block"
+                        className="bg-white border-2 border-amber-200 rounded-2xl overflow-hidden"
+                      >
+                        <div className="bg-amber-50 px-3 py-2 border-b border-amber-200 flex items-center justify-between gap-2">
+                          <span className="text-xs sm:text-sm font-extrabold text-amber-950 flex items-center gap-1.5">
+                            <Sun className="w-4 h-4 text-amber-600 shrink-0" />
+                            {lang === 'hi'
+                              ? `सुबह का दूध रिकॉर्ड (${formatDateDMY(fromDate)} से ${formatDateDMY(toDate)})`
+                              : `Morning Milk Record (${formatDateDMY(fromDate)} - ${formatDateDMY(toDate)})`}
+                          </span>
+                          <span className="px-2.5 py-0.5 rounded-full bg-white border border-amber-300 text-[11px] font-extrabold text-amber-900 tabular-nums">
+                            {lang === 'hi'
+                              ? `सुबह टोटल: ${formatNumber(mornSum.totalLiters, 2)} L · ${formatWholeCurrency(mornSum.totalAmount)}`
+                              : `AM Total: ${formatNumber(mornSum.totalLiters, 2)} L · ${formatWholeCurrency(mornSum.totalAmount)}`}
+                          </span>
+                        </div>
+
+                        <table className="w-full text-xs sm:text-sm border-collapse tabular-nums">
+                          <thead>
+                            <tr className="bg-slate-50 text-slate-800 border-b border-slate-300">
+                              <th className="py-1.5 px-1 sm:px-2 text-left font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'तारीख' : 'Date'}
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'लीटर' : 'Liters'}
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-amber-50/60 text-amber-950">
+                                FAT
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-indigo-50/60 text-indigo-950">
+                                SNF
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'रेट' : 'Rate'}
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'रकम' : 'Amt'}
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {mornEntries.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={6}
+                                  className="py-4 text-center text-slate-500 border border-slate-300"
+                                >
+                                  {lang === 'hi'
+                                    ? 'इस अवधि में सुबह की कोई दूध एंट्री नहीं है।'
+                                    : 'No morning milk entries in this period.'}
+                                </td>
+                              </tr>
+                            ) : (
+                              mornEntries.map((ce) => (
+                                <tr key={ce.id} className="hover:bg-amber-50/20">
+                                  <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap">
+                                    <span className="font-mono font-bold text-slate-900 block leading-tight">
+                                      {formatDateDMY(ce.date)}
+                                    </span>
+                                    <span className="text-[10px] font-semibold text-slate-500 block leading-tight truncate max-w-[115px] sm:max-w-none">
+                                      {reportFarmerFilter === 'all'
+                                        ? `${ce.farmerCode}-${ce.farmerName} · `
+                                        : ''}
+                                      {ce.milkType === 'cow' ? 'गाय' : 'भैंस'}
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(ce.liters, 2)} L
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-900 bg-amber-50/30 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(ce.fat, 1)}
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-900 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(ce.snf, 1)}
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                                    ₹{formatNumber(ce.rate, 2)}
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
+                                    {formatWholeCurrency(ce.totalAmount)}
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                          <tfoot>
+                            <tr
+                              data-testid="tenday-morning-total-row"
+                              className="bg-amber-100/90 text-slate-950 font-extrabold border-t-2 border-amber-400"
+                            >
+                              <td className="py-2 px-1 sm:px-2 border border-slate-300">
+                                {lang === 'hi'
+                                  ? `सुबह का टोटल (${mornEntries.length})`
+                                  : `Morning Total (${mornEntries.length})`}
                               </td>
-                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
-                                <span className="block font-bold text-slate-900 leading-tight">
-                                  {formatNumber(r.mornLiters, 2)} L
-                                </span>
-                                <span className="block text-xs font-semibold text-slate-600 leading-tight">
-                                  {formatWholeCurrency(r.mornAmt)}
-                                </span>
+                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
+                                {formatNumber(mornSum.totalLiters, 2)} L
                               </td>
-                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
-                                <span className="block font-bold text-slate-900 leading-tight">
-                                  {formatNumber(r.eveLiters, 2)} L
-                                </span>
-                                <span className="block text-xs font-semibold text-slate-600 leading-tight">
-                                  {formatWholeCurrency(r.eveAmt)}
-                                </span>
+                              <td className="py-2 px-1 sm:px-2 text-center text-amber-950 whitespace-nowrap border border-slate-300">
+                                {formatNumber(mornSum.avgFat, 1)}
                               </td>
-                              <td className="py-1.5 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
-                                <span className="block font-extrabold text-blue-900 leading-tight">
-                                  {formatNumber(r.totLiters, 2)} L
-                                </span>
-                                <span className="block text-xs font-extrabold text-emerald-800 leading-tight">
-                                  {formatWholeCurrency(r.totAmt)}
-                                </span>
+                              <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 whitespace-nowrap border border-slate-300">
+                                {formatNumber(mornSum.avgSnf, 1)}
+                              </td>
+                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
+                                {mornSum.avgRate !== null
+                                  ? `₹${formatNumber(mornSum.avgRate, 2)}`
+                                  : '—'}
+                              </td>
+                              <td className="py-2 px-1 sm:px-2 text-right text-emerald-900 whitespace-nowrap border border-slate-300">
+                                {formatWholeCurrency(mornSum.totalAmount)}
                               </td>
                             </tr>
-                          ))}
-                        </tbody>
-                        <tfoot>
-                          <tr className="bg-blue-50/80 font-extrabold tabular-nums">
-                            <td className="py-2 px-1.5 sm:px-2.5 border border-slate-300">
-                              कुल ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
-                            </td>
-                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
-                              <span className="block leading-tight">
-                                {formatNumber(mornSum.totalLiters, 2)} L
-                              </span>
-                              <span className="block text-xs text-slate-700 leading-tight">
-                                {formatWholeCurrency(mornSum.totalAmount)}
-                              </span>
-                            </td>
-                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
-                              <span className="block leading-tight">
+                          </tfoot>
+                        </table>
+                      </div>
+                    )}
+
+                    {/* TABLE 2: शाम का रिकॉर्ड (Evening Record Table — Shown below Morning only when farmer brings evening milk) */}
+                    {showEveningSection && (
+                      <div
+                        data-testid="tenday-evening-records-block"
+                        className="bg-white border-2 border-indigo-200 rounded-2xl overflow-hidden"
+                      >
+                        <div className="bg-indigo-50 px-3 py-2 border-b border-indigo-200 flex items-center justify-between gap-2">
+                          <span className="text-xs sm:text-sm font-extrabold text-indigo-950 flex items-center gap-1.5">
+                            <Moon className="w-4 h-4 text-indigo-600 shrink-0" />
+                            {lang === 'hi'
+                              ? `शाम का दूध रिकॉर्ड (${formatDateDMY(fromDate)} से ${formatDateDMY(toDate)})`
+                              : `Evening Milk Record (${formatDateDMY(fromDate)} - ${formatDateDMY(toDate)})`}
+                          </span>
+                          <span className="px-2.5 py-0.5 rounded-full bg-white border border-indigo-300 text-[11px] font-extrabold text-indigo-900 tabular-nums">
+                            {lang === 'hi'
+                              ? `शाम टोटल: ${formatNumber(eveSum.totalLiters, 2)} L · ${formatWholeCurrency(eveSum.totalAmount)}`
+                              : `PM Total: ${formatNumber(eveSum.totalLiters, 2)} L · ${formatWholeCurrency(eveSum.totalAmount)}`}
+                          </span>
+                        </div>
+
+                        <table className="w-full text-xs sm:text-sm border-collapse tabular-nums">
+                          <thead>
+                            <tr className="bg-slate-50 text-slate-800 border-b border-slate-300">
+                              <th className="py-1.5 px-1 sm:px-2 text-left font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'तारीख' : 'Date'}
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'लीटर' : 'Liters'}
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-amber-50/60 text-amber-950">
+                                FAT
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-indigo-50/60 text-indigo-950">
+                                SNF
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'रेट' : 'Rate'}
+                              </th>
+                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
+                                {lang === 'hi' ? 'रकम' : 'Amt'}
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {eveEntries.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={6}
+                                  className="py-4 text-center text-slate-500 border border-slate-300"
+                                >
+                                  {lang === 'hi'
+                                    ? 'इस अवधि में शाम की कोई दूध एंट्री नहीं है।'
+                                    : 'No evening milk entries in this period.'}
+                                </td>
+                              </tr>
+                            ) : (
+                              eveEntries.map((ce) => (
+                                <tr key={ce.id} className="hover:bg-indigo-50/20">
+                                  <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap">
+                                    <span className="font-mono font-bold text-slate-900 block leading-tight">
+                                      {formatDateDMY(ce.date)}
+                                    </span>
+                                    <span className="text-[10px] font-semibold text-slate-500 block leading-tight truncate max-w-[115px] sm:max-w-none">
+                                      {reportFarmerFilter === 'all'
+                                        ? `${ce.farmerCode}-${ce.farmerName} · `
+                                        : ''}
+                                      {ce.milkType === 'cow' ? 'गाय' : 'भैंस'}
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(ce.liters, 2)} L
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-900 bg-amber-50/30 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(ce.fat, 1)}
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-900 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(ce.snf, 1)}
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                                    ₹{formatNumber(ce.rate, 2)}
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
+                                    {formatWholeCurrency(ce.totalAmount)}
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                          <tfoot>
+                            <tr
+                              data-testid="tenday-evening-total-row"
+                              className="bg-indigo-100/90 text-slate-950 font-extrabold border-t-2 border-indigo-400"
+                            >
+                              <td className="py-2 px-1 sm:px-2 border border-slate-300">
+                                {lang === 'hi'
+                                  ? `शाम का टोटल (${eveEntries.length})`
+                                  : `Evening Total (${eveEntries.length})`}
+                              </td>
+                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
                                 {formatNumber(eveSum.totalLiters, 2)} L
-                              </span>
-                              <span className="block text-xs text-slate-700 leading-tight">
+                              </td>
+                              <td className="py-2 px-1 sm:px-2 text-center text-amber-950 whitespace-nowrap border border-slate-300">
+                                {formatNumber(eveSum.avgFat, 1)}
+                              </td>
+                              <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 whitespace-nowrap border border-slate-300">
+                                {formatNumber(eveSum.avgSnf, 1)}
+                              </td>
+                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
+                                {eveSum.avgRate !== null
+                                  ? `₹${formatNumber(eveSum.avgRate, 2)}`
+                                  : '—'}
+                              </td>
+                              <td className="py-2 px-1 sm:px-2 text-right text-emerald-900 whitespace-nowrap border border-slate-300">
                                 {formatWholeCurrency(eveSum.totalAmount)}
+                              </td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      </div>
+                    )}
+
+                    {/* COMBINED MORNING + EVENING TOTAL + ADVANCE/BALANCE ADJUSTMENT + INLINE PAYMENT */}
+                    <div
+                      data-testid="tenday-combined-accounting-card"
+                      className="bg-blue-50/70 border-2 border-blue-300 rounded-2xl p-3.5 sm:p-4 space-y-3 tabular-nums"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-200 pb-2.5">
+                        <div>
+                          <h4 className="text-xs sm:text-sm font-extrabold text-blue-950">
+                            {showMorningSection && showEveningSection
+                              ? 'सुबह + शाम का टोटल एवं एडवांस / बकाया जोड़-घटाव'
+                              : showMorningSection
+                              ? 'सुबह का कुल टोटल एवं एडवांस / बकाया जोड़-घटाव'
+                              : 'शाम का कुल टोटल एवं एडवांस / बकाया जोड़-घटाव'}
+                          </h4>
+                          {accountingFarmer && (
+                            <p className="text-xs font-bold text-slate-700 mt-0.5">
+                              किसान: {accountingFarmer.code} — {accountingFarmer.name} (
+                              {formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 no-print">
+                          {reportFarmerFilter === 'all' && state.farmers.length > 0 && (
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[11px] font-bold text-blue-900">
+                                किसान चुनें:
                               </span>
-                            </td>
-                            <td className="py-2 px-1.5 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
-                              <span className="block text-blue-900 leading-tight">
-                                {formatNumber(totalSum.totalLiters, 2)} L
+                              <select
+                                value={accountingFarmer?.id || ''}
+                                onChange={(e) => {
+                                  setBillFarmerId(e.target.value);
+                                  setReportFarmerFilter(e.target.value);
+                                }}
+                                className="h-8 px-2 text-xs font-bold bg-white border border-blue-300 rounded-lg"
+                              >
+                                {state.farmers.map((f) => (
+                                  <option key={f.id} value={f.id}>
+                                    {f.code} — {f.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                          {accountingFarmer && liveFarmerBillData && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openBillWhatsApp({
+                                  ...liveFarmerBillData,
+                                  id:
+                                    activeBill?.farmerId === accountingFarmer.id
+                                      ? activeBill.id
+                                      : `bill_${accountingFarmer.id}_${billYearMonth}_${billCycle}`,
+                                  billNumber:
+                                    activeBill?.farmerId === accountingFarmer.id
+                                      ? activeBill.billNumber
+                                      : `UD-${billYearMonth.replace('-', '')}-C${billCycle}-${accountingFarmer.code}`,
+                                  createdAt: new Date().toISOString(),
+                                })
+                              }
+                              className="h-8 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg flex items-center gap-1 shadow-2xs"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              <span>{lang === 'hi' ? 'WhatsApp बिल भेजें' : 'WhatsApp Bill'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {liveFarmerBillData && (
+                        <>
+                          <div className="bg-white border border-blue-200 rounded-xl divide-y divide-slate-200 text-xs sm:text-sm">
+                            {showMorningSection && showEveningSection && (
+                              <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                <span className="font-semibold text-slate-700">
+                                  सुबह का टोटल ({formatNumber(liveFarmerBillData.morningLiters, 2)}{' '}
+                                  L) + शाम का टोटल (
+                                  {formatNumber(liveFarmerBillData.eveningLiters, 2)} L)
+                                </span>
+                                <span className="font-bold text-slate-900">
+                                  {formatWholeCurrency(liveFarmerBillData.morningAmount)} +{' '}
+                                  {formatWholeCurrency(liveFarmerBillData.eveningAmount)}
+                                </span>
+                              </div>
+                            )}
+
+                            <div className="px-3 py-2 flex items-center justify-between gap-2 bg-blue-50/50">
+                              <span className="font-extrabold text-blue-950">
+                                {showMorningSection && showEveningSection
+                                  ? 'सुबह-शाम का कुल दूध टोटल'
+                                  : showMorningSection
+                                  ? 'सुबह का कुल दूध टोटल'
+                                  : 'शाम का कुल दूध टोटल'}{' '}
+                                ({formatNumber(liveFarmerBillData.totalLiters, 2)} L)
                               </span>
-                              <span className="block text-xs text-emerald-800 leading-tight">
-                                {formatWholeCurrency(totalSum.totalAmount)}
+                              <span
+                                data-testid="bill-total-milk-amount"
+                                className="font-extrabold text-blue-950 text-sm sm:text-base"
+                              >
+                                {formatWholeCurrency(liveFarmerBillData.totalMilkAmount)}
                               </span>
-                            </td>
-                          </tr>
-                        </tfoot>
-                      </table>
+                            </div>
+
+                            <div className="px-3 py-2 flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-700">
+                                पिछला बकाया / अतिरिक्त भुगतान का जोड़ या घटाव
+                              </span>
+                              <span
+                                data-testid="bill-previous-balance"
+                                className={`font-extrabold ${
+                                  liveFarmerBillData.previousBalance > 0
+                                    ? 'text-amber-800'
+                                    : liveFarmerBillData.previousBalance < 0
+                                    ? 'text-indigo-700'
+                                    : 'text-slate-700'
+                                }`}
+                              >
+                                {liveFarmerBillData.previousBalance > 0
+                                  ? `+${formatWholeCurrency(liveFarmerBillData.previousBalance)} (बकाया जुड़ा)`
+                                  : liveFarmerBillData.previousBalance < 0
+                                  ? `-${formatWholeCurrency(Math.abs(liveFarmerBillData.previousBalance))} (अतिरिक्त घटा)`
+                                  : '₹0'}
+                              </span>
+                            </div>
+
+                            <div className="px-3 py-2 flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-700">
+                                एडवांस और दाना/पशु-आहार रकम का घटाव (-)
+                              </span>
+                              <span className="font-extrabold text-red-600">
+                                -
+                                {formatWholeCurrency(
+                                  liveFarmerBillData.advancesInPeriod +
+                                    liveFarmerBillData.feedDeductionsInPeriod +
+                                    liveFarmerBillData.inlineDeductions
+                                )}
+                              </span>
+                            </div>
+
+                            <div className="px-3 py-2 flex items-center justify-between gap-2 bg-slate-50">
+                              <span className="font-extrabold text-slate-900">
+                                जोड़-घटाव के बाद कुल देय बिल रकम
+                              </span>
+                              <span
+                                data-testid="bill-payable-before-payment"
+                                className="font-extrabold text-blue-900"
+                              >
+                                {formatWholeCurrency(
+                                  liveFarmerBillData.billPayableBeforePayment ??
+                                    liveFarmerBillData.netPayable +
+                                      liveFarmerBillData.paymentsInPeriod
+                                )}
+                              </span>
+                            </div>
+
+                            <div className="px-3 py-2 flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-700">
+                                इस अवधि में किया गया भुगतान (-)
+                              </span>
+                              <span
+                                data-testid="bill-payments-in-period"
+                                className="font-extrabold text-emerald-700"
+                              >
+                                -{formatWholeCurrency(liveFarmerBillData.paymentsInPeriod)}
+                              </span>
+                            </div>
+
+                            <div className="px-3 py-2.5 flex items-center justify-between gap-2 bg-emerald-50">
+                              <span className="font-extrabold text-emerald-950 text-xs sm:text-sm">
+                                अंतिम शेष देय / बकाया रकम
+                              </span>
+                              <span
+                                data-testid="bill-net-payable"
+                                className="font-extrabold text-emerald-800 text-base sm:text-lg"
+                              >
+                                {liveFarmerBillData.netPayable < 0
+                                  ? `-${formatWholeCurrency(Math.abs(liveFarmerBillData.netPayable))}`
+                                  : formatWholeCurrency(liveFarmerBillData.netPayable)}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Inline Payment Right Inside the 10-Day Morning-Evening Bill */}
+                          {accountingFarmer && (
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                executeInlineCyclePayment(
+                                  accountingFarmer,
+                                  billYearMonth,
+                                  billCycle,
+                                  activeBill?.farmerId === accountingFarmer.id
+                                    ? activeBill.id
+                                    : undefined,
+                                  activeBill?.farmerId === accountingFarmer.id
+                                    ? activeBill.billNumber
+                                    : undefined
+                                );
+                              }}
+                              className="bg-white border border-blue-300 rounded-xl p-3 space-y-2.5 no-print"
+                            >
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <span className="text-xs font-extrabold text-blue-950">
+                                  💳 यहीं पर भुगतान करें ({accountingFarmer.code} —{' '}
+                                  {accountingFarmer.name})
+                                </span>
+                                {liveFarmerBillData.netPayable > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setQuickBillPayAmount(String(liveFarmerBillData.netPayable))
+                                    }
+                                    className="px-2.5 py-1 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-[11px] font-extrabold"
+                                  >
+                                    पूरा बकाया भरें (
+                                    {formatWholeCurrency(liveFarmerBillData.netPayable)})
+                                  </button>
+                                )}
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 items-end">
+                                <div>
+                                  <label className="block text-[11px] font-bold text-slate-700 mb-0.5">
+                                    भुगतान रकम (₹)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    data-testid="quick-bill-pay-amount"
+                                    placeholder={`जैसे ${Math.max(0, liveFarmerBillData.netPayable)}`}
+                                    value={quickBillPayAmount}
+                                    onChange={(e) => setQuickBillPayAmount(e.target.value)}
+                                    className="w-full h-9 px-2.5 text-xs font-mono font-bold bg-slate-50 border border-slate-300 rounded-lg tabular-nums"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-bold text-slate-700 mb-0.5">
+                                    भुगतान का तरीका
+                                  </label>
+                                  <select
+                                    value={quickBillPayMethod}
+                                    onChange={(e) =>
+                                      setQuickBillPayMethod(e.target.value as PaymentMethod)
+                                    }
+                                    className="w-full h-9 px-2.5 text-xs font-semibold bg-slate-50 border border-slate-300 rounded-lg"
+                                  >
+                                    <option value="cash">नकद (Cash)</option>
+                                    <option value="upi">UPI</option>
+                                    <option value="bank">बैंक (Bank)</option>
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-bold text-slate-700 mb-0.5">
+                                    टिप्पणी (वैकल्पिक)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    placeholder="भुगतान नोट..."
+                                    value={quickBillPayNotes}
+                                    onChange={(e) => setQuickBillPayNotes(e.target.value)}
+                                    className="w-full h-9 px-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg"
+                                  />
+                                </div>
+                                <button
+                                  type="submit"
+                                  data-testid="quick-bill-pay-submit-btn"
+                                  className="h-9 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-lg shadow-2xs"
+                                >
+                                  यहीं भुगतान सेव करें
+                                </button>
+                              </div>
+
+                              {quickPaySuccessNotice && (
+                                <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs font-bold flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                                  <span>{quickPaySuccessNotice}</span>
+                                </div>
+                              )}
+                            </form>
+                          )}
+                        </>
+                      )}
                     </div>
                   </div>
                 );
@@ -2388,583 +2923,6 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   </div>
                 );
               })()}
-          </div>
-
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 no-print">
-            <h2 className="text-base font-bold text-slate-900 mb-1">
-              {lang === 'hi'
-                ? 'किसान का 10-दिन बिल बनाएँ (10-Day Cycle Farmer Bill)'
-                : '10-Day Cycle Farmer Billing'}
-            </h2>
-            <p className="text-xs text-slate-500 mb-4">
-              {lang === 'hi'
-                ? 'चक्र 1: 1 से 10 तारीख · चक्र 2: 11 से 20 तारीख · चक्र 3: 21 से महीने के अंत तक'
-                : 'Cycle 1: 1–10 · Cycle 2: 11–20 · Cycle 3: 21–End of Month'}
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {lang === 'hi' ? 'किसान चुनें' : 'Select Farmer'}
-                </label>
-                <select
-                  value={billFarmerId}
-                  onChange={(e) => setBillFarmerId(e.target.value)}
-                  className="w-full min-h-[44px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
-                >
-                  <option value="">{lang === 'hi' ? '-- किसान चुनें --' : '-- Select --'}</option>
-                  {state.farmers.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.code} — {f.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {lang === 'hi' ? 'महीना और वर्ष' : 'Month & Year'}
-                </label>
-                <input
-                  type="month"
-                  value={billYearMonth}
-                  onChange={(e) => setBillYearMonth(e.target.value)}
-                  className="w-full min-h-[44px] px-3 py-2 text-sm border border-slate-300 rounded-xl tabular-nums"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {lang === 'hi' ? '10-दिन का चक्र चुनें' : '10-Day Cycle'}
-                </label>
-                <select
-                  value={billCycle}
-                  onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
-                  className="w-full min-h-[44px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
-                >
-                  <option value={1}>
-                    {lang === 'hi' ? 'चक्र 1: 1 से 10 तारीख' : 'Cycle 1: 1st to 10th'}
-                  </option>
-                  <option value={2}>
-                    {lang === 'hi' ? 'चक्र 2: 11 से 20 तारीख' : 'Cycle 2: 11th to 20th'}
-                  </option>
-                  <option value={3}>
-                    {lang === 'hi'
-                      ? 'चक्र 3: 21 से महीने के अंत तक'
-                      : 'Cycle 3: 21st to End of Month'}
-                  </option>
-                </select>
-              </div>
-
-              <div>
-                <button
-                  type="button"
-                  onClick={handleCreateOrUpdateBill}
-                  className="w-full min-h-[44px] px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl"
-                >
-                  {lang === 'hi' ? '10-दिन का बिल बनाएँ / खोलें' : 'Generate / Open Bill'}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Printable Bill Preview */}
-          {activeBill && (
-            <div className="bg-white border-2 border-blue-200 rounded-2xl p-6 space-y-4">
-              {/* Stale Bill Warning if underlying entries changed after bill creation */}
-              {(() => {
-                const f = state.farmers.find((x) => x.id === activeBill.farmerId);
-                if (!f) return null;
-                const currentHash = computeBillSnapshotHash(
-                  f,
-                  state.collections,
-                  state.advancesAndPayments,
-                  state.cattleFeed,
-                  activeBill.toDate
-                );
-                if (currentHash !== activeBill.snapshotHash) {
-                  return (
-                    <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-center justify-between gap-2 text-xs text-amber-900 no-print">
-                      <div className="flex items-center gap-2">
-                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                        <span>
-                          {lang === 'hi'
-                            ? 'चेतावनी: इस बिल के बनने के बाद पुराने रिकॉर्ड में बदलाव किया गया है। कृपया बिल को पुनर्गणना (Recalculate) करें।'
-                            : 'Warning: Underlying records were modified after this bill was generated. Please recalculate.'}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleCreateOrUpdateBill}
-                        className="px-3 py-1.5 bg-amber-600 text-white font-semibold rounded-lg flex items-center gap-1 shrink-0"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                        {lang === 'hi' ? 'बिल पुनर्गणना करें' : 'Recalculate'}
-                      </button>
-                    </div>
-                  );
-                }
-                return null;
-              })()}
-
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 pb-4 gap-3">
-                <div>
-                  <h3 className="text-xl font-bold text-blue-900">
-                    {state.dairyName || 'Ujalaa Dairy'} — 10-दिन का किसान दूध बिल
-                  </h3>
-                  <p className="text-xs text-slate-600 mt-0.5 tabular-nums">
-                    बिल नं: <strong>{activeBill.billNumber}</strong> · अवधि:{' '}
-                    <strong>
-                      {formatDateDMY(activeBill.fromDate)} से {formatDateDMY(activeBill.toDate)}
-                    </strong>
-                  </p>
-                  <p className="text-sm font-bold text-slate-900 mt-1">
-                    किसान: {activeBill.farmerCode} — {activeBill.farmerName}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 no-print">
-                  <button
-                    type="button"
-                    onClick={() => window.print()}
-                    className="min-h-[40px] px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-1.5"
-                  >
-                    <Printer className="w-4 h-4" />
-                    {lang === 'hi' ? 'प्रिंट / PDF सेव करें' : 'Print / Save PDF'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => openBillWhatsApp(activeBill)}
-                    className="min-h-[40px] px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl flex items-center gap-1.5"
-                  >
-                    <MessageSquare className="w-4 h-4" />
-                    {lang === 'hi' ? 'WhatsApp पर भेजें' : 'Share on WhatsApp'}
-                  </button>
-                </div>
-              </div>
-
-              {/* Morning vs Evening Summary & Final Net Payable (Whole Integer Only) */}
-              <div
-                data-testid="ten-day-bill-summary"
-                className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums"
-              >
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">सुबह का दूध / राशि</span>
-                  <span className="font-bold text-slate-900 mt-0.5 block">
-                    {formatNumber(activeBill.morningLiters, 3)} L ·{' '}
-                    {formatWholeCurrency(activeBill.morningAmount)}
-                  </span>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">शाम का दूध / राशि</span>
-                  <span className="font-bold text-slate-900 mt-0.5 block">
-                    {formatNumber(activeBill.eveningLiters, 3)} L ·{' '}
-                    {formatWholeCurrency(activeBill.eveningAmount)}
-                  </span>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">कुल लीटर · औसत FAT/SNF</span>
-                  <span className="font-bold text-slate-900 mt-0.5 block">
-                    {formatNumber(activeBill.totalLiters, 3)} L ·{' '}
-                    {formatNumber(activeBill.avgFat)}/{formatNumber(activeBill.avgSnf)}
-                  </span>
-                </div>
-                <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">
-                  <span className="text-blue-900 font-semibold block">कुल दूध राशि (पूर्णांक)</span>
-                  <span
-                    data-testid="bill-total-milk-amount"
-                    className="font-bold text-blue-900 text-sm mt-0.5 block"
-                  >
-                    {formatWholeCurrency(activeBill.totalMilkAmount)}
-                  </span>
-                </div>
-              </div>
-
-              {/* Bordered 10-Day Bill Saved Milk Entries Grid (Liters | FAT | SNF | Rate | Amount) */}
-              {(() => {
-                const billEntries = state.collections
-                  .filter(
-                    (c) =>
-                      c.farmerId === activeBill.farmerId &&
-                      c.date >= activeBill.fromDate &&
-                      c.date <= activeBill.toDate
-                  )
-                  .sort((a, b) => a.date.localeCompare(b.date) || a.shift.localeCompare(b.shift));
-
-                return (
-                  <div className="space-y-1.5">
-                    <h4 className="text-xs sm:text-sm font-extrabold text-slate-800">
-                      {lang === 'hi'
-                        ? `इस बिल की सेव की गई दूध एंट्रियाँ (${billEntries.length} एंट्री · ${formatDateDMY(activeBill.fromDate)} से ${formatDateDMY(activeBill.toDate)})`
-                        : `Saved Milk Entries in this Bill (${billEntries.length})`}
-                    </h4>
-                    <table
-                      data-testid="bill-saved-entries-table"
-                      className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums"
-                    >
-                      <thead>
-                        <tr className="bg-blue-50 text-blue-950">
-                          <th className="py-1.5 px-1 sm:px-2 text-left font-bold border border-slate-300">
-                            {lang === 'hi' ? 'तारीख / शिफ्ट' : 'Date / Shift'}
-                          </th>
-                          <th className="py-1.5 px-1 sm:px-2 text-right font-bold border border-slate-300">
-                            {lang === 'hi' ? 'लीटर' : 'Liters'}
-                          </th>
-                          <th className="py-1.5 px-1 sm:px-2 text-center font-bold border border-slate-300 bg-amber-50/80 text-amber-950">
-                            FAT
-                          </th>
-                          <th className="py-1.5 px-1 sm:px-2 text-center font-bold border border-slate-300 bg-indigo-50/80 text-indigo-950">
-                            SNF
-                          </th>
-                          <th className="py-1.5 px-1 sm:px-2 text-right font-bold border border-slate-300">
-                            {lang === 'hi' ? 'रेट' : 'Rate'}
-                          </th>
-                          <th className="py-1.5 px-1 sm:px-2 text-right font-bold border border-slate-300">
-                            {lang === 'hi' ? 'राशि' : 'Amount'}
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {billEntries.length === 0 ? (
-                          <tr>
-                            <td colSpan={6} className="py-4 text-center text-slate-500 border border-slate-300">
-                              {lang === 'hi'
-                                ? 'इस 10-दिन की अवधि में कोई दूध एंट्री नहीं है।'
-                                : 'No milk entries in this 10-day period.'}
-                            </td>
-                          </tr>
-                        ) : (
-                          billEntries.map((ce) => (
-                            <tr key={ce.id} className="hover:bg-slate-50">
-                              <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap">
-                                <span className="font-mono font-bold text-slate-900 block leading-tight">
-                                  {formatDateDMY(ce.date)}
-                                </span>
-                                <span className="text-[11px] font-semibold text-slate-600 block leading-tight">
-                                  {ce.shift === 'morning' ? 'सुबह' : 'शाम'} ·{' '}
-                                  {ce.milkType === 'cow' ? 'गाय' : 'भैंस'}
-                                </span>
-                              </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
-                                {formatNumber(ce.liters, 2)}
-                              </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-950 bg-amber-50/40 whitespace-nowrap border border-slate-300">
-                                {formatNumber(ce.fat, 1)}
-                              </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-950 bg-indigo-50/40 whitespace-nowrap border border-slate-300">
-                                {formatNumber(ce.snf, 1)}
-                              </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
-                                ₹{formatNumber(ce.rate, 2)}
-                              </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
-                                {formatWholeCurrency(ce.totalAmount)}
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })()}
-
-              <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs tabular-nums">
-                <div
-                  data-testid="bill-previous-adjustment-box"
-                  className={`p-3 rounded-xl border ${
-                    activeBill.previousBalance > 0
-                      ? 'bg-amber-50 border-amber-300'
-                      : activeBill.previousBalance < 0
-                      ? 'bg-indigo-50 border-indigo-300'
-                      : 'bg-slate-50 border-slate-200'
-                  }`}
-                >
-                  <span className="text-slate-700 font-semibold block">
-                    {activeBill.previousBalance > 0
-                      ? 'पिछली अवधि का कम भुगतान बकाया (+)'
-                      : activeBill.previousBalance < 0
-                      ? 'पिछली अवधि का ज्यादा भुगतान कटा (-)'
-                      : 'पिछला बकाया / समायोजन'}
-                  </span>
-                  <span
-                    data-testid="bill-previous-balance"
-                    className={`font-bold text-sm mt-0.5 block ${
-                      activeBill.previousBalance > 0
-                        ? 'text-amber-900'
-                        : activeBill.previousBalance < 0
-                        ? 'text-indigo-800'
-                        : 'text-slate-900'
-                    }`}
-                  >
-                    {activeBill.previousBalance > 0
-                      ? `+${formatWholeCurrency(activeBill.previousBalance)}`
-                      : activeBill.previousBalance < 0
-                      ? `-${formatWholeCurrency(Math.abs(activeBill.previousBalance))}`
-                      : formatWholeCurrency(0)}
-                  </span>
-                  {activeBill.previousCycleLabelHi && (
-                    <span className="text-[10px] text-slate-600 block mt-0.5">
-                      ({activeBill.previousCycleLabelHi})
-                    </span>
-                  )}
-                </div>
-
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">एडवांस कटौती (-)</span>
-                  <span className="font-bold text-red-600 mt-0.5 block">
-                    {formatWholeCurrency(activeBill.advancesInPeriod)}
-                  </span>
-                </div>
-
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-500 block">दाना/अन्य कटौती (-)</span>
-                  <span className="font-bold text-red-600 mt-0.5 block">
-                    {formatWholeCurrency(
-                      activeBill.feedDeductionsInPeriod + activeBill.inlineDeductions
-                    )}
-                  </span>
-                </div>
-
-                <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
-                  <span className="text-blue-950 font-semibold block">
-                    कुल देय बिल (भुगतान पूर्व)
-                  </span>
-                  <span
-                    data-testid="bill-payable-before-payment"
-                    className="font-bold text-blue-900 text-sm mt-0.5 block"
-                  >
-                    {formatWholeCurrency(
-                      activeBill.billPayableBeforePayment ??
-                        activeBill.netPayable + activeBill.paymentsInPeriod
-                    )}
-                  </span>
-                </div>
-
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-slate-600 font-semibold block">
-                    इस अवधि ({getCycleLabelHi(activeBill.cycle)}) का भुगतान (-)
-                  </span>
-                  <span
-                    data-testid="bill-payments-in-period"
-                    className="font-bold text-emerald-700 text-sm mt-0.5 block"
-                  >
-                    {formatWholeCurrency(activeBill.paymentsInPeriod)}
-                  </span>
-                </div>
-
-                <div
-                  className={`p-3 rounded-xl border ${
-                    activeBill.netPayable > 0
-                      ? 'bg-emerald-50 border-emerald-300'
-                      : activeBill.netPayable < 0
-                      ? 'bg-indigo-50 border-indigo-300'
-                      : 'bg-slate-100 border-slate-300'
-                  }`}
-                >
-                  <span className="text-slate-900 font-bold block">
-                    {activeBill.netPayable > 0
-                      ? 'अंतिम शेष देय (कम भुगतान)'
-                      : activeBill.netPayable < 0
-                      ? 'अतिरिक्त/ज्यादा भुगतान (-)'
-                      : 'अंतिम देय राशि (चुकता)'}
-                  </span>
-                  <span
-                    data-testid="bill-net-payable"
-                    className={`font-bold text-base mt-0.5 block ${
-                      activeBill.netPayable > 0
-                        ? 'text-emerald-800'
-                        : activeBill.netPayable < 0
-                        ? 'text-indigo-800'
-                        : 'text-slate-800'
-                    }`}
-                  >
-                    {activeBill.netPayable < 0
-                      ? `-${formatWholeCurrency(Math.abs(activeBill.netPayable))}`
-                      : formatWholeCurrency(activeBill.netPayable)}
-                  </span>
-                  <span
-                    data-testid="bill-carry-forward-note"
-                    className="text-[10px] font-semibold text-slate-700 block mt-0.5"
-                  >
-                    {activeBill.netPayable > 0
-                      ? 'अगली अवधि के बिल में जुड़ेगा (+)'
-                      : activeBill.netPayable < 0
-                      ? 'अगली अवधि के बिल से कटेगा (-)'
-                      : 'हिसाब बराबर'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Explicit Previous & Next Period Adjustment Explanation Banner on Bill */}
-              <div
-                data-testid="bill-adjustment-banner"
-                className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1 tabular-nums"
-              >
-                <div className="font-bold text-slate-800">
-                  10-दिन अवधि ({getCycleLabelHi(activeBill.cycle)}) भुगतान व समायोजन विवरण:
-                </div>
-                {activeBill.previousBalance !== 0 ? (
-                  <div className="text-slate-700">
-                    • पिछली अवधि ({activeBill.previousCycleLabelHi || 'पिछला चक्र'}) से समायोजन:{' '}
-                    {activeBill.previousBalance > 0 ? (
-                      <strong className="text-amber-800">
-                        कम भुगतान का बकाया +{formatWholeCurrency(activeBill.previousBalance)} इस बिल में जोड़ा गया है।
-                      </strong>
-                    ) : (
-                      <strong className="text-indigo-700">
-                        ज्यादा भुगतान का -{formatWholeCurrency(Math.abs(activeBill.previousBalance))} इस बिल से घटाया गया है।
-                      </strong>
-                    )}
-                  </div>
-                ) : (
-                  <div className="text-slate-600">
-                    • पिछली अवधि से कोई कम या ज्यादा भुगतान समायोजन बकाया नहीं है (₹0)।
-                  </div>
-                )}
-                <div className="text-slate-700">
-                  • इस अवधि ({getCycleLabelHi(activeBill.cycle)}) का कुल देय बिल:{' '}
-                  <strong>
-                    {formatWholeCurrency(
-                      activeBill.billPayableBeforePayment ??
-                        activeBill.netPayable + activeBill.paymentsInPeriod
-                    )}
-                  </strong>{' '}
-                  | भुगतान हुआ: <strong>{formatWholeCurrency(activeBill.paymentsInPeriod)}</strong>{' '}
-                  |{' '}
-                  {activeBill.netPayable > 0 ? (
-                    <strong className="text-emerald-800">
-                      शेष +{formatWholeCurrency(activeBill.netPayable)} (यदि कम भुगतान रहता है तो अगली अवधि में जुड़ेगा)
-                    </strong>
-                  ) : activeBill.netPayable < 0 ? (
-                    <strong className="text-indigo-700">
-                      अतिरिक्त भुगतान -{formatWholeCurrency(Math.abs(activeBill.netPayable))} (अगली अवधि के बिल से कटेगा)
-                    </strong>
-                  ) : (
-                    <strong className="text-emerald-700">बिल पूर्ण रूप से चुकता (₹0)</strong>
-                  )}
-                </div>
-              </div>
-
-              {/* Inline Quick Payment for this 10-Day Bill Period */}
-              <form
-                onSubmit={handleQuickBillPayment}
-                className="p-3.5 bg-blue-50/60 border border-blue-200 rounded-xl flex flex-col sm:flex-row items-stretch sm:items-end gap-3 no-print"
-              >
-                <div className="flex-1">
-                  <label className="block text-xs font-bold text-blue-950 mb-1">
-                    इस अवधि ({getCycleLabelHi(activeBill.cycle)}) का भुगतान सीधे दर्ज करें (₹)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    data-testid="quick-bill-pay-amount"
-                    placeholder={`जैसे ${Math.max(0, activeBill.netPayable)}`}
-                    value={quickBillPayAmount}
-                    onChange={(e) => setQuickBillPayAmount(e.target.value)}
-                    className="w-full min-h-[40px] px-3 py-1.5 text-xs font-mono bg-white border border-blue-300 rounded-lg tabular-nums"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-blue-950 mb-1">तरीका</label>
-                  <select
-                    value={quickBillPayMethod}
-                    onChange={(e) => setQuickBillPayMethod(e.target.value as PaymentMethod)}
-                    className="min-h-[40px] px-3 py-1.5 text-xs bg-white border border-blue-300 rounded-lg"
-                  >
-                    <option value="cash">नकद (Cash)</option>
-                    <option value="upi">UPI</option>
-                    <option value="bank">बैंक (Bank)</option>
-                  </select>
-                </div>
-                <div className="flex-1">
-                  <label className="block text-xs font-bold text-blue-950 mb-1">टिप्पणी</label>
-                  <input
-                    type="text"
-                    placeholder="वैकल्पिक नोट"
-                    value={quickBillPayNotes}
-                    onChange={(e) => setQuickBillPayNotes(e.target.value)}
-                    className="w-full min-h-[40px] px-3 py-1.5 text-xs bg-white border border-blue-300 rounded-lg"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  data-testid="quick-bill-pay-submit-btn"
-                  className="min-h-[40px] px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold rounded-lg shrink-0"
-                >
-                  भुगतान जोड़ें और बिल अपडेट करें
-                </button>
-              </form>
-            </div>
-          )}
-
-          {/* Saved Bills Archive */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5 no-print">
-            <h3 className="text-sm font-bold text-slate-900 mb-2.5">
-              {lang === 'hi'
-                ? `पुराने सेव किए गए 10-दिन के बिल (${state.bills.length})`
-                : `Saved 10-Day Bills (${state.bills.length})`}
-            </h3>
-            <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
-              <thead>
-                <tr className="bg-slate-50">
-                  <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">किसान / बिल नं</th>
-                  <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">अवधि (DD-MM-YYYY)</th>
-                  <th className="py-2 px-1 sm:px-2.5 text-right border border-slate-300">दूध · FAT/SNF · देय</th>
-                  <th className="py-2 px-1 sm:px-2 text-center border border-slate-300">खोलें</th>
-                </tr>
-              </thead>
-              <tbody>
-                {state.bills.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="py-6 text-center text-slate-500 border border-slate-300">
-                      {lang === 'hi' ? 'कोई पुराना बिल सेव नहीं है' : 'No saved bills yet'}
-                    </td>
-                  </tr>
-                ) : (
-                  state.bills.map((b) => (
-                    <tr key={b.id} className="hover:bg-slate-50">
-                      <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
-                        <span className="font-bold text-slate-900 block leading-tight">
-                          {b.farmerCode} — {b.farmerName}
-                        </span>
-                        <span className="text-[11px] text-slate-500 font-mono block leading-tight mt-0.5">
-                          {b.billNumber}
-                        </span>
-                      </td>
-                      <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
-                        <span className="font-mono font-bold text-slate-800 block leading-tight">
-                          {formatDateDMY(b.fromDate)}
-                        </span>
-                        <span className="font-mono font-semibold text-slate-600 text-[11px] block leading-tight">
-                          से {formatDateDMY(b.toDate)}
-                        </span>
-                      </td>
-                      <td className="py-2 px-1 sm:px-2.5 text-right whitespace-nowrap border border-slate-300">
-                        <span className="font-extrabold text-emerald-700 text-xs sm:text-sm block leading-tight">
-                          {formatWholeCurrency(b.netPayable)}
-                        </span>
-                        <div className="mt-1 inline-grid grid-cols-3 divide-x divide-slate-300 border border-slate-300 rounded bg-slate-50 text-[11px] font-bold">
-                          <span className="px-1 py-0.5 text-slate-900">{formatNumber(b.totalLiters, 1)}L</span>
-                          <span className="px-1 py-0.5 text-amber-950 bg-amber-50/70">F:{formatNumber(b.avgFat, 1)}</span>
-                          <span className="px-1 py-0.5 text-indigo-950 bg-indigo-50/70">S:{formatNumber(b.avgSnf, 1)}</span>
-                        </div>
-                      </td>
-                      <td className="py-2 px-1 sm:px-2 text-center border border-slate-300">
-                        <button
-                          type="button"
-                          onClick={() => setActiveBill(b)}
-                          className="px-2 py-1 bg-blue-50 text-blue-700 font-bold rounded-lg whitespace-nowrap"
-                        >
-                          {lang === 'hi' ? 'खोलें' : 'Open'}
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
           </div>
         </div>
       )}

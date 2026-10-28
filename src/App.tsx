@@ -238,6 +238,14 @@ export default function App() {
       }
       let nextCollections = [...prev.collections];
       for (const entry of entries) {
+        const existingIdx = nextCollections.findIndex((c) => c.id === entry.id);
+        if (existingIdx !== -1) {
+          const checkEdit = canSaveFarmerShiftMilkEntry(nextCollections, entry, entry.id);
+          if (checkEdit.allowed) {
+            nextCollections[existingIdx] = entry;
+          }
+          continue;
+        }
         const check = canSaveFarmerShiftMilkEntry(nextCollections, entry);
         if (check.allowed) {
           nextCollections.push(entry);

@@ -881,15 +881,15 @@ export function calculateFarmerLedger(
 ): FarmerLedgerSummary {
   const farmerCollections = collections
     .filter((c) => c.farmerId === farmer.id)
-    .sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
+    .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.time || '').localeCompare(b.time || ''));
 
   const farmerAdvPay = advancesAndPayments
     .filter((ap) => ap.farmerId === farmer.id)
-    .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+    .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || ''));
 
   const farmerFeed = cattleFeed
     .filter((cf) => cf.farmerId === farmer.id)
-    .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+    .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || ''));
 
   const colSummary = calculateCollectionSummary(farmerCollections);
 
@@ -2164,10 +2164,14 @@ export interface ScannedSlipRawRow {
   farmerName?: string;
   date?: string;
   shift?: ShiftType | string;
+  milkType?: MilkType | string;
   liters: number;
   fat: number;
   snf: number;
   rate?: number;
+  manualRate?: boolean;
+  amount?: number;
+  overwriteExisting?: boolean;
 }
 
 /**
@@ -2384,9 +2388,22 @@ const SLIP_NOISE_WORDS = new Set([
   'इवनिंग',
   'गाय',
   'भैंस',
+  'पशु',
+  'मवेशी',
+  'प्रकार',
   'पर्ची',
   'डेयरी',
   'उजाला',
+  'का',
+  'की',
+  'के',
+  'animal',
+  'cattle',
+  'type',
+  'milk',
+  'dairy',
+  'slip',
+  'receipt',
 ]);
 
 export function cleanScannedFarmerName(rawName?: string): string | undefined {
@@ -2522,7 +2539,8 @@ export function lookupNearestRateFromChart(
 
 /**
  * Parses handwritten/printed text lines from a milk slip, multi-farmer register page,
- * or multi-date morning/evening farmer passbook into ScannedSlipRawRow items.
+ * vertical thermal analyzer slip, or multi-date morning/evening farmer passbook into ScannedSlipRawRow items.
+ * Includes mathematical cross-verification (Liters * Rate ≈ Amount) and OCR digit/decimal repair.
  */
 export function parseMilkSlipTextToRows(
   rawText: string,
@@ -2530,7 +2548,11 @@ export function parseMilkSlipTextToRows(
   defaultShift?: ShiftType
 ): ScannedSlipRawRow[] {
   if (!rawText || !rawText.trim()) return [];
-  const asciiText = convertDevanagariDigitsToAscii(rawText);
+  // Normalize Devanagari digits, comma decimals (e.g. "5,5" -> "5.5"), and double dots ("4..5" -> "4.5")
+  const asciiText = convertDevanagariDigitsToAscii(rawText)
+    .replace(/(\d),(\d{1,3})(?!\d)/g, '$1.$2')
+    .replace(/(\d)\.\.+(\d)/g, '$1.$2');
+
   const rawLines = asciiText
     .split(/\r?\n|;/)
     .map((l) => l.trim())
@@ -2539,7 +2561,7 @@ export function parseMilkSlipTextToRows(
   const results: ScannedSlipRawRow[] = [];
 
   const normalizeFat = (v: number): number => {
-    if (v >= 25 && v <= 99 && Number.isInteger(v)) return round2(v / 10);
+    if (v >= 25 && v <= 115 && Number.isInteger(v)) return round2(v / 10);
     return round2(v);
   };
   const normalizeSnf = (v: number): number => {
@@ -2557,6 +2579,59 @@ export function parseMilkSlipTextToRows(
   let stickyDate: string | undefined = undefined;
   let stickyShift: ShiftType | undefined = defaultShift;
   let hasExplicitFarmerHeader = false;
+
+  // Multi-line vertical thermal slip accumulator (for receipts where Liters, FAT, SNF are on separate lines)
+  let pendingVerticalSlip: {
+    farmerCode?: string;
+    farmerName?: string;
+    date?: string;
+    shift?: ShiftType;
+    milkType?: MilkType;
+    liters?: number;
+    fat?: number;
+    snf?: number;
+    rate?: number;
+    amount?: number;
+  } = {};
+
+  const flushPendingVerticalSlipIfReady = () => {
+    if (
+      pendingVerticalSlip.liters &&
+      pendingVerticalSlip.liters > 0 &&
+      pendingVerticalSlip.fat &&
+      pendingVerticalSlip.fat > 0
+    ) {
+      let finalLiters = pendingVerticalSlip.liters;
+      const r = pendingVerticalSlip.rate;
+      const amt = pendingVerticalSlip.amount;
+      if (r && r >= 15 && r <= 120 && amt && amt >= 10) {
+        const expected = amt / r;
+        if (
+          expected >= 0.2 &&
+          expected <= 200 &&
+          Math.abs(finalLiters * r - amt) > Math.max(3, amt * 0.05)
+        ) {
+          const roundedExp = round3(expected);
+          if (Math.abs(roundedExp * r - amt) <= 2.5) {
+            finalLiters = roundedExp;
+          }
+        }
+      }
+      results.push({
+        farmerCode: pendingVerticalSlip.farmerCode || stickyFarmerCode,
+        farmerName: pendingVerticalSlip.farmerName || stickyFarmerName,
+        date: pendingVerticalSlip.date || stickyDate || defaultDate,
+        shift: pendingVerticalSlip.shift || stickyShift || defaultShift,
+        milkType: pendingVerticalSlip.milkType,
+        liters: finalLiters,
+        fat: pendingVerticalSlip.fat,
+        snf: pendingVerticalSlip.snf || 8.5,
+        rate: pendingVerticalSlip.rate,
+        amount: pendingVerticalSlip.amount,
+      });
+      pendingVerticalSlip = {};
+    }
+  };
 
   // Helper to extract date token from a line and return { dateStr, remainingLine }
   const extractDateFromLine = (
@@ -2621,7 +2696,19 @@ export function parseMilkSlipTextToRows(
   }[] = [];
 
   for (const rawLine of rawLines) {
-    const { dateStr, remainingLine } = extractDateFromLine(rawLine);
+    // Skip obvious total/summary lines on passbooks/registers
+    if (
+      /^(?:कुल\s*योग|महायोग|योग|औसत|grand\s*total|sub\s*total|total\s*[:=-]|\s*total\s*$)/i.test(
+        rawLine.trim()
+      )
+    ) {
+      continue;
+    }
+
+    // Strip time stamps like 07:15:22 or 06:45 AM so they don't pollute numbers
+    const withoutTimestamps = rawLine.replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ');
+
+    const { dateStr, remainingLine } = extractDateFromLine(withoutTimestamps);
     if (dateStr) {
       stickyDate = dateStr;
     }
@@ -2692,7 +2779,7 @@ export function parseMilkSlipTextToRows(
 
   for (const seg of expandedSegments) {
     const line = seg.text;
-    if (!line) continue;
+    if (!line && !seg.explicitDate) continue;
 
     // Detect shift on this segment
     let lineShift: ShiftType | undefined = seg.forcedShift;
@@ -2713,28 +2800,98 @@ export function parseMilkSlipTextToRows(
     }
     if (lineShift) {
       stickyShift = lineShift;
+      pendingVerticalSlip.shift = lineShift;
+    }
+    if (seg.explicitDate) {
+      pendingVerticalSlip.date = seg.explicitDate;
     }
     const effectiveShift = lineShift || stickyShift;
 
-    // Extract labeled values first if present
-    const fatMatch = line.match(/(?:fat|फैट|फेट|f)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
-    const snfMatch = line.match(/(?:snf|एसएनएफ|डिग्री|s|clr)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
-    const litMatch = line.match(
-      /(?:liters?|ltr|qty|मात्रा|लीटर|वजन|दूध|l|wt)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i
+    // Detect explicit animal type if written on line
+    let lineMilkType: MilkType | undefined;
+    if (/(?:^|\s|[(:,-])(भैंस|buffalo|buf|bm)(?:$|\s|[):,-])/i.test(line)) {
+      lineMilkType = 'buffalo';
+      pendingVerticalSlip.milkType = 'buffalo';
+    } else if (/(?:^|\s|[(:,-])(गाय|cow|cm)(?:$|\s|[):,-])/i.test(line)) {
+      lineMilkType = 'cow';
+      pendingVerticalSlip.milkType = 'cow';
+    }
+
+    // Extract labeled values first if present (single letters f/s/l require explicit [:=-] so "1.96 L 5.3" never matches "L 5.3")
+    const fatMatch = line.match(
+      /(?:(?:fat|फैट|फेट)\s*[:=-]?\s*|(?:^|\s)f\s*[:=-]\s*)(\d+(?:\.\d+)?)/i
     );
-    const rateMatch = line.match(/(?:rate|रेट|दर|भाव)\s*[:=-]?\s*(\d+(?:\.\d+)?)/i);
+    const snfMatch = line.match(
+      /(?:(?:snf|एसएनएफ|डिग्री|clr)\s*[:=-]?\s*|(?:^|\s)s\s*[:=-]\s*)(\d+(?:\.\d+)?)/i
+    );
+    const litMatch = line.match(
+      /(?:(?:liters?|ltr|qty|quantity|मात्रा|लीटर|वजन|दूध|wt|weight)\s*[:=-]?\s*|(?:^|\s)l\s*[:=-]\s*)(\d+(?:\.\d+)?)/i
+    );
+    const rateMatch = line.match(/(?:rate|रेट|दर|भाव)\s*[:=-]?\s*₹?\s*(\d+(?:\.\d+)?)/i);
+    const amtMatch = line.match(
+      /(?:amount|amt|total|कुल\s*राशि|कुल\s*रकम|राशि|रकम|कुल)\s*[:=-]?\s*₹?\s*(\d+(?:\.\d+)?)/i
+    );
     const codeMatch = line.match(/(?:id|code|कोड|क्र\.?|no)\s*[:=-]?\s*([A-Za-z0-9]+)/i);
     const nameLabelMatch = line.match(
       /(?:किसान(?:\s*का\s*नाम)?|नाम|farmer(?:\s*name)?|name)\s*[:=-]\s*([^\d,;:|/]+)/i
     );
 
+    const lineNumericCount = (line.match(/\d+(?:\.\d+)?/g) || []).length;
+
+    // Update vertical slip accumulator for single-label lines (e.g. thermal receipts)
+    if (codeMatch || nameLabelMatch) {
+      flushPendingVerticalSlipIfReady();
+    }
+    if (codeMatch) {
+      pendingVerticalSlip.farmerCode = codeMatch[1];
+      stickyFarmerCode = codeMatch[1];
+    }
+    if (nameLabelMatch) {
+      const nm = cleanScannedFarmerName(nameLabelMatch[1]);
+      if (nm) {
+        pendingVerticalSlip.farmerName = nm;
+        stickyFarmerName = nm;
+      }
+    }
+    if (rateMatch && lineNumericCount < 3) {
+      pendingVerticalSlip.rate = round2(Number(rateMatch[1]));
+    }
+    if (amtMatch && lineNumericCount < 3) {
+      pendingVerticalSlip.amount = round2(Number(amtMatch[1]));
+    }
+    if (snfMatch && lineNumericCount < 3) {
+      pendingVerticalSlip.snf = normalizeSnf(Number(snfMatch[1]));
+    }
+
     if (fatMatch && litMatch) {
+      // Both FAT and Liters are on the same line
+      let liters = normalizeLiters(Number(litMatch[1]));
       const fat = normalizeFat(Number(fatMatch[1]));
-      const snf = snfMatch ? normalizeSnf(Number(snfMatch[1])) : 8.5;
-      const liters = normalizeLiters(Number(litMatch[1]));
-      const rate = rateMatch ? round2(Number(rateMatch[1])) : undefined;
+      const snf = snfMatch ? normalizeSnf(Number(snfMatch[1])) : pendingVerticalSlip.snf || 8.5;
+      const rate = rateMatch ? round2(Number(rateMatch[1])) : pendingVerticalSlip.rate;
+      const amount = amtMatch ? round2(Number(amtMatch[1])) : pendingVerticalSlip.amount;
+
+      if (rate && rate >= 15 && rate <= 120 && amount && amount >= 10) {
+        const expected = amount / rate;
+        if (
+          expected >= 0.2 &&
+          expected <= 200 &&
+          Math.abs(liters * rate - amount) > Math.max(3, amount * 0.05)
+        ) {
+          const roundedExp = round3(expected);
+          if (Math.abs(roundedExp * rate - amount) <= 2.5) {
+            liters = roundedExp;
+          }
+        }
+      }
+
       const cleanedName = cleanScannedFarmerName(
-        nameLabelMatch ? nameLabelMatch[1] : line.replace(/(?:fat|फैट|फेट|snf|एसएनएफ|डिग्री|clr|liters?|ltr|qty|मात्रा|लीटर|वजन|दूध|rate|रेट|दर|भाव|id|code|कोड|क्र\.?|no)\s*[:=-]?\s*[A-Za-z0-9.]+/gi, ' ')
+        nameLabelMatch
+          ? nameLabelMatch[1]
+          : line.replace(
+              /(?:fat|फैट|फेट|snf|एसएनएफ|डिग्री|clr|liters?|ltr|qty|quantity|मात्रा|लीटर|वजन|दूध|weight|rate|रेट|दर|भाव|amount|amt|total|राशि|रकम|id|code|कोड|क्र\.?|no)\s*[:=-]?\s*[A-Za-z0-9.₹]+/gi,
+              ' '
+            )
       );
       const rowCode = codeMatch ? codeMatch[1] : undefined;
       if (cleanedName) stickyFarmerName = cleanedName;
@@ -2746,14 +2903,36 @@ export function parseMilkSlipTextToRows(
           farmerName: cleanedName || stickyFarmerName,
           date: seg.explicitDate || stickyDate || defaultDate,
           shift: effectiveShift,
+          milkType: lineMilkType,
           liters,
           fat,
           snf,
           rate,
+          amount,
         });
+        pendingVerticalSlip = {};
         continue;
       }
+    } else if (fatMatch && !litMatch && lineNumericCount < 3) {
+      if (pendingVerticalSlip.fat) {
+        flushPendingVerticalSlipIfReady();
+      }
+      pendingVerticalSlip.fat = normalizeFat(Number(fatMatch[1]));
+      continue;
+    } else if (litMatch && !fatMatch && lineNumericCount < 3) {
+      if (pendingVerticalSlip.liters) {
+        flushPendingVerticalSlipIfReady();
+      }
+      pendingVerticalSlip.liters = normalizeLiters(Number(litMatch[1]));
+      continue;
+    } else if ((snfMatch || rateMatch || amtMatch) && lineNumericCount < 3) {
+      continue;
     }
+
+    // Detect "Code – Farmer Name" pattern (e.g. "5 – पवन बैरागी" or "1  5 – पवन बैरागी  किसान कोड: 1")
+    const codeDashNameMatch = line.match(
+      /(?:^|\s)(\d{1,4})\s*[-–—]\s*([^\d|;:]{2,35}?)(?=\s*(?:किसान\s*कोड|id|code|कोड|\d|$|[|;:]))/i
+    );
 
     // Otherwise extract all numbers and words from the line
     const tokens = line.split(/[\s,|/:-]+/).filter(Boolean);
@@ -2776,22 +2955,52 @@ export function parseMilkSlipTextToRows(
       }
     }
 
-    const lineFarmerName = cleanScannedFarmerName(textWords.join(' '));
+    const lineFarmerName = cleanScannedFarmerName(
+      codeDashNameMatch ? codeDashNameMatch[2] : textWords.join(' ')
+    );
 
-    // If this line has fewer than 2 numbers, it may be a header line (e.g., "किसान: रामलाल गुर्जर (101)" or "दिनांक 21/10/2026")
-    if (numbers.length < 2) {
+    // Check if this line is a Farmer Card Header line (e.g. "1  5 – पवन बैरागी  किसान कोड: 1")
+    // where all numbers are integers (serial/code) and there is NO valid (FAT, SNF) decimal pair
+    const hasDecimalNumber = numbers.some((n) => !Number.isInteger(n));
+    const hasValidSnfCandidate = numbers.some((n) => {
+      const s = normalizeSnf(n);
+      return s >= 7.0 && s <= 10.5 && (!Number.isInteger(n) || (n >= 70 && n <= 105));
+    });
+    const isCardFarmerHeaderLine =
+      (Boolean(codeDashNameMatch) || Boolean(codeMatch) || Boolean(nameLabelMatch)) &&
+      Boolean(lineFarmerName) &&
+      !hasDecimalNumber &&
+      !hasValidSnfCandidate;
+
+    // If this line has fewer than 2 numbers OR is a Farmer Card Header line
+    if (numbers.length < 2 || isCardFarmerHeaderLine) {
+      if (isCardFarmerHeaderLine) {
+        flushPendingVerticalSlipIfReady();
+      }
       if (lineFarmerName) {
         stickyFarmerName = lineFarmerName;
+        pendingVerticalSlip.farmerName = lineFarmerName;
         hasExplicitFarmerHeader = true;
       }
-      if (numbers.length === 1 && Number.isInteger(numbers[0])) {
-        if (lineFarmerName || codeMatch || /[()]/.test(line) || numbers[0] > 31) {
+      if (codeDashNameMatch) {
+        stickyFarmerCode = codeDashNameMatch[1];
+        pendingVerticalSlip.farmerCode = codeDashNameMatch[1];
+        hasExplicitFarmerHeader = true;
+      } else if (codeMatch) {
+        stickyFarmerCode = codeMatch[1];
+        pendingVerticalSlip.farmerCode = codeMatch[1];
+        hasExplicitFarmerHeader = true;
+      } else if (numbers.length === 1 && Number.isInteger(numbers[0])) {
+        if (lineFarmerName || /[()]/.test(line) || numbers[0] > 31) {
           stickyFarmerCode = String(numbers[0]);
+          pendingVerticalSlip.farmerCode = String(numbers[0]);
           hasExplicitFarmerHeader = true;
         } else if (numbers[0] >= 1 && numbers[0] <= 31 && !seg.explicitDate) {
           stickyDate = String(numbers[0]);
+          pendingVerticalSlip.date = String(numbers[0]);
         } else {
           stickyFarmerCode = String(numbers[0]);
+          pendingVerticalSlip.farmerCode = String(numbers[0]);
           hasExplicitFarmerHeader = true;
         }
       }
@@ -2805,7 +3014,9 @@ export function parseMilkSlipTextToRows(
       numbers.length === 7 &&
       Number.isInteger(numbers[0]) &&
       numbers[0] >= 1 &&
-      numbers[0] <= 31
+      numbers[0] <= 31 &&
+      numbers[5] < 15 &&
+      numbers[6] < 15
     ) {
       const mLit = normalizeLiters(numbers[1]);
       const mFat = normalizeFat(numbers[2]);
@@ -2815,11 +3026,11 @@ export function parseMilkSlipTextToRows(
       const eSnf = normalizeSnf(numbers[6]);
       if (
         mFat >= 2.5 &&
-        mFat <= 11.0 &&
+        mFat <= 11.5 &&
         mSnf >= 7.0 &&
         mSnf <= 10.5 &&
         eFat >= 2.5 &&
-        eFat <= 11.0 &&
+        eFat <= 11.5 &&
         eSnf >= 7.0 &&
         eSnf <= 10.5
       ) {
@@ -2832,6 +3043,7 @@ export function parseMilkSlipTextToRows(
           farmerName: resolvedName,
           date: dayStr,
           shift: 'morning',
+          milkType: lineMilkType,
           liters: mLit,
           fat: mFat,
           snf: mSnf,
@@ -2841,6 +3053,7 @@ export function parseMilkSlipTextToRows(
           farmerName: resolvedName,
           date: dayStr,
           shift: 'evening',
+          milkType: lineMilkType,
           liters: eLit,
           fat: eFat,
           snf: eSnf,
@@ -2850,12 +3063,69 @@ export function parseMilkSlipTextToRows(
     }
 
     if (numbers.length >= 3) {
-      let farmerCode: string | undefined = codeMatch ? codeMatch[1] : undefined;
+      let farmerCode: string | undefined = codeDashNameMatch
+        ? codeDashNameMatch[1]
+        : codeMatch
+        ? codeMatch[1]
+        : undefined;
       let nums = [...numbers];
+      let verifiedRate: number | undefined;
+      let verifiedAmount: number | undefined;
 
-      // If 4+ numbers and first is an integer:
-      // Check if it's a day-of-month (1..31) in a passbook (e.g. 21..31) or a farmer code
-      if (nums.length >= 4 && Number.isInteger(nums[0])) {
+      // Mathematical Check: If row ends with [..., Rate, Amount] where Liters * Rate ≈ Amount
+      // e.g. [21, 6.5, 4.5, 8.5, 44.00, 286] or [1.96, 5.3, 8.3, 45.90, 89]
+      if (nums.length >= 4) {
+        const lastVal = nums[nums.length - 1];
+        const prevVal = nums[nums.length - 2];
+        if (prevVal >= 18 && prevVal <= 120 && lastVal >= 15) {
+          // Check if any earlier number in nums[0 .. nums.length-3] matches Amount / Rate
+          const expectedLit = lastVal / prevVal;
+          const matchingLitIdx = nums
+            .slice(0, nums.length - 2)
+            .findIndex(
+              (cand) =>
+                Math.abs(normalizeLiters(cand) * prevVal - lastVal) <=
+                Math.max(3, lastVal * 0.04)
+            );
+          if (matchingLitIdx !== -1 || (nums.length >= 5 && expectedLit >= 0.5 && expectedLit <= 120)) {
+            verifiedRate = round2(prevVal);
+            verifiedAmount = round2(lastVal);
+            nums = nums.slice(0, nums.length - 2);
+          }
+        }
+      }
+
+      // Check if 4-number row is [Liters, FAT, SNF, Rate] (where Amount was on next line or omitted)
+      // e.g. [6, 5.3, 8.3, 45.90] -> do NOT mistake integer Liters (6) for farmerCode!
+      if (
+        nums.length === 4 &&
+        !verifiedRate &&
+        nums[3] >= 18 &&
+        nums[3] <= 120 &&
+        normalizeFat(nums[1]) >= 2.5 &&
+        normalizeFat(nums[1]) <= 11.5 &&
+        normalizeSnf(nums[2]) >= 7.0 &&
+        normalizeSnf(nums[2]) <= 10.5
+      ) {
+        verifiedRate = round2(nums[3]);
+        nums = nums.slice(0, 3);
+      }
+
+      // If 5+ numbers remain and first two are integers [SerialNo, FarmerCode, Liters, FAT, SNF]
+      if (
+        nums.length >= 5 &&
+        Number.isInteger(nums[0]) &&
+        Number.isInteger(nums[1]) &&
+        normalizeFat(nums[3]) >= 2.5 &&
+        normalizeFat(nums[3]) <= 11.5 &&
+        normalizeSnf(nums[4]) >= 7.0 &&
+        normalizeSnf(nums[4]) <= 10.5
+      ) {
+        farmerCode = String(nums[1]);
+        nums = nums.slice(2);
+      } else if (nums.length >= 4 && Number.isInteger(nums[0])) {
+        // If 4+ numbers remain and first is an integer:
+        // Check if it's a day-of-month (1..31) in a passbook (e.g. 21..31) or a farmer code
         if (
           !rowDate &&
           nums[0] >= 1 &&
@@ -2884,13 +3154,19 @@ export function parseMilkSlipTextToRows(
           !codeMatch &&
           (hasExplicitFarmerHeader || isPassbookDateSequence || Boolean(lineShift)) &&
           !hasSnf &&
-          ((c1 >= 2.5 && c1 <= 11.0) || (c2 >= 2.5 && c2 <= 11.0))
+          ((c1 >= 2.5 && c1 <= 11.5) || (c2 >= 2.5 && c2 <= 11.5))
         ) {
           rowDate = String(nums[0]);
           stickyDate = rowDate;
-          const isSecondFat = c2 >= 2.5 && c2 <= 11.0;
+          const isSecondFat = c2 >= 2.5 && c2 <= 11.5;
           const fat = isSecondFat ? c2 : c1;
-          const liters = isSecondFat ? normalizeLiters(nums[1]) : normalizeLiters(nums[2]);
+          let liters = isSecondFat ? normalizeLiters(nums[1]) : normalizeLiters(nums[2]);
+          if (verifiedRate && verifiedAmount) {
+            const expL = round3(verifiedAmount / verifiedRate);
+            if (Math.abs(liters * verifiedRate - verifiedAmount) > 3 && Math.abs(expL * verifiedRate - verifiedAmount) <= 2.5) {
+              liters = expL;
+            }
+          }
           if (fat > 0 && liters > 0) {
             const resolvedName = lineFarmerName || stickyFarmerName;
             const resolvedCode = farmerCode || stickyFarmerCode;
@@ -2899,9 +3175,12 @@ export function parseMilkSlipTextToRows(
               farmerName: resolvedName,
               date: rowDate || stickyDate || defaultDate,
               shift: effectiveShift,
+              milkType: lineMilkType,
               liters,
               fat,
               snf: 8.5,
+              rate: verifiedRate,
+              amount: verifiedAmount,
             });
             continue;
           }
@@ -2909,11 +3188,11 @@ export function parseMilkSlipTextToRows(
           nums[0] >= 100 &&
           nums[0] <= 999 &&
           !hasSnf &&
-          ((c1 >= 2.5 && c1 <= 11.0) || (c2 >= 2.5 && c2 <= 11.0))
+          ((c1 >= 2.5 && c1 <= 11.5) || (c2 >= 2.5 && c2 <= 11.5))
         ) {
           // e.g. "101 5.5 4.5" -> Farmer Code 101, Liters 5.5, FAT 4.5 (default SNF 8.5)
           farmerCode = String(nums[0]);
-          const isSecondFat = c2 >= 2.5 && c2 <= 11.0;
+          const isSecondFat = c2 >= 2.5 && c2 <= 11.5;
           const fat = isSecondFat ? c2 : c1;
           const liters = isSecondFat ? normalizeLiters(nums[1]) : normalizeLiters(nums[2]);
           if (fat > 0 && liters > 0) {
@@ -2924,9 +3203,12 @@ export function parseMilkSlipTextToRows(
               farmerName: lineFarmerName || (hasExplicitFarmerHeader ? stickyFarmerName : undefined),
               date: rowDate || stickyDate || defaultDate,
               shift: effectiveShift,
+              milkType: lineMilkType,
               liters,
               fat,
               snf: 8.5,
+              rate: verifiedRate,
+              amount: verifiedAmount,
             });
             continue;
           }
@@ -2946,7 +3228,7 @@ export function parseMilkSlipTextToRows(
       let fatIdx = -1;
       let snfIdx = -1;
 
-      const isValidFat = (v: number) => v >= 2.5 && v <= 11.0;
+      const isValidFat = (v: number) => v >= 2.5 && v <= 11.5;
       const isValidSnf = (v: number) => v >= 7.0 && v <= 10.5;
 
       // Check standard [Liters, FAT, SNF] pattern first (where index 1 is FAT and index 2 is SNF, with FAT <= SNF)
@@ -3003,40 +3285,49 @@ export function parseMilkSlipTextToRows(
         }
       }
 
-      if (snfIdx === -1) snfIdx = 1;
-      if (fatIdx === -1) fatIdx = 0;
+      if (snfIdx !== -1 && fatIdx !== -1) {
+        const litIdx = converted.findIndex((_, idx) => idx !== snfIdx && idx !== fatIdx);
+        if (litIdx !== -1) {
+          const fat = converted[fatIdx].asFat;
+          const snf = converted[snfIdx].asSnf;
+          let liters = converted[litIdx].asLiters;
+          const remainingIdx = converted.findIndex(
+            (_, idx) => idx !== snfIdx && idx !== fatIdx && idx !== litIdx
+          );
+          const rate =
+            verifiedRate ||
+            (remainingIdx !== -1 && converted[remainingIdx].raw >= 15 && converted[remainingIdx].raw <= 120
+              ? round2(converted[remainingIdx].raw)
+              : undefined);
 
-      const litIdx = converted.findIndex((_, idx) => idx !== snfIdx && idx !== fatIdx);
-      if (litIdx !== -1) {
-        const fat = converted[fatIdx].asFat;
-        const snf = converted[snfIdx].asSnf;
-        const liters = converted[litIdx].asLiters;
-        const remainingIdx = converted.findIndex(
-          (_, idx) => idx !== snfIdx && idx !== fatIdx && idx !== litIdx
-        );
-        const rate =
-          remainingIdx !== -1 && converted[remainingIdx].raw >= 15
-            ? round2(converted[remainingIdx].raw)
-            : undefined;
+          if (rate && verifiedAmount && Math.abs(liters * rate - verifiedAmount) > 3) {
+            const expL = round3(verifiedAmount / rate);
+            if (expL >= 0.2 && expL <= 200 && Math.abs(expL * rate - verifiedAmount) <= 2.5) {
+              liters = expL;
+            }
+          }
 
-        if (fat > 0 && snf > 0 && liters > 0) {
-          const resolvedName =
-            lineFarmerName || (!farmerCode ? stickyFarmerName : undefined);
-          const resolvedCode =
-            farmerCode || (!lineFarmerName ? stickyFarmerCode : undefined);
-          if (lineFarmerName) stickyFarmerName = lineFarmerName;
-          if (farmerCode) stickyFarmerCode = farmerCode;
+          if (isValidFat(fat) && isValidSnf(snf) && liters > 0) {
+            const resolvedName =
+              lineFarmerName || (!farmerCode ? stickyFarmerName : undefined);
+            const resolvedCode =
+              farmerCode || (!lineFarmerName ? stickyFarmerCode : undefined);
+            if (lineFarmerName) stickyFarmerName = lineFarmerName;
+            if (farmerCode) stickyFarmerCode = farmerCode;
 
-          results.push({
-            farmerCode: resolvedCode,
-            farmerName: resolvedName,
-            date: rowDate || stickyDate || defaultDate,
-            shift: effectiveShift,
-            liters,
-            fat,
-            snf,
-            rate,
-          });
+            results.push({
+              farmerCode: resolvedCode,
+              farmerName: resolvedName,
+              date: rowDate || stickyDate || defaultDate,
+              shift: effectiveShift,
+              milkType: lineMilkType,
+              liters,
+              fat,
+              snf,
+              rate,
+              amount: verifiedAmount,
+            });
+          }
         }
       }
     } else if (numbers.length === 2) {
@@ -3045,18 +3336,22 @@ export function parseMilkSlipTextToRows(
       const n1Fat = normalizeFat(numbers[1]);
       let fat = 4.5;
       let liters = 1;
-      if (n1Fat >= 2.5 && n1Fat <= 11.0) {
+      if (n1Fat >= 2.5 && n1Fat <= 11.5) {
         fat = n1Fat;
         liters = normalizeLiters(numbers[0]);
-      } else if (n0Fat >= 2.5 && n0Fat <= 11.0) {
+      } else if (n0Fat >= 2.5 && n0Fat <= 11.5) {
         fat = n0Fat;
         liters = normalizeLiters(numbers[1]);
       } else {
         liters = normalizeLiters(numbers[0]);
         fat = n1Fat;
       }
-      if (fat > 0 && liters > 0) {
-        const rowCode = codeMatch ? codeMatch[1] : undefined;
+      if (fat >= 2.5 && fat <= 11.5 && liters > 0) {
+        const rowCode = codeDashNameMatch
+          ? codeDashNameMatch[1]
+          : codeMatch
+          ? codeMatch[1]
+          : undefined;
         const resolvedName = lineFarmerName || (!rowCode ? stickyFarmerName : undefined);
         const resolvedCode = rowCode || (!lineFarmerName ? stickyFarmerCode : undefined);
         if (lineFarmerName) stickyFarmerName = lineFarmerName;
@@ -3067,6 +3362,7 @@ export function parseMilkSlipTextToRows(
           farmerName: resolvedName,
           date: rowDate || stickyDate || defaultDate,
           shift: effectiveShift,
+          milkType: lineMilkType,
           liters,
           fat,
           snf: 8.5,
@@ -3075,7 +3371,190 @@ export function parseMilkSlipTextToRows(
     }
   }
 
+  flushPendingVerticalSlipIfReady();
+
+  // Whole-Slip Smart Number Extractor Fallback:
+  // If an offline/English OCR engine scanned a vertical Hindi slip and garbled the Hindi labels
+  // (putting each number like 101, 6.50, 6.2, 8.8, 58.00, 377 on its own separate line),
+  // combine the standalone numbers across all lines and use Liters * Rate ≈ Amount + FAT/SNF heuristics!
+  if (results.length === 0 && expandedSegments.length >= 2) {
+    const allNums: number[] = [];
+    for (const seg of expandedSegments) {
+      const toks = seg.text.split(/[\s,|/:-]+/).filter(Boolean);
+      for (const tok of toks) {
+        const cleanedTok = tok.replace(/[L₹lkgKGलीटर()[\]]/g, '');
+        const cleanedNum = cleanedTok.replace(/[^0-9.]/g, '');
+        const numVal = Number(cleanedNum);
+        if (
+          cleanedNum !== '' &&
+          Number.isFinite(numVal) &&
+          numVal > 0 &&
+          /^[0-9]+(?:\.[0-9]+)?$/.test(cleanedTok)
+        ) {
+          allNums.push(numVal);
+        }
+      }
+    }
+    if (allNums.length >= 2) {
+      const singleLineFallback = parseMilkSlipTextToRows(
+        allNums.join(' '),
+        stickyDate || defaultDate,
+        stickyShift || defaultShift
+      );
+      for (const r of singleLineFallback) {
+        results.push({
+          ...r,
+          farmerCode: r.farmerCode || pendingVerticalSlip.farmerCode || stickyFarmerCode,
+          farmerName: r.farmerName || pendingVerticalSlip.farmerName || stickyFarmerName,
+          date: pendingVerticalSlip.date || stickyDate || r.date || defaultDate,
+          shift: pendingVerticalSlip.shift || stickyShift || r.shift || defaultShift,
+          milkType: pendingVerticalSlip.milkType || r.milkType,
+        });
+      }
+    }
+  }
+
   return results;
+}
+
+/**
+ * Extracts readable Hindi/English text and numbers from a PDF content stream or raw PDF string.
+ * Supports parenthesized PDF strings `(...)`, TJ arrays `[(...) ...]`, and UTF-16BE / ASCII hex strings `<...>`.
+ */
+export function extractTextFromPdfContent(pdfStreamText: string): string {
+  if (!pdfStreamText) return '';
+  const extractedLines: string[] = [];
+
+  // Decode PDF parenthesized string escapes (\n, \r, \t, \ddd octal, \(, \))
+  const decodePdfParenString = (raw: string): string => {
+    const unescaped = raw
+      .replace(/\\(\d{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)))
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, ' ')
+      .replace(/\\\(/g, '(')
+      .replace(/\\\)/g, ')')
+      .replace(/\\\\/g, '\\');
+
+    // Check UTF-16BE BOM (\xFE\xFF)
+    if (unescaped.length >= 4 && unescaped.charCodeAt(0) === 0xfe && unescaped.charCodeAt(1) === 0xff) {
+      let out = '';
+      for (let i = 2; i + 1 < unescaped.length; i += 2) {
+        const code = (unescaped.charCodeAt(i) << 8) | unescaped.charCodeAt(i + 1);
+        if (code > 0) out += String.fromCharCode(code);
+      }
+      return out;
+    }
+    return unescaped;
+  };
+
+  const decodePdfHexString = (hexRaw: string): string => {
+    const cleanHex = hexRaw.replace(/[^0-9A-Fa-f]/g, '');
+    if (cleanHex.length === 0) return '';
+    // If 4-byte aligned and starts with FEFF or looks like 16-bit big-endian (00xx or 09xx Devanagari)
+    if (
+      cleanHex.length % 4 === 0 &&
+      (/^(?:FEFF|00[2-7]|09[0-7])/i.test(cleanHex))
+    ) {
+      let out = '';
+      const startIdx = /^FEFF/i.test(cleanHex) ? 4 : 0;
+      for (let i = startIdx; i + 3 < cleanHex.length; i += 4) {
+        const code = parseInt(cleanHex.slice(i, i + 4), 16);
+        if (code > 0 && code !== 0xfeff) out += String.fromCharCode(code);
+      }
+      return out;
+    }
+    let out = '';
+    for (let i = 0; i + 1 < cleanHex.length; i += 2) {
+      const code = parseInt(cleanHex.slice(i, i + 2), 16);
+      if (code >= 32 || code === 10 || code === 13 || code === 9) {
+        out += String.fromCharCode(code);
+      }
+    }
+    return out;
+  };
+
+  // Extract from BT ... ET text blocks if present
+  const btBlocks = pdfStreamText.match(/BT[\s\S]*?ET/g);
+  const targetChunks = btBlocks && btBlocks.length > 0 ? btBlocks : [pdfStreamText];
+
+  for (const chunk of targetChunks) {
+    let currentLineTokens: string[] = [];
+    const tokenRegex = /\(((?:\\.|[^\\()])*)\)|<([0-9A-Fa-f\s]{2,})>|(\b(?:Td|TD|T\*|ET|')\b)/g;
+    let match: RegExpExecArray | null;
+    while ((match = tokenRegex.exec(chunk)) !== null) {
+      if (match[1] !== undefined) {
+        const s = decodePdfParenString(match[1]).trim();
+        if (s) currentLineTokens.push(s);
+      } else if (match[2] !== undefined) {
+        const s = decodePdfHexString(match[2]).trim();
+        if (s) currentLineTokens.push(s);
+      } else if (match[3] !== undefined) {
+        if (currentLineTokens.length > 0) {
+          extractedLines.push(currentLineTokens.join(' '));
+          currentLineTokens = [];
+        }
+      }
+    }
+    if (currentLineTokens.length > 0) {
+      extractedLines.push(currentLineTokens.join(' '));
+    }
+  }
+
+  return extractedLines.join('\n').trim();
+}
+
+/**
+ * Extracts text from a PDF file buffer (Uint8Array / ArrayBuffer), automatically decompressing
+ * FlateDecode streams via DecompressionStream ( works 100% offline in Android APK & Web!).
+ */
+export async function extractTextFromPdfBuffer(
+  buffer: ArrayBuffer | Uint8Array
+): Promise<string> {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const latin1Decoder = new TextDecoder('latin1');
+  const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+  const rawLatin1 = latin1Decoder.decode(bytes);
+
+  const chunks: string[] = [];
+
+  // 1. Extract from uncompressed text blocks
+  const directText = extractTextFromPdfContent(rawLatin1);
+  if (directText) chunks.push(directText);
+
+  // 2. Decompress FlateDecode streams if DecompressionStream is available
+  if (typeof DecompressionStream !== 'undefined') {
+    const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let m: RegExpExecArray | null;
+    while ((m = streamRegex.exec(rawLatin1)) !== null) {
+      const bodyStr = m[1];
+      if (!bodyStr || bodyStr.length < 4 || bodyStr.length > 2_000_000) continue;
+      const streamBytes = new Uint8Array(bodyStr.length);
+      for (let i = 0; i < bodyStr.length; i++) {
+        streamBytes[i] = bodyStr.charCodeAt(i) & 0xff;
+      }
+
+      for (const fmt of ['deflate', 'deflate-raw'] as const) {
+        try {
+          const ds = new DecompressionStream(fmt);
+          const writer = ds.writable.getWriter();
+          writer.write(streamBytes).catch(() => {});
+          writer.close().catch(() => {});
+          const decompressedBuf = await new Response(ds.readable).arrayBuffer();
+          const decompressedStr = utf8Decoder.decode(decompressedBuf);
+          const parsedStreamText = extractTextFromPdfContent(decompressedStr);
+          if (parsedStreamText) {
+            chunks.push(parsedStreamText);
+            break;
+          }
+        } catch {
+          // Not a valid deflate stream or unsupported format
+        }
+      }
+    }
+  }
+
+  return chunks.join('\n').trim();
 }
 
 export interface ShiftMilkEntryValidationResult {
@@ -3164,6 +3643,10 @@ export interface ScannedSlipPreviewItem {
   entry: MilkCollectionEntry;
   isDuplicate: boolean;
   duplicateSource?: 'existing' | 'batch';
+  existingConflictId?: string;
+  overwriteExisting?: boolean;
+  manualRate?: boolean;
+  rowWarningsHi?: string[];
   statusHi: string;
   statusEn: string;
 }
@@ -3241,7 +3724,7 @@ export function buildCollectionEntriesFromScannedSlip(
     const rawLiters = Number(row.liters) || 0;
 
     const fat =
-      rawFat >= 25 && rawFat <= 99 && Number.isInteger(rawFat)
+      rawFat >= 25 && rawFat <= 115 && Number.isInteger(rawFat)
         ? round2(rawFat / 10)
         : round2(rawFat);
     const snf =
@@ -3250,10 +3733,23 @@ export function buildCollectionEntriesFromScannedSlip(
         : rawSnf > 0
         ? round2(rawSnf)
         : 8.5;
-    const liters =
+    let liters =
       rawLiters >= 1000 && rawLiters <= 9999 && Number.isInteger(rawLiters)
         ? round3(rawLiters / 1000)
         : round3(rawLiters);
+
+    const rowWarningsHi: string[] = [];
+    if (row.rate && row.amount && Number(row.rate) >= 15 && Number(row.amount) >= 10) {
+      const r = Number(row.rate);
+      const amt = Number(row.amount);
+      if (Math.abs(liters * r - amt) > Math.max(3, amt * 0.05)) {
+        const repairedLiters = round3(amt / r);
+        if (repairedLiters >= 0.2 && repairedLiters <= 200 && Math.abs(repairedLiters * r - amt) <= 2.5) {
+          liters = repairedLiters;
+          rowWarningsHi.push(`रकम (₹${amt}) व दर (₹${r}) के आधार पर लीटर ${liters} किया गया`);
+        }
+      }
+    }
 
     if (
       !Number.isFinite(fat) ||
@@ -3267,6 +3763,16 @@ export function buildCollectionEntriesFromScannedSlip(
         `पंक्ति ${i + 1}: अमान्य FAT (${row.fat}), SNF (${row.snf}) या मात्रा (${row.liters})`
       );
       continue;
+    }
+
+    if (fat < 2.5 || fat > 11.5) {
+      rowWarningsHi.push(`FAT (${fat}) असामान्य है — कृपया जाँचें`);
+    }
+    if (snf < 7.0 || snf > 10.5) {
+      rowWarningsHi.push(`SNF (${snf}) असामान्य है — कृपया जाँचें`);
+    }
+    if (liters > 80) {
+      rowWarningsHi.push(`लीटर (${liters} L) अधिक है — कृपया जाँचें`);
     }
 
     // Resolve per-row Date and Shift (falls back to current selected date & shift)
@@ -3387,12 +3893,20 @@ export function buildCollectionEntriesFromScannedSlip(
 
     carryForwardFarmer = matchedFarmer;
 
-    const milkType = classifyMilkType(fat);
+    const rawMilkTypeStr = String(row.milkType || '').trim().toLowerCase();
+    const milkType: MilkType =
+      rawMilkTypeStr === 'cow' || rawMilkTypeStr === 'गाय'
+        ? 'cow'
+        : rawMilkTypeStr === 'buffalo' || rawMilkTypeStr === 'भैंस'
+        ? 'buffalo'
+        : classifyMilkType(fat);
     const chart = rateCharts[milkType] || rateCharts.cow || rateCharts.buffalo;
     const exactLookup = lookupRateFromChart(rateCharts[milkType], fat, snf);
 
     let rate: number | null = null;
-    if (exactLookup.found && exactLookup.rate !== null) {
+    if (row.manualRate && row.rate && Number.isFinite(Number(row.rate)) && Number(row.rate) > 0) {
+      rate = round2(Number(row.rate));
+    } else if (exactLookup.found && exactLookup.rate !== null) {
       rate = exactLookup.rate;
     } else if (row.rate && Number.isFinite(Number(row.rate)) && Number(row.rate) > 0) {
       rate = round2(Number(row.rate));
@@ -3439,7 +3953,7 @@ export function buildCollectionEntriesFromScannedSlip(
     const existingCheck = canSaveFarmerShiftMilkEntry(existingCollections, candidateEntry);
     const batchCheck = canSaveFarmerShiftMilkEntry(savedEntries, candidateEntry);
 
-    if (!existingCheck.allowed) {
+    if (!existingCheck.allowed && !row.overwriteExisting) {
       skippedDuplicates.push(candidateEntry);
       errors.push(
         `${matchedFarmer.code}-${matchedFarmer.name} (${formatDateDMY(entryDate)} ${
@@ -3450,6 +3964,10 @@ export function buildCollectionEntriesFromScannedSlip(
         entry: candidateEntry,
         isDuplicate: true,
         duplicateSource: 'existing',
+        existingConflictId: existingCheck.existingConflict?.id,
+        overwriteExisting: false,
+        manualRate: Boolean(row.manualRate),
+        rowWarningsHi,
         statusHi: `पहले से मौजूद (${animalHi}) — सेव नहीं होगी`,
         statusEn: `Already Exists (${animalEn}) — Will Not Save`,
       });
@@ -3464,16 +3982,31 @@ export function buildCollectionEntriesFromScannedSlip(
         entry: candidateEntry,
         isDuplicate: true,
         duplicateSource: 'batch',
+        overwriteExisting: false,
+        manualRate: Boolean(row.manualRate),
+        rowWarningsHi,
         statusHi: `फोटो में दोबारा (${animalHi}) — सेव नहीं होगी`,
         statusEn: `Duplicate in Photo (${animalEn}) — Will Not Save`,
       });
     } else {
+      // If user explicitly enabled overwriteExisting on an existing conflict, reuse existing entry ID so it updates cleanly
+      if (!existingCheck.allowed && row.overwriteExisting && existingCheck.existingConflict) {
+        candidateEntry.id = existingCheck.existingConflict.id;
+      }
       savedEntries.push(candidateEntry);
       previewItems.push({
         entry: candidateEntry,
         isDuplicate: false,
-        statusHi: `सेव के लिए तैयार (${animalHi})`,
-        statusEn: `Ready to Save (${animalEn})`,
+        existingConflictId: existingCheck.existingConflict?.id,
+        overwriteExisting: Boolean(row.overwriteExisting),
+        manualRate: Boolean(row.manualRate),
+        rowWarningsHi,
+        statusHi: row.overwriteExisting
+          ? `पुरानी एंट्री अपडेट होगी (${animalHi})`
+          : `सेव के लिए तैयार (${animalHi})`,
+        statusEn: row.overwriteExisting
+          ? `Will Update Existing (${animalEn})`
+          : `Ready to Save (${animalEn})`,
       });
     }
   }
