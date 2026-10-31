@@ -1778,7 +1778,9 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                       <div>
                         <span className="text-blue-600 block text-[11px]">औसत खरीद दर</span>
                         <strong className="font-bold">
-                          {purePL.avgPurchaseRate !== null ? `₹${purePL.avgPurchaseRate.toFixed(2)}/L` : '—'}
+                          {purePL.avgPurchaseRate !== null
+                            ? `₹${(purePL.avgPurchaseRate ?? 0).toFixed(2)}/L`
+                            : '—'}
                         </strong>
                       </div>
                     </div>
@@ -1807,7 +1809,9 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                       <div>
                         <span className="text-purple-600 block text-[11px]">औसत बिक्री दर</span>
                         <strong className="font-bold">
-                          {purePL.avgSaleRate !== null ? `₹${purePL.avgSaleRate.toFixed(2)}/L` : '—'}
+                          {purePL.avgSaleRate !== null
+                            ? `₹${(purePL.avgSaleRate ?? 0).toFixed(2)}/L`
+                            : '—'}
                         </strong>
                       </div>
                     </div>
@@ -1858,9 +1862,9 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                         }`}
                       >
                         {purePL.marginPerLiter !== null
-                          ? purePL.marginPerLiter >= 0
-                            ? `+₹${purePL.marginPerLiter.toFixed(2)}/L मार्जिन`
-                            : `-₹${Math.abs(purePL.marginPerLiter).toFixed(2)}/L घाटा`
+                          ? (purePL.marginPerLiter ?? 0) >= 0
+                            ? `+₹${(purePL.marginPerLiter ?? 0).toFixed(2)}/L मार्जिन`
+                            : `-₹${Math.abs(purePL.marginPerLiter ?? 0).toFixed(2)}/L घाटा`
                           : '—'}
                       </span>
                     </div>
@@ -1986,7 +1990,9 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                           {formatNumber(purePL.avgPurchaseFat)}/{formatNumber(purePL.avgPurchaseSnf)}
                         </td>
                         <td className="py-3 px-2.5 text-right">
-                          {purePL.avgPurchaseRate !== null ? `₹${purePL.avgPurchaseRate.toFixed(2)}` : '—'}
+                          {purePL.avgPurchaseRate !== null
+                            ? `₹${(purePL.avgPurchaseRate ?? 0).toFixed(2)}`
+                            : '—'}
                         </td>
                         <td className="py-3 px-2.5 text-right text-blue-950 font-black">
                           {formatCurrency(purePL.purchaseAmount)}
@@ -1998,7 +2004,9 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
                           {formatNumber(purePL.avgSaleFat)}/{formatNumber(purePL.avgSaleSnf)}
                         </td>
                         <td className="py-3 px-2.5 text-right">
-                          {purePL.avgSaleRate !== null ? `₹${purePL.avgSaleRate.toFixed(2)}` : '—'}
+                          {purePL.avgSaleRate !== null
+                            ? `₹${(purePL.avgSaleRate ?? 0).toFixed(2)}`
+                            : '—'}
                         </td>
                         <td className="py-3 px-2.5 text-right text-purple-950 font-black">
                           {formatCurrency(purePL.saleAmount)}

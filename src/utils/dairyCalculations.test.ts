@@ -33,6 +33,12 @@ import {
   formatMonthYear,
   extractTextFromPdfContent,
   extractTextFromPdfBuffer,
+  compareCodeAsc,
+  sortFarmersByCode,
+  sortCustomersByCode,
+  sortCollectionsByFarmerCode,
+  sortSalesByCustomerCode,
+  buildAllFarmersTenDayBillRows,
 } from './dairyCalculations';
 import {
   createInitialEmptyState,
@@ -1830,3 +1836,519 @@ test('NEW FEATURE TEST 33: Screenshot Card-Style OCR Parsing, Integer-Liter 4-Nu
   assert.equal(pdfRows[0].snf, 8.6);
   assert.equal(pdfRows[0].rate, 42.5);
 });
+
+// ============================================================================
+// NEW FEATURE TEST 34: Farmer-Name-First PDF & Photo Scanning, Strict
+// Registered Farmer Matching (No Fake Farmers), & ToUnicode CMap PDF Support
+// ============================================================================
+test('parseMilkSlipTextToRows & buildCollectionEntriesFromScannedSlip match registered farmer name first, parse [Date, Shift, FAT, SNF, Rate, Qty] and vertical cards accurately, and never auto-create fake farmers', async () => {
+  const registeredFarmers: Farmer[] = [
+    { id: 'f1', code: '1', name: '5 – पवन बैरागी', mobile: '9000000001', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'buffalo', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f2', code: '2', name: '3 – रघुवीर जी', mobile: '9000000002', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'buffalo', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f3', code: '3', name: '2 – हंसराज जी', mobile: '9000000003', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'cow', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f4', code: '4', name: '6 – देवाजी भोपा जी', mobile: '9000000004', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'buffalo', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f5', code: '5', name: '1 – नाथूराम जी', mobile: '9000000005', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'cow', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f6', code: '6', name: '8 – कालूराम जी', mobile: '9000000006', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'buffalo', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f7', code: '7', name: '4 – रामलाल जी', mobile: '9000000007', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'cow', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f8', code: '8', name: '7 – मोहन सिंह', mobile: '9000000008', village: 'रामपुर', shiftSchedule: 'both', defaultMilkType: 'buffalo', openingBalance: 0, notes: '', active: true, createdAt: '' },
+  ];
+
+  // 1. Horizontal PDF rows in exact user-specified order:
+  // Farmer Name -> Date -> Shift -> FAT -> SNF -> Rate -> Qty (plus noise lines that must be ignored)
+  const pdfHorizontalSlip = [
+    'Ujalaa Dairy Collection Report',
+    'बिल अवधि: 21-10-2026 से 31-10-2026',
+    'आज की दूध कलेक्शन (26-10-2026) कुल किसान: 8',
+    '5 – पवन बैरागी 26-10-2026 सुबह 5.3 8.3 45.90 1.96 89',
+    '3 – रघुवीर जी 26-10-2026 सुबह 8.8 9.2 77.40 1.36 105',
+    '2 – हंसराज जी 26-10-2026 सुबह 4.5 8.7 40.17 7.30 293',
+    '6 – देवाजी भोपा जी 26-10-2026 सुबह 3.9 8.1 36.60 5.99 219',
+    '1 – नाथूराम जी 26-10-2026 शाम 4.8 8.9 42.30 4.25 180',
+    '8 – कालूराम जी 26-10-2026 शाम 6.2 8.6 52.10 3.75 195',
+    '4 – रामलाल जी 26-10-2026 शाम 4.2 8.5 41.75 6.20 259',
+    '7 – मोहन सिंह 26-10-2026 शाम 7.1 9.0 58.20 2.85 166',
+    'सुबह का टोटल 16.61 L 706',
+    'शाम का टोटल 17.05 L 800',
+    'अज्ञात व्यक्ति 26-10-2026 सुबह 5.0 8.5 40.00 3.00 120',
+  ].join('\n');
+
+  const parsedRows = parseMilkSlipTextToRows(pdfHorizontalSlip, '2026-10-26', 'morning', registeredFarmers);
+  // First 8 rows are the 8 registered farmers; summary/date-range lines are ignored
+  const built = buildCollectionEntriesFromScannedSlip(
+    parsedRows,
+    registeredFarmers,
+    { cow: null, buffalo: null },
+    '2026-10-26',
+    'morning'
+  );
+
+  assert.equal(built.autoCreatedFarmers.length, 0, 'Must NEVER auto-create unknown farmers');
+  assert.equal(built.entries.length, 8, 'Must produce exactly 8 entries for the 8 registered farmers');
+
+  // Verify 5 – पवन बैरागी (Farmer ID f1, Code 1) was NOT confused with Farmer Code 5!
+  assert.equal(built.entries[0].farmerId, 'f1');
+  assert.equal(built.entries[0].date, '2026-10-26');
+  assert.equal(built.entries[0].shift, 'morning');
+  assert.equal(built.entries[0].fat, 5.3);
+  assert.equal(built.entries[0].snf, 8.3);
+  assert.equal(built.entries[0].rate, 45.9);
+  assert.equal(built.entries[0].liters, 1.96);
+  assert.equal(built.entries[0].totalAmount, 89);
+
+  // Verify 8 – कालूराम जी (Farmer ID f6, Code 6) was NOT confused with Farmer Code 8!
+  assert.equal(built.entries[5].farmerId, 'f6');
+  assert.equal(built.entries[5].shift, 'evening');
+  assert.equal(built.entries[5].fat, 6.2);
+  assert.equal(built.entries[5].snf, 8.6);
+  assert.equal(built.entries[5].rate, 52.1);
+  assert.equal(built.entries[5].liters, 3.75);
+  assert.equal(built.entries[5].totalAmount, 195);
+
+  // 2. Vertical multi-line card layout from Ujalaa Dairy screenshot / PDF export
+  const verticalCardSlip = [
+    'आज की दूध कलेक्शन (26-10-2026) कुल किसान: 8',
+    '1',
+    '5 – पवन बैरागी किसान कोड: 1',
+    '26-10-2026 | सुबह | भैंस',
+    'लीटर',
+    '1.96 L',
+    'FAT',
+    '5.3',
+    'SNF',
+    '8.3',
+    'रेट',
+    '₹45.90',
+    'कुल रकम:',
+    '₹89',
+    '2',
+    '3 – रघुवीर जी किसान कोड: 2',
+    '26-10-2026 | सुबह | भैंस',
+    'लीटर',
+    '1.36 L',
+    'FAT',
+    '8.8',
+    'SNF',
+    '9.2',
+    'रेट',
+    '₹77.40',
+    'कुल रकम:',
+    '₹105',
+  ].join('\n');
+
+  const verticalRows = parseMilkSlipTextToRows(verticalCardSlip, '2026-10-26', 'morning', registeredFarmers);
+  assert.equal(verticalRows.length, 2);
+  assert.equal(verticalRows[0].farmerCode, '1');
+  assert.equal(verticalRows[0].liters, 1.96);
+  assert.equal(verticalRows[0].fat, 5.3);
+  assert.equal(verticalRows[0].snf, 8.3);
+  assert.equal(verticalRows[0].rate, 45.9);
+  assert.equal(verticalRows[0].amount, 89);
+
+  assert.equal(verticalRows[1].farmerCode, '2');
+  assert.equal(verticalRows[1].liters, 1.36);
+  assert.equal(verticalRows[1].fat, 8.8);
+  assert.equal(verticalRows[1].snf, 9.2);
+  assert.equal(verticalRows[1].rate, 77.4);
+  assert.equal(verticalRows[1].amount, 105);
+
+  // 3. ToUnicode CMap PDF decoding & rejection of unmapped 16-bit glyph IDs
+  const cmapPdfContent = [
+    '%PDF-1.4',
+    '1 0 obj << /Length 200 >> stream',
+    '/CIDInit /ProcSet findresource begin 12 dict begin begincmap',
+    '2 beginbfchar',
+    '<0101> <092A09350928>', // "पवन"
+    '<0102> <00320036002D00310030002D003200300032003600200035002E003300200038002E0033002000340035002E0039003000200031002E00390036>', // "26-10-2026 5.3 8.3 45.90 1.96"
+    'endbfchar endcmap',
+    'endstream endobj',
+    '2 0 obj << /Length 100 >> stream',
+    'BT <0101> Tj ( ) Tj <0102> Tj ET',
+    'endstream endobj',
+    '%%EOF',
+  ].join('\n');
+
+  const decodedCmapText = extractTextFromPdfContent(cmapPdfContent);
+  assert.ok(decodedCmapText.includes('पवन'), 'Must decode Hindi farmer name via ToUnicode CMap');
+  const cmapRows = parseMilkSlipTextToRows(decodedCmapText, '2026-10-26', 'morning', registeredFarmers);
+  assert.equal(cmapRows.length, 1);
+  assert.equal(cmapRows[0].farmerCode, '1');
+  assert.equal(cmapRows[0].fat, 5.3);
+  assert.equal(cmapRows[0].snf, 8.3);
+  assert.equal(cmapRows[0].rate, 45.9);
+  assert.equal(cmapRows[0].liters, 1.96);
+
+  // 4. Real OCR.space OCREngine=2 output from Android APK Screenshot (with middle-dots ·45.90, ·89, Devanagari dandas शाम। गाय, and OCR typo खुबवीर जी)
+  const realOcrSpaceOutput = [
+    '11:52\t0.00\tVoD\t4G\t• 73%',
+    'KB/S\tLTE2',
+    'Ujalaa Dairy\tकलेक्शन / Restore\tEnglish',
+    'आज की दूध कलेक्शन (26-10-2026)\tकुल किसान: 8',
+    '5 - पवन बैरागी\tकिसान कोड: 1',
+    '1\t26-10-2026 | सुबह | भेंस',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '1.96 L\t5.3\t8.3\t·45.90\t·89',
+    '3 - खुबवीर जी\tकिसान कोड: 2',
+    '2\t26-10-2026 | सुबह | भेंस',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '1.36 L\t8.8\t9.2\t·77.40\t₹105',
+    '2 - हंसराज जी\tकिसान कोड: 3',
+    '3\t26-10-2026 |\tसुबह |\tगाय',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '7.30 L\t4.5\t8.7\t₹40.17\t·293',
+    '6 - देवाजी भोपा जी\tकिसान कोड: 4',
+    '4\t26-10-2026 |\tसुबह\t। भेंस',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '5.99 L\t3.9\t8.1\t·36.60\t₹219',
+    '1 - नाथूराम जी\tकिसान कोड: 5',
+    '5\t26-10-2026 |\tशाम\t|\tगाय',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '4.25 L\t4.8\t8.9\t₹42.30\t₹180',
+    '8 - कालूराम जी\tकिसान कोड: 6',
+    '6\t26-10-2026 |\tशाम |\tभेंस',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '3.75 L\t6.2\t8.6\t₹52.10\t₹195',
+    '4 - रामलाल जी\tकिसान कोड: 7',
+    '7\t26-10-2026 |\tशाम। गाय',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '6.20 L\t4.2\t8.5\t₹41.75\t·259',
+    '7 - मोहन सिंह\tकिसान कोड: 8',
+    '8\t26-10-2026 |\tशाम |\tभेंस',
+    'लीटर\tFAT\tSNF\tरेट\tकुल रकम:\t口',
+    '2.85 L\t7.1\t9.0\t·58.20\t₹166',
+    'डैशबोर्ड\tकलेक्शन\tबिक्री\tकिसान/...\t10-दिन/...\tरेट/खर्च\tबैकअप/...',
+  ].join('\n');
+
+  const apkRows = parseMilkSlipTextToRows(realOcrSpaceOutput, '2026-10-26', 'morning', registeredFarmers);
+  assert.equal(apkRows.length, 8, 'Must parse all 8 farmer cards from real OCR.space OCREngine=2 output');
+  const apkBuilt = buildCollectionEntriesFromScannedSlip(
+    apkRows,
+    registeredFarmers,
+    { cow: null, buffalo: null },
+    '2026-10-26',
+    'morning'
+  );
+  assert.equal(apkBuilt.entries.length, 8);
+  assert.equal(apkBuilt.autoCreatedFarmers.length, 0);
+  assert.deepEqual(
+    apkBuilt.entries.map((e) => ({
+      farmerId: e.farmerId,
+      shift: e.shift,
+      milkType: e.milkType,
+      liters: e.liters,
+      fat: e.fat,
+      snf: e.snf,
+      rate: e.rate,
+      totalAmount: e.totalAmount,
+    })),
+    [
+      { farmerId: 'f1', shift: 'morning', milkType: 'buffalo', liters: 1.96, fat: 5.3, snf: 8.3, rate: 45.9, totalAmount: 89 },
+      { farmerId: 'f2', shift: 'morning', milkType: 'buffalo', liters: 1.36, fat: 8.8, snf: 9.2, rate: 77.4, totalAmount: 105 },
+      { farmerId: 'f3', shift: 'morning', milkType: 'cow', liters: 7.3, fat: 4.5, snf: 8.7, rate: 40.17, totalAmount: 293 },
+      { farmerId: 'f4', shift: 'morning', milkType: 'buffalo', liters: 5.99, fat: 3.9, snf: 8.1, rate: 36.6, totalAmount: 219 },
+      { farmerId: 'f5', shift: 'evening', milkType: 'cow', liters: 4.25, fat: 4.8, snf: 8.9, rate: 42.3, totalAmount: 180 },
+      { farmerId: 'f6', shift: 'evening', milkType: 'buffalo', liters: 3.75, fat: 6.2, snf: 8.6, rate: 52.1, totalAmount: 195 },
+      { farmerId: 'f7', shift: 'evening', milkType: 'cow', liters: 6.2, fat: 4.2, snf: 8.5, rate: 41.75, totalAmount: 259 },
+      { farmerId: 'f8', shift: 'evening', milkType: 'buffalo', liters: 2.85, fat: 7.1, snf: 9.0, rate: 58.2, totalAmount: 166 },
+    ]
+  );
+});
+
+test('Code No ascending sort for saved milk purchases, saved milk sales, and all-farmers 10-day bills (Morning, Evening, Both shifts with 2 rows for dual-shift farmers)', () => {
+  // 1. Numeric code sorting: 1, 2, 3 ... 10 (not 1, 10, 2)
+  const unsortedFarmers: Farmer[] = [
+    { id: 'f10', code: '10', name: 'दसवां किसान', mobile: '', village: '', defaultMilkType: 'cow', shiftSchedule: 'both', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f2', code: '2', name: 'दूसरा किसान', mobile: '', village: '', defaultMilkType: 'buffalo', shiftSchedule: 'both', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f1', code: '1', name: 'पहला किसान', mobile: '', village: '', defaultMilkType: 'cow', shiftSchedule: 'morning', openingBalance: 0, notes: '', active: true, createdAt: '' },
+    { id: 'f3', code: '3', name: 'तीसरा किसान', mobile: '', village: '', defaultMilkType: 'buffalo', shiftSchedule: 'evening', openingBalance: 0, notes: '', active: true, createdAt: '' },
+  ];
+
+  const sortedFarmers = sortFarmersByCode(unsortedFarmers);
+  assert.deepEqual(sortedFarmers.map((f) => f.code), ['1', '2', '3', '10']);
+
+  // 2. Saved collection entries sorted by Code No (1, 2, 3, 10) and morning before evening
+  const collections: MilkCollectionEntry[] = [
+    {
+      id: 'c-f10-m',
+      date: '2026-10-25',
+      time: '07:00:00',
+      shift: 'morning',
+      farmerId: 'f10',
+      farmerName: 'दसवां किसान',
+      farmerCode: '10',
+      milkType: 'cow',
+      liters: 5,
+      fat: 4.5,
+      snf: 8.5,
+      rate: 40,
+      totalAmount: 200,
+      deduction: 0,
+      netPayable: 200,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 'c-f2-e',
+      date: '2026-10-25',
+      time: '18:00:00',
+      shift: 'evening',
+      farmerId: 'f2',
+      farmerName: 'दूसरा किसान',
+      farmerCode: '2',
+      milkType: 'buffalo',
+      liters: 6,
+      fat: 6.0,
+      snf: 8.8,
+      rate: 50,
+      totalAmount: 300,
+      deduction: 0,
+      netPayable: 300,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 'c-f2-m',
+      date: '2026-10-25',
+      time: '07:10:00',
+      shift: 'morning',
+      farmerId: 'f2',
+      farmerName: 'दूसरा किसान',
+      farmerCode: '2',
+      milkType: 'buffalo',
+      liters: 4,
+      fat: 5.8,
+      snf: 8.7,
+      rate: 48,
+      totalAmount: 192,
+      deduction: 0,
+      netPayable: 192,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 'c-f1-m',
+      date: '2026-10-25',
+      time: '07:05:00',
+      shift: 'morning',
+      farmerId: 'f1',
+      farmerName: 'पहला किसान',
+      farmerCode: '1',
+      milkType: 'cow',
+      liters: 8,
+      fat: 4.2,
+      snf: 8.5,
+      rate: 38,
+      totalAmount: 304,
+      deduction: 0,
+      netPayable: 304,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 'c-f3-e',
+      date: '2026-10-25',
+      time: '18:15:00',
+      shift: 'evening',
+      farmerId: 'f3',
+      farmerName: 'तीसरा किसान',
+      farmerCode: '3',
+      milkType: 'buffalo',
+      liters: 3,
+      fat: 6.5,
+      snf: 9.0,
+      rate: 55,
+      totalAmount: 165,
+      deduction: 0,
+      netPayable: 165,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+
+  const sortedCol = sortCollectionsByFarmerCode(collections, unsortedFarmers);
+  assert.deepEqual(
+    sortedCol.map((c) => `${c.farmerCode}-${c.shift}`),
+    ['1-morning', '2-morning', '2-evening', '3-evening', '10-morning']
+  );
+
+  // 3. Saved sales sorted by Customer Code No (1, 2, 10)
+  const sales: WholesaleSaleEntry[] = [
+    {
+      id: 's10',
+      date: '2026-10-25',
+      time: '08:00:00',
+      shift: 'morning',
+      customerId: 'cust10',
+      customerCode: 'C10',
+      buyerName: 'ग्राहक 10',
+      milkType: 'cow',
+      liters: 10,
+      avgFat: 4.2,
+      avgSnf: 8.5,
+      rate: 42,
+      isManualRate: false,
+      grossAmount: 420,
+      otherCharges: 0,
+      netReceivable: 420,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 's2',
+      date: '2026-10-25',
+      time: '08:00:00',
+      shift: 'morning',
+      customerId: 'cust2',
+      customerCode: 'C02',
+      buyerName: 'ग्राहक 2',
+      milkType: 'cow',
+      liters: 5,
+      avgFat: 4.2,
+      avgSnf: 8.5,
+      rate: 42,
+      isManualRate: false,
+      grossAmount: 210,
+      otherCharges: 0,
+      netReceivable: 210,
+      notes: '',
+      createdAt: '',
+    },
+    {
+      id: 's1',
+      date: '2026-10-25',
+      time: '08:00:00',
+      shift: 'morning',
+      customerId: 'cust1',
+      customerCode: 'C01',
+      buyerName: 'ग्राहक 1',
+      milkType: 'cow',
+      liters: 8,
+      avgFat: 4.2,
+      avgSnf: 8.5,
+      rate: 42,
+      isManualRate: false,
+      grossAmount: 336,
+      otherCharges: 0,
+      netReceivable: 336,
+      notes: '',
+      createdAt: '',
+    },
+  ];
+  const sortedSales = sortSalesByCustomerCode(sales);
+  assert.deepEqual(sortedSales.map((s) => s.customerCode), ['C01', 'C02', 'C10']);
+
+  // 4. All-Farmers 10-Day Bills: Morning, Evening, and Both Shifts (including Rate column / avgRate)
+  const morningBill = buildAllFarmersTenDayBillRows(unsortedFarmers, collections, '2026-10-21', '2026-10-31', 'morning');
+  assert.deepEqual(
+    morningBill.rows.map((r) => `${r.farmerCode}-${r.shift}-${r.avgRate}-${r.totalAmount}`),
+    ['1-morning-38-304', '2-morning-48-192', '10-morning-40-200']
+  );
+  assert.equal(morningBill.overallSummary.totalNetPayable, 696);
+  assert.ok(morningBill.overallSummary.avgRate !== null && morningBill.overallSummary.avgRate > 0);
+
+  const eveningBill = buildAllFarmersTenDayBillRows(unsortedFarmers, collections, '2026-10-21', '2026-10-31', 'evening');
+  assert.deepEqual(
+    eveningBill.rows.map((r) => `${r.farmerCode}-${r.shift}-${r.avgRate}-${r.totalAmount}`),
+    ['2-evening-50-300', '3-evening-55-165']
+  );
+  assert.equal(eveningBill.overallSummary.totalNetPayable, 465);
+  assert.ok(eveningBill.overallSummary.avgRate !== null && eveningBill.overallSummary.avgRate > 0);
+
+  const bothBill = buildAllFarmersTenDayBillRows(unsortedFarmers, collections, '2026-10-21', '2026-10-31', 'both');
+  // Farmer 2 has both morning and evening milk -> MUST have 2 separate lines (morning first, evening second) with exact Rate
+  assert.deepEqual(
+    bothBill.rows.map((r) => `${r.farmerCode}-${r.shift}-${r.isDualShiftFarmer}-${r.avgRate}-${r.totalAmount}`),
+    [
+      '1-morning-false-38-304',
+      '2-morning-true-48-192',
+      '2-evening-true-50-300',
+      '3-evening-false-55-165',
+      '10-morning-false-40-200',
+    ]
+  );
+  assert.equal(bothBill.overallSummary.totalNetPayable, 1161);
+  assert.ok(bothBill.overallSummary.avgRate !== null && bothBill.overallSummary.avgRate > 0);
+});
+
+test("Photo Entry: Header/spaced Date extraction, zero 2-3 duplicate entries per farmer on wrapped OCR lines, and stable ID preservation for keyboard focus", () => {
+  const registeredFarmers: Farmer[] = [
+    { id: "f1", code: "1", name: "5 – पवन बैरागी", mobile: "9000000001", village: "रामपुर", shiftSchedule: "both", defaultMilkType: "buffalo", openingBalance: 0, notes: "", active: true, createdAt: "" },
+    { id: "f2", code: "2", name: "3 – रघुवीर जी", mobile: "9000000002", village: "रामपुर", shiftSchedule: "both", defaultMilkType: "buffalo", openingBalance: 0, notes: "", active: true, createdAt: "" },
+  ];
+
+  // 1. Spaced OCR dates and header date on summary title line ("आज की दूध कलेक्शन (28 - 10 - 2026)")
+  assert.equal(normalizeScannedDate("28 - 10 - 2026", "2026-10-25"), "2026-10-28");
+  assert.equal(normalizeScannedDate("28 / 10 / 26", "2026-10-25"), "2026-10-28");
+
+  // 2. Wrapped OCR card where Farmer 1 has numbers split across 3 lines ("1.96 L", "5.3 8.3", "45.90 89")
+  // and Farmer 2 has row followed by wrapped "[Rate, Amount]" ("77.40 105") + duplicate OCR noise line
+  const wrappedOcrSlip = [
+    "आज की दूध कलेक्शन (28 - 10 - 2026) कुल किसान: 2",
+    "5 - पवन बैरागी किसान कोड: 1",
+    "सुबह | भैंस",
+    "1.96 L",
+    "5.3 8.3",
+    "45.90 89",
+    "3 - रघुवीर जी किसान कोड: 2",
+    "सुबह | भैंस",
+    "1.36 L 8.8 9.2",
+    "77.40 105",
+    "8.8 77.40 105",
+  ].join("\n");
+
+  const parsedRows = parseMilkSlipTextToRows(wrappedOcrSlip, "2026-10-25", "evening", registeredFarmers);
+  // Must produce ONLY 2 rows (1 for Farmer 1, 1 for Farmer 2) and extract header date 28-10-2026!
+  assert.equal(parsedRows.length, 2);
+
+  const built = buildCollectionEntriesFromScannedSlip(
+    parsedRows,
+    registeredFarmers,
+    { cow: null, buffalo: null },
+    "2026-10-25",
+    "evening"
+  );
+  assert.equal(built.entries.length, 2);
+  assert.equal(built.previewItems.length, 2);
+  assert.equal(built.entries[0].farmerId, "f1");
+  assert.equal(built.entries[0].date, "2026-10-28");
+  assert.equal(built.entries[0].shift, "morning");
+  assert.equal(built.entries[0].liters, 1.96);
+  assert.equal(built.entries[0].fat, 5.3);
+  assert.equal(built.entries[0].snf, 8.3);
+  assert.equal(built.entries[0].rate, 45.9);
+  assert.equal(built.entries[0].totalAmount, 89);
+
+  assert.equal(built.entries[1].farmerId, "f2");
+  assert.equal(built.entries[1].date, "2026-10-28");
+  assert.equal(built.entries[1].liters, 1.36);
+  assert.equal(built.entries[1].fat, 8.8);
+  assert.equal(built.entries[1].snf, 9.2);
+  assert.equal(built.entries[1].rate, 77.4);
+  assert.equal(built.entries[1].totalAmount, 105);
+
+  // 3. Stable ID preservation across inline preview edits (so React key never changes and keyboard never closes)
+  const originalId = built.previewItems[0].entry.id;
+  const editedBuilt = buildCollectionEntriesFromScannedSlip(
+    [
+      {
+        id: originalId,
+        farmerCode: "1",
+        farmerName: "5 – पवन बैरागी",
+        date: "2026-10-29",
+        shift: "morning",
+        milkType: "buffalo",
+        liters: 2.5,
+        fat: 5.5,
+        snf: 8.5,
+        isManualRow: true,
+      },
+    ],
+    registeredFarmers,
+    { cow: null, buffalo: null },
+    "2026-10-25",
+    "morning"
+  );
+  assert.equal(editedBuilt.previewItems[0].entry.id, originalId);
+  assert.equal(editedBuilt.previewItems[0].entry.date, "2026-10-29");
+  assert.equal(editedBuilt.previewItems[0].entry.liters, 2.5);
+});
+

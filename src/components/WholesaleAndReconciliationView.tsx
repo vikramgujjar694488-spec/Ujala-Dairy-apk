@@ -45,6 +45,8 @@ import {
   lookupRateFromChart,
   round2,
   round3,
+  sortCustomersByCode,
+  sortSalesByCustomerCode,
 } from '../utils/dairyCalculations';
 import { ConfirmDialog, WhatsAppPreviewModal } from './Modals';
 
@@ -135,8 +137,8 @@ export const WholesaleAndReconciliationView: React.FC<
   // Reconciliation scope
   const [recScope, setRecScope] = useState<'shift' | 'full_day'>('full_day');
 
-  // Customer list from state (defaulting to empty array)
-  const customers = state.customers || [];
+  // Customer list from state sorted strictly by Code No (1, 2, 3...)
+  const customers = sortCustomersByCode(state.customers || []);
 
   // Parse form numbers
   const litersNum = litersStr.trim() !== '' ? Number(litersStr) : NaN;
@@ -334,9 +336,9 @@ export const WholesaleAndReconciliationView: React.FC<
     } else {
       setEditingCustomer(null);
       setCustName(buyerName.trim());
-      // Auto suggest next customer code like C01, C02...
+      // Auto suggest next numeric customer code like 1, 2, 3...
       const nextNum = customers.length + 1;
-      const suggestedCode = `C${String(nextNum).padStart(2, '0')}`;
+      const suggestedCode = String(nextNum);
       setCustCode(suggestedCode);
       setCustMobile('');
       setCustAddress('');
@@ -398,8 +400,11 @@ export const WholesaleAndReconciliationView: React.FC<
     setShowCustomerModal(false);
   };
 
-  // Filtered sales for current date
-  const daySales = state.sales.filter((s) => s.date === date);
+  // Filtered sales for current date — strictly sorted by Customer Code No (1, 2, 3...)
+  const daySales = sortSalesByCustomerCode(
+    state.sales.filter((s) => s.date === date),
+    customers
+  );
   const saleSummary = calculateSaleSummary(daySales);
 
   // Pure profit/loss for today
@@ -445,25 +450,21 @@ export const WholesaleAndReconciliationView: React.FC<
   });
 
   return (
-    <div className="space-y-3 sm:space-y-5">
-      {/* Top Navigation Tabs inside Milk Sales: 
-          1. दूध बिक्री एंट्री (Sale Entry)
-          2. बिक्री का 10-दिन का बिल (10-Day Sale Bill)
-          3. ग्राहक सूची (Customer List)
-          4. आवक-जावक मिलान (Reconciliation) */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-2 flex flex-wrap items-center justify-between gap-2 no-print">
-        <div className="flex flex-wrap items-center gap-1.5">
+    <div className="space-y-2.5 sm:space-y-4">
+      {/* Ultra-Compact Top Navigation Tabs inside Milk Sales (Single 34px bar on mobile so Sale Entry Form fits above keyboard!) */}
+      <div className="bg-white border border-slate-200 rounded-xl p-1 flex items-center justify-between gap-1 no-print overflow-x-auto">
+        <div className="flex items-center gap-1 min-w-0">
           <button
             type="button"
             onClick={() => setActiveSubView('sale_entry')}
-            className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors ${
+            className={`h-7 sm:h-8 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap transition-colors ${
               activeSubView === 'sale_entry'
-                ? 'bg-blue-600 text-white shadow-xs'
+                ? 'bg-blue-600 text-white shadow-2xs'
                 : 'text-slate-700 hover:bg-slate-100'
             }`}
           >
-            <Truck className="w-4 h-4" />
-            {lang === 'hi' ? 'दूध बिक्री एंट्री (Milk Sale)' : 'Milk Sale Entry'}
+            <Truck className="w-3.5 h-3.5 shrink-0" />
+            <span>{lang === 'hi' ? 'बिक्री एंट्री' : 'Sale Entry'}</span>
           </button>
 
           <button
@@ -478,50 +479,50 @@ export const WholesaleAndReconciliationView: React.FC<
               }
               setActiveSubView('sale_10day_bill');
             }}
-            className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors ${
+            className={`h-7 sm:h-8 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap transition-colors ${
               activeSubView === 'sale_10day_bill'
-                ? 'bg-blue-600 text-white shadow-xs'
+                ? 'bg-blue-600 text-white shadow-2xs'
                 : 'bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100'
             }`}
           >
-            <FileText className="w-4 h-4" />
-            {lang === 'hi' ? 'बिक्री का 10-दिन का बिल (10-Day Sale Bill)' : '10-Day Sale Bill'}
+            <FileText className="w-3.5 h-3.5 shrink-0" />
+            <span>{lang === 'hi' ? '10-दिन बिल' : '10-Day Bill'}</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveSubView('customers')}
-            className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors ${
+            className={`h-7 sm:h-8 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap transition-colors ${
               activeSubView === 'customers'
-                ? 'bg-blue-600 text-white shadow-xs'
+                ? 'bg-blue-600 text-white shadow-2xs'
                 : 'text-slate-700 hover:bg-slate-100'
             }`}
           >
-            <Users className="w-4 h-4" />
-            {lang === 'hi' ? `ग्राहक सूची (${customers.length})` : `Customers (${customers.length})`}
+            <Users className="w-3.5 h-3.5 shrink-0" />
+            <span>{lang === 'hi' ? `ग्राहक (${customers.length})` : `Customers (${customers.length})`}</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveSubView('reconciliation')}
-            className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors ${
+            className={`h-7 sm:h-8 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap transition-colors ${
               activeSubView === 'reconciliation'
-                ? 'bg-blue-600 text-white shadow-xs'
+                ? 'bg-blue-600 text-white shadow-2xs'
                 : 'text-slate-700 hover:bg-slate-100'
             }`}
           >
-            <Scale className="w-4 h-4" />
-            {lang === 'hi' ? 'दूध आवक-जावक मिलान' : 'Milk Reconciliation'}
+            <Scale className="w-3.5 h-3.5 shrink-0" />
+            <span>{lang === 'hi' ? 'मिलान' : 'Reconcile'}</span>
           </button>
         </div>
 
         <button
           type="button"
           onClick={() => handleOpenAddCustomerModal()}
-          className="min-h-[40px] px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-1 shadow-xs"
+          className="h-7 sm:h-8 px-2 sm:px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] sm:text-xs font-bold rounded-lg flex items-center gap-1 whitespace-nowrap shrink-0 shadow-2xs"
         >
-          <UserPlus className="w-4 h-4" />
-          {lang === 'hi' ? '+ नया ग्राहक जोड़ें' : '+ Add Customer'}
+          <UserPlus className="w-3 h-3 shrink-0" />
+          <span>{lang === 'hi' ? '+ ग्राहक' : '+ Cust'}</span>
         </button>
       </div>
 
@@ -529,135 +530,135 @@ export const WholesaleAndReconciliationView: React.FC<
           SUBVIEW 1: MILK SALE ENTRY (दूध बिक्री एंट्री)
          ======================================================================== */}
       {activeSubView === 'sale_entry' && (
-        <div className="space-y-3 sm:space-y-5">
-          {/* ULTRA-COMPACT TOP WHOLESALE MILK SALE COCKPIT (ABOVE MOBILE KEYBOARD) */}
+        <div className="space-y-2.5 sm:space-y-4">
+          {/* ULTRA-COMPACT TOP WHOLESALE MILK SALE COCKPIT (FITS 100% ABOVE MOBILE KEYBOARD WITH ZERO SWIPE) */}
           <div
             data-testid="sale-top-cockpit"
-            className="bg-white border-2 border-blue-600 rounded-2xl p-2.5 sm:p-4 shadow-sm"
+            className="bg-white border-2 border-blue-600 rounded-2xl p-2 sm:p-3.5 shadow-xs space-y-1.5"
           >
-            {/* Row 1: Compact Date + Shift Switch + Today's Saved Sale Summary */}
-            <div
-              data-testid="sale-mobile-keyboard-live-bar"
-              className="flex flex-wrap items-center justify-between gap-1.5 pb-2 mb-2 border-b border-slate-100"
-            >
-              <div className="flex items-center gap-1.5">
-                <div className="relative inline-flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 cursor-pointer">
-                  <Calendar className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                  <span className="text-xs font-extrabold text-blue-800 tabular-nums whitespace-nowrap">
-                    {formatDateDMY(date)}
-                  </span>
-                  <input
-                    type="date"
-                    aria-label={lang === 'hi' ? 'बिक्री की तारीख' : 'Sale Date'}
-                    value={date}
-                    onChange={(e) => onChangeDate(e.target.value)}
-                    onClick={(e) => {
-                      try {
-                        (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
-                      } catch {}
-                    }}
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                  />
+            {/* Row 1 & 2 Combined in Compact Dark Header: Date + Shift + Today Sold + Live Sale Strip */}
+            <div className="bg-slate-900 text-white rounded-xl px-2 py-1.5 space-y-1">
+              <div
+                data-testid="sale-mobile-keyboard-live-bar"
+                className="flex items-center justify-between gap-1 border-b border-slate-700/80 pb-1"
+              >
+                <div className="flex items-center gap-1 min-w-0">
+                  <div className="relative inline-flex items-center gap-1 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 cursor-pointer">
+                    <Calendar className="w-3 h-3 text-blue-400 shrink-0" />
+                    <span className="text-[11px] font-extrabold text-amber-300 tabular-nums whitespace-nowrap">
+                      {formatDateDMY(date)}
+                    </span>
+                    <input
+                      type="date"
+                      aria-label={lang === 'hi' ? 'बिक्री की तारीख' : 'Sale Date'}
+                      value={date}
+                      onChange={(e) => onChangeDate(e.target.value)}
+                      onClick={(e) => {
+                        try {
+                          (e.currentTarget as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
+                        } catch {}
+                      }}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                  </div>
+
+                  <div className="flex items-center bg-slate-800 p-0.5 rounded-md border border-slate-700 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => onChangeShift('morning')}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-0.5 transition-colors ${
+                        shift === 'morning'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-300'
+                      }`}
+                    >
+                      <Sun className="w-2.5 h-2.5" />
+                      {lang === 'hi' ? 'सुबह' : 'AM'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onChangeShift('evening')}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-0.5 transition-colors ${
+                        shift === 'evening'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-300'
+                      }`}
+                    >
+                      <Moon className="w-2.5 h-2.5" />
+                      {lang === 'hi' ? 'शाम' : 'PM'}
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex items-center bg-slate-100 p-0.5 rounded-lg">
-                  <button
-                    type="button"
-                    onClick={() => onChangeShift('morning')}
-                    className={`px-2 py-1 rounded-md text-[11px] font-bold flex items-center gap-1 transition-colors ${
-                      shift === 'morning'
-                        ? 'bg-blue-600 text-white shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                {/* Right side: Today's saved sale totals */}
+                <div className="flex items-center gap-1 text-[10px] tabular-nums shrink-0">
+                  <span className="text-slate-400 hidden sm:inline">
+                    {lang === 'hi' ? 'आज बिक्री:' : 'Sold:'}
+                  </span>
+                  <strong className="text-white bg-slate-800 px-1 py-0.5 rounded">
+                    {formatNumber(saleSummary.totalLiters, 2)}L
+                  </strong>
+                  <strong className="text-emerald-400 bg-slate-800 px-1 py-0.5 rounded">
+                    {formatCurrency(saleSummary.totalNetReceivable)}
+                  </strong>
+                  <span
+                    className={`hidden sm:inline font-bold ${
+                      pureDayPL.isProfit ? 'text-emerald-400' : 'text-rose-400'
                     }`}
                   >
-                    <Sun className="w-3 h-3" />
-                    {lang === 'hi' ? 'सुबह' : 'AM'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onChangeShift('evening')}
-                    className={`px-2 py-1 rounded-md text-[11px] font-bold flex items-center gap-1 transition-colors ${
-                      shift === 'evening'
-                        ? 'bg-blue-600 text-white shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    <Moon className="w-3 h-3" />
-                    {lang === 'hi' ? 'शाम' : 'PM'}
-                  </button>
+                    ({pureDayPL.isProfit ? 'लाभ' : 'हानि'}:{' '}
+                    {pureDayPL.netDifference >= 0
+                      ? `+${formatCurrency(pureDayPL.netDifference)}`
+                      : formatCurrency(pureDayPL.netDifference)})
+                  </span>
                 </div>
               </div>
 
-              {/* Right side: Today's saved sale totals + Pure Profit/Loss Preview */}
-              <div className="flex items-center gap-2 text-[11px] bg-blue-50 border border-blue-100 px-2.5 py-1 rounded-lg tabular-nums">
-                <span className="text-slate-600">
-                  {lang === 'hi' ? 'आज बिक्री:' : 'Sold:'}{' '}
-                  <strong className="text-slate-900">{formatNumber(saleSummary.totalLiters, 2)}L</strong>
-                </span>
-                <span className="text-slate-300">|</span>
-                <span className="text-blue-800 font-bold">
-                  {formatCurrency(saleSummary.totalNetReceivable)}
-                </span>
-                <span className="text-slate-300 hidden sm:inline">|</span>
-                <span
-                  className={`hidden sm:inline font-bold ${
-                    pureDayPL.isProfit ? 'text-emerald-700' : 'text-rose-700'
-                  }`}
-                >
-                  {pureDayPL.isProfit ? 'लाभ' : 'हानि'}:{' '}
-                  {pureDayPL.netDifference >= 0
-                    ? `+${formatCurrency(pureDayPL.netDifference)}`
-                    : formatCurrency(pureDayPL.netDifference)}
-                </span>
-              </div>
-            </div>
-
-            {/* Row 2: ALWAYS-VISIBLE LIVE SALE BAR (FAT, SNF, Qty, Rate/L, Total Amount) */}
-            <div
-              data-testid="live-sale-preview"
-              className="bg-slate-900 text-white rounded-xl p-2 mb-2"
-            >
-              <div className="grid grid-cols-5 gap-1 text-center items-center tabular-nums">
-                <div className="bg-slate-800/90 rounded-lg py-1 px-1">
-                  <span className="text-[9px] text-slate-400 block leading-tight">
-                    {milkType === 'cow' ? 'गाय' : milkType === 'buffalo' ? 'भैंस' : 'मिश्रित'} · FAT
+              {/* ALWAYS-VISIBLE LIVE SALE BAR (FAT, SNF, Qty, Rate/L, Total Amount) */}
+              <div
+                data-testid="live-sale-preview"
+                className="grid grid-cols-5 gap-1 text-center items-center tabular-nums bg-blue-950/90 border border-blue-700/70 rounded-lg px-1 py-0.5"
+              >
+                <div>
+                  <span className="text-[8px] text-blue-300 block leading-none">
+                    {milkType === 'cow' ? 'गाय' : milkType === 'buffalo' ? 'भैंस' : 'मिश्रित'}/FAT
                   </span>
-                  <span className="text-xs sm:text-sm font-bold text-white">
+                  <span className="text-[11px] font-bold text-white leading-tight">
                     {hasValidFat ? fatNum.toFixed(1) : '—'}
                   </span>
                 </div>
-                <div className="bg-slate-800/90 rounded-lg py-1 px-1">
-                  <span className="text-[9px] text-slate-400 block leading-tight">SNF</span>
-                  <span className="text-xs sm:text-sm font-bold text-white">
+                <div>
+                  <span className="text-[8px] text-blue-300 block leading-none">SNF</span>
+                  <span className="text-[11px] font-bold text-white leading-tight">
                     {hasValidSnf ? snfNum.toFixed(1) : '—'}
                   </span>
                 </div>
-                <div className="bg-slate-800/90 rounded-lg py-1 px-1">
-                  <span className="text-[9px] text-slate-400 block leading-tight">
+                <div>
+                  <span className="text-[8px] text-blue-300 block leading-none">
                     {lang === 'hi' ? 'मात्रा (L)' : 'Qty (L)'}
                   </span>
-                  <span className="text-xs sm:text-sm font-bold text-white">
+                  <span className="text-[11px] font-bold text-white leading-tight">
                     {hasValidLiters ? formatNumber(litersNum, 3) : '—'}
                   </span>
                 </div>
-                <div className="bg-blue-950/90 border border-blue-700 rounded-lg py-1 px-1">
-                  <span className="text-[9px] text-blue-300 block leading-tight">
-                    {lang === 'hi' ? 'रेट / L' : 'Rate/L'}
+                <div>
+                  <span className="text-[8px] text-cyan-300 block leading-none">
+                    {lang === 'hi' ? 'रेट/L' : 'Rate/L'}
                   </span>
                   <span
                     data-testid="live-sale-rate-value"
-                    className="text-xs sm:text-sm font-extrabold text-amber-300"
+                    className="text-[11px] font-extrabold text-amber-300 leading-tight"
                   >
                     {liveRate !== null ? `₹${liveRate.toFixed(2)}` : '—'}
                   </span>
                 </div>
-                <div className="bg-emerald-950/90 border border-emerald-600 rounded-lg py-1 px-1">
-                  <span className="text-[9px] text-emerald-300 block leading-tight">
+                <div className="bg-emerald-900/90 border border-emerald-500/60 rounded px-1 py-0.5">
+                  <span className="text-[8px] text-emerald-200 block leading-none">
                     {lang === 'hi' ? 'कुल रकम' : 'Total ₹'}
                   </span>
                   <span
                     data-testid="live-sale-total-amount"
-                    className="text-xs sm:text-sm font-extrabold text-emerald-300"
+                    className="text-[11px] sm:text-xs font-extrabold text-emerald-300 leading-tight"
                   >
                     {liveNetReceivable !== null ? `₹${liveNetReceivable.toFixed(2)}` : '—'}
                   </span>
@@ -665,8 +666,8 @@ export const WholesaleAndReconciliationView: React.FC<
               </div>
 
               {!isManualRate && hasValidFat && hasValidSnf && !chartLookup.found && (
-                <div className="mt-1.5 px-2 py-1 rounded bg-amber-500/20 border border-amber-400/40 text-amber-200 text-[11px] flex items-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-300" />
+                <div className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/40 text-amber-200 text-[10px] flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3 shrink-0 text-amber-300" />
                   <span className="truncate">
                     {lang === 'hi' ? chartLookup.warningHi : chartLookup.warningEn}
                   </span>
@@ -674,22 +675,22 @@ export const WholesaleAndReconciliationView: React.FC<
               )}
             </div>
 
-            {/* Row 3: Compact Sale Entry Form */}
-            <form onSubmit={handleSubmit} className="space-y-2">
-              {/* Customer Selector & Quick Add Customer Button */}
-              <div className="grid grid-cols-12 gap-1.5">
-                <div className="col-span-8 sm:col-span-8">
+            {/* Row 3: Compact Sale Entry Form (All fields fit above keyboard with zero swipe!) */}
+            <form onSubmit={handleSubmit} className="space-y-1.5">
+              {/* Customer Selector & Milk Type Row */}
+              <div className="grid grid-cols-12 gap-1.5 items-end">
+                <div className="col-span-8">
                   <div className="flex items-center justify-between mb-0.5">
-                    <label htmlFor="sale-customer-select" className="text-[10px] font-bold text-slate-700">
-                      {lang === 'hi' ? 'ग्राहक चुनें या नाम लिखें *' : 'Select Customer or Enter Name *'}
+                    <label htmlFor="sale-customer-select" className="text-[10px] font-bold text-slate-700 leading-none">
+                      {lang === 'hi' ? 'ग्राहक चुनें या नाम लिखें (कोड क्रमानुसार) *' : 'Customer / Buyer *'}
                     </label>
                     <button
                       type="button"
                       onClick={() => handleOpenAddCustomerModal()}
-                      className="text-[10px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-0.5"
+                      className="text-[10px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-0.5 leading-none"
                     >
-                      <Plus className="w-3 h-3" />
-                      {lang === 'hi' ? 'नया ग्राहक' : 'New Customer'}
+                      <Plus className="w-2.5 h-2.5" />
+                      {lang === 'hi' ? 'नया ग्राहक' : 'New'}
                     </button>
                   </div>
 
@@ -698,13 +699,18 @@ export const WholesaleAndReconciliationView: React.FC<
                       <select
                         id="sale-customer-select"
                         value={selectedCustomerId}
-                        onChange={(e) => handleSelectCustomer(e.target.value)}
-                        className="w-1/2 h-9 px-2 py-1 text-xs font-semibold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        onChange={(e) => {
+                          handleSelectCustomer(e.target.value);
+                          if (e.target.value) {
+                            setTimeout(() => fatInputRef.current?.focus(), 20);
+                          }
+                        }}
+                        className="w-1/2 h-8 px-1.5 text-xs font-semibold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                       >
-                        <option value="">{lang === 'hi' ? '-- ग्राहक चुनें --' : '-- Select Customer --'}</option>
+                        <option value="">{lang === 'hi' ? '-- ग्राहक चुनें --' : '-- Customer --'}</option>
                         {customers.map((c) => (
                           <option key={c.id} value={c.id}>
-                            {c.code} — {c.name} {c.mobile ? `(${c.mobile})` : ''}
+                            {c.code} — {c.name}
                           </option>
                         ))}
                       </select>
@@ -716,11 +722,11 @@ export const WholesaleAndReconciliationView: React.FC<
                       placeholder={
                         customers.length > 0
                           ? lang === 'hi'
-                            ? 'या अन्य ग्राहक/डेयरी का नाम'
-                            : 'Or enter buyer name'
+                            ? 'या ग्राहक का नाम'
+                            : 'Or buyer name'
                           : lang === 'hi'
                           ? 'ग्राहक/डेयरी का नाम दर्ज करें'
-                          : 'Enter buyer / customer name'
+                          : 'Enter buyer name'
                       }
                       value={buyerName}
                       onChange={(e) => {
@@ -729,83 +735,83 @@ export const WholesaleAndReconciliationView: React.FC<
                       }}
                       className={`${
                         customers.length > 0 ? 'w-1/2' : 'w-full'
-                      } h-9 px-2.5 py-1 text-xs sm:text-sm font-semibold border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600`}
+                      } h-8 px-2 text-xs font-semibold border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600`}
                     />
                   </div>
                 </div>
 
                 {/* Milk Type (Cow/Buffalo/Mixed) + Rate Mode (Chart vs Manual) */}
-                <div className="col-span-4 sm:col-span-4">
+                <div className="col-span-4">
                   <div className="flex items-center justify-between mb-0.5">
-                    <label htmlFor="sale-milk-type" className="text-[10px] font-bold text-slate-700">
+                    <label htmlFor="sale-milk-type" className="text-[10px] font-bold text-slate-700 leading-none">
                       {lang === 'hi' ? 'प्रकार' : 'Type'}
                     </label>
                     <button
                       type="button"
                       onClick={() => setIsManualRate((prev) => !prev)}
-                      className={`text-[10px] font-bold ${
+                      className={`text-[9px] font-bold leading-none ${
                         isManualRate ? 'text-amber-700 underline' : 'text-blue-700 underline'
                       }`}
                     >
                       {isManualRate
                         ? lang === 'hi'
-                          ? 'चार्ट रेट लें'
-                          : 'Use Chart Rate'
+                          ? 'चार्ट रेट'
+                          : 'Chart'
                         : lang === 'hi'
                         ? 'Manual रेट'
-                        : 'Manual Rate'}
+                        : 'Manual'}
                     </button>
                   </div>
                   <select
                     id="sale-milk-type"
                     value={milkType}
                     onChange={(e) => setMilkType(e.target.value as SaleMilkType)}
-                    className="w-full h-9 px-2 py-1 text-xs font-semibold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    className="w-full h-8 px-1.5 text-xs font-semibold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                   >
                     <option value="cow">{lang === 'hi' ? 'गाय (Cow)' : 'Cow'}</option>
-                    <option value="buffalo">{lang === 'hi' ? 'भैंस (Buffalo)' : 'Buffalo'}</option>
-                    <option value="mixed">{lang === 'hi' ? 'मिश्रित (Mixed)' : 'Mixed'}</option>
+                    <option value="buffalo">{lang === 'hi' ? 'भैंस (Buf)' : 'Buffalo'}</option>
+                    <option value="mixed">{lang === 'hi' ? 'मिश्रित' : 'Mixed'}</option>
                   </select>
                 </div>
               </div>
 
-              {/* FAT + SNF + Quantity + Rate/L + Total Amount: ALL IN ONE ROW (Rate & Total Amount right together with decimals!) */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+              {/* FAT + SNF + Quantity (+ Optional Manual Rate) ALL IN ONE HORIZONTAL ROW ON MOBILE */}
+              <div className={`grid ${isManualRate ? 'grid-cols-4' : 'grid-cols-3'} gap-1.5`}>
                 <div>
-                  <label htmlFor="sale-fat" className="block text-[10px] font-bold text-slate-700 mb-0.5">
-                    {lang === 'hi' ? '1. FAT' : '1. FAT'}
+                  <label htmlFor="sale-fat" className="block text-[10px] font-bold text-slate-800 mb-0.5 truncate leading-none">
+                    {lang === 'hi' ? '1. FAT (45→4.5)*' : '1. FAT *'}
                   </label>
                   <input
                     ref={fatInputRef}
                     id="sale-fat"
                     type="text"
                     inputMode="decimal"
-                    placeholder="45→4.5"
+                    placeholder="4.5"
                     value={fatStr}
                     onChange={handleFatChange}
-                    className="w-full h-10 px-2 py-1 text-sm font-bold font-mono text-center border-2 border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 tabular-nums"
+                    className="w-full h-9 px-2 text-sm font-bold font-mono text-center border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
                   />
                 </div>
 
                 <div>
-                  <label htmlFor="sale-snf" className="block text-[10px] font-bold text-slate-700 mb-0.5">
-                    {lang === 'hi' ? '2. SNF' : '2. SNF'}
+                  <label htmlFor="sale-snf" className="block text-[10px] font-bold text-slate-800 mb-0.5 truncate leading-none">
+                    {lang === 'hi' ? '2. SNF (85→8.5)*' : '2. SNF *'}
                   </label>
                   <input
                     ref={snfInputRef}
                     id="sale-snf"
                     type="text"
                     inputMode="decimal"
-                    placeholder="85→8.5"
+                    placeholder="8.5"
                     value={snfStr}
                     onChange={handleSnfChange}
-                    className="w-full h-10 px-2 py-1 text-sm font-bold font-mono text-center border-2 border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 tabular-nums"
+                    className="w-full h-9 px-2 text-sm font-bold font-mono text-center border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
                   />
                 </div>
 
                 <div>
-                  <label htmlFor="sale-liters" className="block text-[10px] font-bold text-slate-700 mb-0.5">
-                    {lang === 'hi' ? '3. मात्रा (L)' : '3. Qty (L)'}
+                  <label htmlFor="sale-liters" className="block text-[10px] font-bold text-slate-800 mb-0.5 truncate leading-none">
+                    {lang === 'hi' ? '3. मात्रा (L)*' : '3. Qty (L)*'}
                   </label>
                   <input
                     ref={litersInputRef}
@@ -816,21 +822,15 @@ export const WholesaleAndReconciliationView: React.FC<
                     placeholder="10"
                     value={litersStr}
                     onChange={(e) => setLitersStr(e.target.value)}
-                    className="w-full h-10 px-2 py-1 text-sm font-bold font-mono text-center border-2 border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 tabular-nums"
+                    className="w-full h-9 px-2 text-sm font-bold font-mono text-center border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
                   />
                 </div>
 
-                <div>
-                  <label htmlFor="sale-rate" className="block text-[10px] font-bold text-slate-700 mb-0.5">
-                    {isManualRate
-                      ? lang === 'hi'
-                        ? '4. Manual दर (₹/L)'
-                        : '4. Manual Rate'
-                      : lang === 'hi'
-                      ? '4. चार्ट दर (₹/L)'
-                      : '4. Chart Rate'}
-                  </label>
-                  {isManualRate ? (
+                {isManualRate && (
+                  <div>
+                    <label htmlFor="sale-rate" className="block text-[10px] font-bold text-amber-800 mb-0.5 truncate leading-none">
+                      {lang === 'hi' ? '4. दर (₹/L)' : '4. Rate'}
+                    </label>
                     <input
                       ref={rateInputRef}
                       id="sale-rate"
@@ -840,87 +840,56 @@ export const WholesaleAndReconciliationView: React.FC<
                       placeholder="45.00"
                       value={manualRateStr}
                       onChange={(e) => setManualRateStr(e.target.value)}
-                      className="w-full h-10 px-2 py-1 text-sm font-bold font-mono text-center border-2 border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600 focus:border-amber-600 tabular-nums"
+                      className="w-full h-9 px-1.5 text-sm font-bold font-mono text-center border-2 border-amber-300 rounded-lg focus:outline-none focus:border-amber-600 tabular-nums"
                     />
-                  ) : (
-                    <div
-                      data-testid="sale-form-rate-box"
-                      className="w-full h-10 px-1 py-1 text-xs sm:text-sm font-bold font-mono bg-blue-50 border-2 border-blue-300 rounded-lg flex items-center justify-center tabular-nums text-blue-900"
-                    >
-                      {liveRate !== null ? `₹${liveRate.toFixed(2)}` : 'चार्ट से'}
-                    </div>
-                  )}
-                </div>
-
-                {/* 5. Total Amount box right alongside Rate in the form (with decimals) */}
-                <div className="col-span-2 sm:col-span-1">
-                  <label className="block text-[10px] font-bold text-emerald-800 mb-0.5">
-                    {lang === 'hi' ? '5. कुल अमाउंट (Total ₹)' : '5. Total Amount (₹)'}
-                  </label>
-                  <div
-                    data-testid="sale-form-total-amount-box"
-                    className="w-full h-10 px-2 py-1 text-xs sm:text-sm font-extrabold font-mono bg-emerald-50 border-2 border-emerald-400 rounded-lg flex items-center justify-center tabular-nums text-emerald-900"
-                  >
-                    {liveNetReceivable !== null ? `₹${liveNetReceivable.toFixed(2)}` : '₹0.00'}
                   </div>
-                </div>
+                )}
               </div>
 
-              {/* Action Buttons + Rate & Total Amount Inline Summary Pill */}
-              <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  {/* Inline Rate + Total Amount Pill right next to action bar */}
-                  <div
-                    data-testid="sale-rate-and-total-inline"
-                    className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1 text-xs tabular-nums"
-                  >
-                    <span>
-                      {lang === 'hi' ? 'दर (Rate):' : 'Rate:'}{' '}
-                      <strong className="text-blue-900 font-bold">
-                        {liveRate !== null ? formatCurrency(liveRate) : '—'}
-                      </strong>
+              {/* Single Non-Wrapping Bottom Action Bar: Rate + Total Amount + Save Sale Button + Details Toggle */}
+              <div className="flex items-center justify-between gap-1.5 pt-0.5">
+                <div
+                  data-testid="sale-rate-and-total-inline"
+                  className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1 text-[11px] tabular-nums shrink-0"
+                >
+                  <div data-testid="sale-form-rate-box">
+                    <span className="block text-[8px] text-slate-500 leading-none">
+                      {lang === 'hi' ? 'दर (Rate)' : 'Rate'}
                     </span>
-                    <span className="text-emerald-300">|</span>
-                    <span>
-                      {lang === 'hi' ? 'टोटल अमाउंट:' : 'Total:'}{' '}
-                      <strong className="text-emerald-800 font-extrabold text-xs sm:text-sm">
-                        {liveNetReceivable !== null ? formatCurrency(liveNetReceivable) : '₹0.00'}
-                      </strong>
-                    </span>
+                    <strong className="text-blue-900 font-bold leading-tight">
+                      {liveRate !== null ? `₹${liveRate.toFixed(2)}` : '—'}
+                    </strong>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowExtraSaleFields((prev) => !prev)}
-                    className="text-[11px] font-semibold text-slate-600 hover:text-blue-600 flex items-center gap-1"
+                  <div
+                    data-testid="sale-form-total-amount-box"
+                    className="border-l border-emerald-200 pl-1.5"
                   >
-                    <Settings2 className="w-3 h-3" />
-                    {showExtraSaleFields
-                      ? lang === 'hi'
-                        ? 'अतिरिक्त विवरण छुपाएँ'
-                        : 'Hide Details'
-                      : lang === 'hi'
-                      ? '+ छूट/अन्य शुल्क व नोट'
-                      : '+ Charges & Note'}
-                  </button>
+                    <span className="block text-[8px] text-slate-500 leading-none">
+                      {lang === 'hi' ? 'कुल अमाउंट' : 'Total ₹'}
+                    </span>
+                    <strong className="text-emerald-800 font-extrabold text-xs">
+                      {liveNetReceivable !== null ? `₹${liveNetReceivable.toFixed(2)}` : '₹0.00'}
+                    </strong>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1.5">
-                  {editingId && (
-                    <button
-                      type="button"
-                      onClick={resetForm}
-                      className="min-h-[36px] px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg"
-                    >
-                      {lang === 'hi' ? 'रद्द करें' : 'Cancel'}
-                    </button>
-                  )}
+                {editingId && (
                   <button
-                    data-testid="save-sale-btn"
-                    type="submit"
-                    className="min-h-[38px] px-5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
+                    type="button"
+                    onClick={resetForm}
+                    className="h-9 px-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg shrink-0"
                   >
-                    <CheckCircle2 className="w-4 h-4" />
+                    {lang === 'hi' ? 'रद्द' : 'Cancel'}
+                  </button>
+                )}
+
+                <button
+                  data-testid="save-sale-btn"
+                  type="submit"
+                  className="flex-1 min-w-0 h-9 px-3 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1 shadow-xs"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">
                     {editingId
                       ? lang === 'hi'
                         ? 'बिक्री अपडेट करें'
@@ -928,8 +897,20 @@ export const WholesaleAndReconciliationView: React.FC<
                       : lang === 'hi'
                       ? 'बिक्री सेव करें'
                       : 'Save Sale'}
-                  </button>
-                </div>
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowExtraSaleFields((prev) => !prev)}
+                  title={lang === 'hi' ? 'छूट/अन्य शुल्क व नोट' : 'Charges & Note'}
+                  className="h-9 px-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold rounded-lg flex items-center gap-0.5 shrink-0"
+                >
+                  <Settings2 className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden sm:inline">
+                    {lang === 'hi' ? '+ शुल्क/नोट' : '+ Note'}
+                  </span>
+                </button>
               </div>
 
               {formError && (
@@ -1041,14 +1022,23 @@ export const WholesaleAndReconciliationView: React.FC<
                       </td>
                     </tr>
                   ) : (
-                    daySales.map((s, idx) => (
-                      <tr key={s.id} className="hover:bg-slate-50">
+                    daySales.map((s, idx) => {
+                      const matchedCust = customers.find(
+                        (c) =>
+                          (s.customerId && c.id === s.customerId) ||
+                          c.name.trim().toLowerCase() === (s.buyerName || '').trim().toLowerCase()
+                      );
+                      const resolvedCode = s.customerCode || matchedCust?.code || String(idx + 1);
+                      return (
+                      <tr key={s.id} data-testid={`saved-sale-row-${idx}`} className="hover:bg-slate-50">
                         <td className="py-1.5 px-1 sm:px-2.5 border border-slate-300">
                           <span className="font-bold text-slate-900 block leading-tight">
-                            <span className="text-slate-400 font-normal mr-0.5">{idx + 1}.</span>
-                            {s.customerCode ? (
-                              <span className="font-mono text-blue-700 mr-1">{s.customerCode}</span>
-                            ) : null}
+                            <span
+                              data-testid={`saved-sale-code-${idx}`}
+                              className="inline-flex items-center justify-center px-1.5 py-0.2 mr-1 rounded bg-blue-600 text-white font-mono text-[11px] font-extrabold"
+                            >
+                              {resolvedCode}
+                            </span>
                             {s.buyerName}
                           </span>
                           <span className="text-[11px] font-semibold text-slate-600 block leading-tight mt-0.5">
@@ -1111,10 +1101,11 @@ export const WholesaleAndReconciliationView: React.FC<
                             >
                               <Trash2 className="w-3 h-3" />
                             </button>
-                          </div>
+                            </div>
                         </td>
                       </tr>
-                    ))
+                      );
+                    })
                   )}
                 </tbody>
                 <tfoot>

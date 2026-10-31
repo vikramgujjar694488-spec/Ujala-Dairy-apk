@@ -48,8 +48,10 @@ import {
   getCycleLabelHi,
   getTenDayCycleDates,
   normalizeFarmerShiftSchedule,
+  buildAllFarmersTenDayBillRows,
   round2,
   round3,
+  sortFarmersByCode,
   truncatePurchaseAmount,
 } from '../utils/dairyCalculations';
 import { ConfirmDialog, WhatsAppPreviewModal } from './Modals';
@@ -82,6 +84,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   onDeleteBill,
 }) => {
   const lang = state.language;
+  const sortedFarmers = sortFarmersByCode(state.farmers);
   const [subTab, setSubTab] = useState<FarmerSectionSubTab>(initialSubTab);
 
   // Sync if parent switches tab
@@ -153,9 +156,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
     'morning' | 'evening' | 'tenday' | 'profit_loss'
   >('tenday');
   const [reportSingleDate, setReportSingleDate] = useState<string>(state.selectedDate);
-  const [reportFarmerFilter, setReportFarmerFilter] = useState<string>(
-    state.farmers[0]?.id || 'all'
-  );
+  const [reportFarmerFilter, setReportFarmerFilter] = useState<string>('all');
 
   // WhatsApp Preview Modal
   const [waModal, setWaModal] = useState<{ open: boolean; phone: string; message: string }>({
@@ -945,7 +946,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 onChange={(e) => setLedgerFarmerId(e.target.value)}
                 className="min-h-[40px] px-3 py-1.5 text-xs font-bold bg-blue-50 text-blue-900 border border-blue-200 rounded-xl"
               >
-                {state.farmers.map((f) => (
+                {sortedFarmers.map((f) => (
                   <option key={f.id} value={f.id}>
                     {f.code} — {f.name} ({scheduleLabel(f.shiftSchedule)})
                   </option>
@@ -1202,7 +1203,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     className="w-full min-h-[44px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
                   >
                     <option value="">{lang === 'hi' ? '-- किसान चुनें --' : '-- Select --'}</option>
-                    {state.farmers.map((f) => (
+                    {sortedFarmers.map((f) => (
                       <option key={f.id} value={f.id}>
                         {f.code} — {f.name}
                       </option>
@@ -1546,7 +1547,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                     className="w-full min-h-[44px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
                   >
                     <option value="">{lang === 'hi' ? '-- किसान चुनें --' : '-- Select --'}</option>
-                    {state.farmers.map((f) => (
+                    {sortedFarmers.map((f) => (
                       <option key={f.id} value={f.id}>
                         {f.code} — {f.name}
                       </option>
@@ -1721,7 +1722,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
           {/* CLEAN 4-REPORTS CARD INSIDE 10-DAY BILLING SECTION */}
           <div
             data-testid="ten-day-billing-reports-section"
-            className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4"
+            className="bg-white border border-slate-200 rounded-2xl p-2 sm:p-5 space-y-3.5"
           >
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5 no-print">
               <div>
@@ -1810,58 +1811,43 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
               </button>
             </div>
 
-            {/* REPORT 1 & 2: 10 दिन की सुबह की रिपोर्ट (10-Day Morning) / 10 दिन की शाम की रिपोर्ट (10-Day Evening) */}
+            {/* REPORT 1 & 2: सुबह के 10 दिन का बिल (10-Day Morning Bill) & शाम के 10 दिन का बिल (10-Day Evening Bill) */}
             {(activeCleanReport === 'morning' || activeCleanReport === 'evening') &&
               (() => {
                 const shiftType = activeCleanReport === 'morning' ? 'morning' : 'evening';
-                const shiftLabelHi =
-                  shiftType === 'morning'
-                    ? '10 दिन की सुबह की रिपोर्ट (10-Day Morning Report)'
-                    : '10 दिन की शाम की रिपोर्ट (10-Day Evening Report)';
                 const { fromDate, toDate } = getTenDayCycleDates(billYearMonth, billCycle);
-                const entries = state.collections.filter(
-                  (c) =>
-                    c.date >= fromDate &&
-                    c.date <= toDate &&
-                    c.shift === shiftType &&
-                    (reportFarmerFilter === 'all' || c.farmerId === reportFarmerFilter)
+                const billReport = buildAllFarmersTenDayBillRows(
+                  sortedFarmers,
+                  state.collections,
+                  fromDate,
+                  toDate,
+                  shiftType
                 );
-                const sum = calculateCollectionSummary(entries);
 
-                // Build day-by-day rows for the 10-day cycle
-                const startDay = Number(fromDate.slice(8, 10));
-                const endDay = Number(toDate.slice(8, 10));
-                const shiftDayRows: Array<{
-                  date: string;
-                  count: number;
-                  liters: number;
-                  avgFat: number | null;
-                  avgSnf: number | null;
-                  avgRate: number | null;
-                  amount: number;
-                }> = [];
-
-                for (let d = startDay; d <= endDay; d++) {
-                  const dStr = `${billYearMonth}-${String(d).padStart(2, '0')}`;
-                  const dayEntries = entries.filter((c) => c.date === dStr);
-                  const dSum = calculateCollectionSummary(dayEntries);
-                  shiftDayRows.push({
-                    date: dStr,
-                    count: dSum.entryCount,
-                    liters: dSum.totalLiters,
-                    avgFat: dSum.avgFat,
-                    avgSnf: dSum.avgSnf,
-                    avgRate: dSum.avgRate,
-                    amount: dSum.totalAmount,
-                  });
-                }
+                // Single farmer day-by-day entries when a specific farmer is selected
+                const singleFarmerEntries =
+                  reportFarmerFilter !== 'all'
+                    ? state.collections
+                        .filter(
+                          (c) =>
+                            c.date >= fromDate &&
+                            c.date <= toDate &&
+                            c.shift === shiftType &&
+                            c.farmerId === reportFarmerFilter
+                        )
+                        .sort((a, b) => a.date.localeCompare(b.date))
+                    : [];
+                const singleFarmerSum = calculateCollectionSummary(singleFarmerEntries);
+                const activeSum =
+                  reportFarmerFilter === 'all' ? billReport.overallSummary : singleFarmerSum;
 
                 return (
                   <div
                     data-testid={`clean-report-view-${shiftType}`}
-                    className="space-y-4 pt-2 border-t border-slate-100"
+                    className="space-y-3 pt-2 border-t border-slate-100"
                   >
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 no-print">
+                    {/* Filter Controls: Month, 10-Day Period, Farmer Filter */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 no-print">
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">
                           {lang === 'hi' ? 'महीना चुनें' : 'Month'}
@@ -1870,7 +1856,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                           type="month"
                           value={billYearMonth}
                           onChange={(e) => setBillYearMonth(e.target.value)}
-                          className="w-full min-h-[42px] px-3 py-2 text-sm border border-slate-300 rounded-xl tabular-nums"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm border border-slate-300 rounded-xl tabular-nums"
                         />
                       </div>
                       <div>
@@ -1880,7 +1866,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                         <select
                           value={billCycle}
                           onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
-                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl"
                         >
                           <option value={1}>1 से 10 तारीख (Cycle 1)</option>
                           <option value={2}>11 से 20 तारीख (Cycle 2)</option>
@@ -1889,15 +1875,15 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">
-                          {lang === 'hi' ? 'किसान चुनें (वैकल्पिक)' : 'Filter Farmer'}
+                          {lang === 'hi' ? 'किसान चुनें (कोड क्रमानुसार)' : 'Select Farmer'}
                         </label>
                         <select
                           value={reportFarmerFilter}
                           onChange={(e) => setReportFarmerFilter(e.target.value)}
-                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl font-semibold"
                         >
-                          <option value="all">सभी किसान (All Farmers)</option>
-                          {state.farmers.map((f) => (
+                          <option value="all">सभी किसान — कोड नं. 1, 2, 3... (All Farmers)</option>
+                          {sortedFarmers.map((f) => (
                             <option key={f.id} value={f.id}>
                               {f.code} — {f.name}
                             </option>
@@ -1906,116 +1892,282 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs tabular-nums">
-                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 block">
-                          10-दिन कुल {shiftType === 'morning' ? 'सुबह' : 'शाम'} एंट्रियाँ
-                        </span>
-                        <span className="text-base font-bold text-slate-900 mt-0.5 block">
-                          {sum.entryCount}
-                        </span>
+                    {/* TOP DATE HEADER & TOTAL AMOUNT BANNER (ऊपर तारीख और कुल रकम साफ दिखे) */}
+                    <div
+                      data-testid={`${shiftType}-bill-top-date-banner`}
+                      className={`rounded-2xl p-3 sm:p-4 border-2 flex flex-wrap items-center justify-between gap-2 tabular-nums ${
+                        shiftType === 'morning'
+                          ? 'bg-amber-50/90 border-amber-300'
+                          : 'bg-indigo-50/90 border-indigo-300'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <Calendar className="w-4 h-4 text-blue-700 shrink-0" />
+                          <span
+                            data-testid={`${shiftType}-bill-date-range-text`}
+                            className="text-xs sm:text-sm font-black text-blue-950"
+                          >
+                            तारीख: {formatDateDMY(fromDate)} से {formatDateDMY(toDate)}
+                          </span>
+                        </div>
+                        <p className="text-xs font-extrabold text-slate-800 mt-0.5">
+                          {shiftType === 'morning'
+                            ? '☀️ सुबह के 10 दिन का बिल (कोड नं. के हिसाब से)'
+                            : '🌙 शाम के 10 दिन का बिल (कोड नं. के हिसाब से)'}
+                        </p>
                       </div>
-                      <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
-                        <span className="text-blue-900 font-semibold block">
-                          10-दिन कुल {shiftType === 'morning' ? 'सुबह' : 'शाम'} दूध (लीटर)
-                        </span>
-                        <span className="text-base font-bold text-blue-900 mt-0.5 block">
-                          {formatNumber(sum.totalLiters, 3)} L
-                        </span>
-                      </div>
-                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                        <span className="text-slate-500 block">औसत FAT / SNF</span>
-                        <span className="text-base font-bold text-slate-900 mt-0.5 block">
-                          {formatNumber(sum.avgFat)} / {formatNumber(sum.avgSnf)}
-                        </span>
-                      </div>
-                      <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                        <span className="text-emerald-900 font-semibold block">
-                          10-दिन कुल {shiftType === 'morning' ? 'सुबह' : 'शाम'} राशि
-                        </span>
-                        <span className="text-base font-bold text-emerald-800 mt-0.5 block">
-                          {formatWholeCurrency(sum.totalAmount)}
-                        </span>
+
+                      <div className="flex items-center gap-2">
+                        <div className="bg-white border border-slate-300 rounded-xl px-2.5 py-1 text-right">
+                          <span className="block text-[10px] font-bold text-slate-500">
+                            कुल मात्रा (Qty)
+                          </span>
+                          <strong className="text-xs sm:text-sm font-extrabold text-blue-900">
+                            {formatNumber(activeSum.totalLiters, 2)} L
+                          </strong>
+                        </div>
+                        <div className="bg-emerald-600 text-white rounded-xl px-3 py-1 text-right shadow-2xs">
+                          <span className="block text-[10px] font-bold text-emerald-100">
+                            कुल रकम (Total Amount)
+                          </span>
+                          <strong
+                            data-testid={`${shiftType}-bill-header-total-amount`}
+                            className="text-sm sm:text-base font-black"
+                          >
+                            {formatWholeCurrency(activeSum.totalNetPayable)}
+                          </strong>
+                        </div>
                       </div>
                     </div>
 
-                    <div>
-                      <table className="w-full text-xs sm:text-sm border-collapse border border-slate-300 tabular-nums">
-                        <thead>
-                          <tr className="bg-slate-50">
-                            <th className="py-2 px-1 sm:px-2.5 text-left border border-slate-300">तारीख</th>
-                            <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">
-                              {shiftType === 'morning' ? 'सुबह' : 'शाम'} L
-                            </th>
-                            <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-amber-50/70 text-amber-950">
-                              FAT
-                            </th>
-                            <th className="py-2 px-1 sm:px-2 text-center border border-slate-300 bg-indigo-50/70 text-indigo-950">
-                              SNF
-                            </th>
-                            <th className="py-2 px-1 sm:px-2 text-right border border-slate-300">रेट</th>
-                            <th className="py-2 px-1 sm:px-2.5 text-right border border-slate-300">
-                              {shiftType === 'morning' ? 'सुबह' : 'शाम'} राशि
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {shiftDayRows.map((r) => (
-                            <tr key={r.date} className="hover:bg-slate-50">
-                              <td className="py-1.5 px-1 sm:px-2.5 font-mono font-bold text-slate-900 whitespace-nowrap border border-slate-300">
-                                {formatDateDMY(r.date)}
-                                <span className="text-[10px] text-slate-400 ml-0.5">({r.count})</span>
+                    {/* ALL FARMERS CODE-WISE BILL TABLE (पहली लाइन से कोड नं. 1, 2, 3... के हिसाब से) */}
+                    {reportFarmerFilter === 'all' ? (
+                      <div className="bg-white border-2 border-slate-300 rounded-2xl overflow-hidden">
+                        <table
+                          data-testid={`all-farmers-${shiftType}-bill-table`}
+                          className="w-full table-fixed text-[10.5px] sm:text-sm border-collapse tabular-nums"
+                        >
+                          <colgroup>
+                            <col className="w-[9%] sm:w-[8%]" />
+                            <col className="w-[25%] sm:w-[28%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[20%] sm:w-[18%]" />
+                          </colgroup>
+                          <thead>
+                            <tr className="bg-slate-900 text-white">
+                              <th className="py-2 px-0.5 sm:px-1.5 text-center font-extrabold border border-slate-700">
+                                कोड
+                              </th>
+                              <th className="py-2 px-1 sm:px-2 text-left font-extrabold border border-slate-700">
+                                किसान नाम
+                              </th>
+                              <th className="py-2 px-0.5 sm:px-1.5 text-center font-extrabold border border-slate-700 bg-amber-950/80 text-amber-200">
+                                FAT
+                              </th>
+                              <th className="py-2 px-0.5 sm:px-1.5 text-center font-extrabold border border-slate-700 bg-indigo-950/80 text-indigo-200">
+                                SNF
+                              </th>
+                              <th className="py-2 px-0.5 sm:px-1.5 text-right font-extrabold border border-slate-700 bg-blue-950/80 text-blue-200">
+                                रेट
+                              </th>
+                              <th className="py-2 px-0.5 sm:px-1.5 text-right font-extrabold border border-slate-700">
+                                लीटर
+                              </th>
+                              <th className="py-2 px-1 sm:px-2 text-right font-extrabold border border-slate-700 bg-emerald-900 text-emerald-100">
+                                कुल रकम ₹
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {billReport.rows.length === 0 ? (
+                              <tr>
+                                <td
+                                  colSpan={7}
+                                  className="py-6 text-center text-slate-500 border border-slate-300"
+                                >
+                                  इस 10-दिन की अवधि में {shiftType === 'morning' ? 'सुबह' : 'शाम'} का कोई दूध रिकॉर्ड नहीं है।
+                                </td>
+                              </tr>
+                            ) : (
+                              billReport.rows.map((r, idx) => (
+                                <tr
+                                  key={r.rowId}
+                                  data-testid={`${shiftType}-bill-farmer-row-${idx}`}
+                                  className="hover:bg-slate-50"
+                                >
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-center font-mono font-black text-blue-900 bg-blue-50/50 border border-slate-300">
+                                    {r.farmerCode}
+                                  </td>
+                                  <td className="py-1.5 px-1 sm:px-2 border border-slate-300 break-words">
+                                    <span className="font-extrabold text-slate-900 block leading-tight break-words">
+                                      {r.farmerName}
+                                    </span>
+                                    <span
+                                      className={`inline-block mt-0.5 px-1 py-0.2 rounded text-[9px] sm:text-[10px] font-bold ${
+                                        r.shift === 'morning'
+                                          ? 'bg-amber-100 text-amber-900'
+                                          : 'bg-indigo-100 text-indigo-900'
+                                      }`}
+                                    >
+                                      {r.shift === 'morning' ? '☀️ सुबह' : '🌙 शाम'}
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-center font-extrabold text-amber-950 bg-amber-50/30 border border-slate-300">
+                                    {formatNumber(r.avgFat, 1)}
+                                  </td>
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-center font-extrabold text-indigo-950 bg-indigo-50/30 border border-slate-300">
+                                    {formatNumber(r.avgSnf, 1)}
+                                  </td>
+                                  <td
+                                    data-testid={`${shiftType}-bill-row-rate-${idx}`}
+                                    className="py-1.5 px-0.5 sm:px-1.5 text-right font-extrabold text-blue-900 bg-blue-50/30 border border-slate-300"
+                                  >
+                                    {r.avgRate !== null ? formatNumber(r.avgRate, 2) : '—'}
+                                  </td>
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-right font-extrabold text-slate-900 border border-slate-300">
+                                    {formatNumber(r.totalLiters, 2)}
+                                  </td>
+                                  <td
+                                    data-testid={`${shiftType}-bill-row-amount-${idx}`}
+                                    className="py-1.5 px-1 sm:px-2 text-right font-black text-emerald-900 bg-emerald-50/80 text-[11px] sm:text-sm border border-slate-300"
+                                  >
+                                    {formatWholeCurrency(r.totalAmount)}
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                          <tfoot>
+                            <tr
+                              data-testid={`${shiftType}-bill-grand-total-row`}
+                              className="bg-emerald-100/90 text-slate-950 font-black border-t-2 border-emerald-500"
+                            >
+                              <td
+                                colSpan={2}
+                                className="py-2 px-1 sm:px-2 border border-slate-300 text-left"
+                              >
+                                कुल टोटल ({billReport.rows.length} किसान)
                               </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-blue-900 whitespace-nowrap border border-slate-300">
-                                {formatNumber(r.liters, 2)}
+                              <td className="py-2 px-0.5 sm:px-1.5 text-center text-amber-950 border border-slate-300">
+                                {formatNumber(billReport.overallSummary.avgFat, 1)}
                               </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-950 bg-amber-50/30 whitespace-nowrap border border-slate-300">
-                                {formatNumber(r.avgFat, 1)}
+                              <td className="py-2 px-0.5 sm:px-1.5 text-center text-indigo-950 border border-slate-300">
+                                {formatNumber(billReport.overallSummary.avgSnf, 1)}
                               </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-950 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
-                                {formatNumber(r.avgSnf, 1)}
+                              <td
+                                data-testid={`${shiftType}-bill-grand-total-rate`}
+                                className="py-2 px-0.5 sm:px-1.5 text-right text-blue-950 border border-slate-300"
+                              >
+                                {billReport.overallSummary.avgRate !== null
+                                  ? formatNumber(billReport.overallSummary.avgRate, 2)
+                                  : '—'}
                               </td>
-                              <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
-                                {r.avgRate !== null ? `₹${r.avgRate.toFixed(1)}` : '—'}
+                              <td className="py-2 px-0.5 sm:px-1.5 text-right text-slate-950 border border-slate-300">
+                                {formatNumber(billReport.overallSummary.totalLiters, 2)}
                               </td>
-                              <td className="py-1.5 px-1 sm:px-2.5 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
-                                {formatWholeCurrency(r.amount)}
+                              <td
+                                data-testid={`${shiftType}-bill-grand-total-amount`}
+                                className="py-2 px-1 sm:px-2 text-right text-emerald-950 bg-emerald-200/80 text-xs sm:text-base border border-slate-300"
+                              >
+                                {formatWholeCurrency(billReport.overallSummary.totalNetPayable)}
                               </td>
                             </tr>
-                          ))}
-                        </tbody>
-                        <tfoot>
-                          <tr className="bg-blue-50/80 font-extrabold tabular-nums">
-                            <td className="py-2 px-1 sm:px-2.5 border border-slate-300">
-                              कुल ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
-                            </td>
-                            <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
-                              {formatNumber(sum.totalLiters, 2)}
-                            </td>
-                            <td className="py-2 px-1 sm:px-2 text-center text-amber-950 bg-amber-50/60 whitespace-nowrap border border-slate-300">
-                              {formatNumber(sum.avgFat, 1)}
-                            </td>
-                            <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 bg-indigo-50/60 whitespace-nowrap border border-slate-300">
-                              {formatNumber(sum.avgSnf, 1)}
-                            </td>
-                            <td className="py-2 px-1 sm:px-2 text-right text-blue-900 whitespace-nowrap border border-slate-300">
-                              {sum.avgRate !== null ? `₹${sum.avgRate.toFixed(1)}` : '—'}
-                            </td>
-                            <td className="py-2 px-1 sm:px-2.5 text-right text-emerald-800 whitespace-nowrap border border-slate-300">
-                              {formatWholeCurrency(sum.totalAmount)}
-                            </td>
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>
+                          </tfoot>
+                        </table>
+                      </div>
+                    ) : (
+                      /* Single Selected Farmer Day-by-Day Table for Morning or Evening */
+                      <div className="bg-white border-2 border-slate-300 rounded-2xl overflow-hidden">
+                        <table className="w-full text-xs sm:text-sm border-collapse tabular-nums">
+                          <thead>
+                            <tr className="bg-slate-900 text-white">
+                              <th className="py-2 px-1.5 text-left border border-slate-700">तारीख</th>
+                              <th className="py-2 px-1 text-center border border-slate-700">FAT</th>
+                              <th className="py-2 px-1 text-center border border-slate-700">SNF</th>
+                              <th className="py-2 px-1 text-right border border-slate-700">रेट</th>
+                              <th className="py-2 px-1 text-right border border-slate-700">मात्रा (L)</th>
+                              <th className="py-2 px-1.5 text-right border border-slate-700">कुल रकम</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {singleFarmerEntries.length === 0 ? (
+                              <tr>
+                                <td colSpan={6} className="py-6 text-center text-slate-500 border border-slate-300">
+                                  इस किसान की कोई एंट्री नहीं है।
+                                </td>
+                              </tr>
+                            ) : (
+                              singleFarmerEntries.map((ce) => (
+                                <tr key={ce.id} className="hover:bg-slate-50">
+                                  <td className="py-1.5 px-1.5 font-mono font-bold border border-slate-300">
+                                    {formatDateDMY(ce.date)}
+                                  </td>
+                                  <td className="py-1.5 px-1 text-center font-bold text-amber-900 border border-slate-300">
+                                    {formatNumber(ce.fat, 1)}
+                                  </td>
+                                  <td className="py-1.5 px-1 text-center font-bold text-indigo-900 border border-slate-300">
+                                    {formatNumber(ce.snf, 1)}
+                                  </td>
+                                  <td className="py-1.5 px-1 text-right font-bold text-blue-900 border border-slate-300">
+                                    ₹{formatNumber(ce.rate, 2)}
+                                  </td>
+                                  <td className="py-1.5 px-1 text-right font-bold text-slate-900 border border-slate-300">
+                                    {formatNumber(ce.liters, 2)}
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-right font-black text-emerald-800 border border-slate-300">
+                                    {formatWholeCurrency(ce.totalAmount)}
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                          <tfoot>
+                            <tr className="bg-emerald-100 font-black">
+                              <td className="py-2 px-1.5 border border-slate-300">
+                                कुल टोटल ({singleFarmerEntries.length})
+                              </td>
+                              <td className="py-2 px-1 text-center border border-slate-300">
+                                {formatNumber(singleFarmerSum.avgFat, 1)}
+                              </td>
+                              <td className="py-2 px-1 text-center border border-slate-300">
+                                {formatNumber(singleFarmerSum.avgSnf, 1)}
+                              </td>
+                              <td className="py-2 px-1 text-right text-blue-950 border border-slate-300">
+                                {singleFarmerSum.avgRate !== null
+                                  ? `₹${formatNumber(singleFarmerSum.avgRate, 2)}`
+                                  : '—'}
+                              </td>
+                              <td className="py-2 px-1 text-right border border-slate-300">
+                                {formatNumber(singleFarmerSum.totalLiters, 2)} L
+                              </td>
+                              <td className="py-2 px-1.5 text-right text-emerald-900 border border-slate-300">
+                                {formatWholeCurrency(singleFarmerSum.totalNetPayable)}
+                              </td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 );
               })()}
 
-            {/* REPORT 3: 10 दिन की सुबह-शाम की रिपोर्ट एवं किसान बिल (10-Day Morning-Evening Report & Bill) */}
+            {/* REPORT 3: 10 दिन की सुबह-शाम (दोनों शिफ्ट) की रिपोर्ट एवं बिल (10-Day Morning-Evening Bill) */}
             {activeCleanReport === 'tenday' &&
               (() => {
                 const { fromDate, toDate } = getTenDayCycleDates(billYearMonth, billCycle);
+                const allFarmersBothBill = buildAllFarmersTenDayBillRows(
+                  sortedFarmers,
+                  state.collections,
+                  fromDate,
+                  toDate,
+                  'both'
+                );
+
                 const periodEntries = state.collections
                   .filter(
                     (c) =>
@@ -2033,13 +2185,13 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
 
                 const selectedReportFarmer =
                   reportFarmerFilter !== 'all'
-                    ? state.farmers.find((f) => f.id === reportFarmerFilter) || null
+                    ? sortedFarmers.find((f) => f.id === reportFarmerFilter) || null
                     : null;
                 const farmerSched = selectedReportFarmer
                   ? normalizeFarmerShiftSchedule(selectedReportFarmer.shiftSchedule)
                   : 'both';
 
-                // Rule: If a farmer only brings milk in Morning (or only Evening), ONLY show that shift's box & table; hide empty shift boxes!
+                // Rule for single-farmer view: If a farmer only brings milk in Morning (or only Evening), ONLY show that shift's box & table; hide empty shift boxes!
                 const showMorningSection =
                   mornEntries.length > 0 ||
                   (mornEntries.length === 0 &&
@@ -2054,8 +2206,8 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 // Farmer for inline accounting (Advance / Previous Balance / Inline Payment)
                 const accountingFarmer =
                   selectedReportFarmer ||
-                  state.farmers.find((f) => f.id === billFarmerId) ||
-                  state.farmers[0] ||
+                  sortedFarmers.find((f) => f.id === billFarmerId) ||
+                  sortedFarmers[0] ||
                   null;
                 const liveFarmerBillData = accountingFarmer
                   ? generateTenDayBillData(
@@ -2071,9 +2223,9 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                 return (
                   <div
                     data-testid="clean-report-view-tenday"
-                    className="space-y-4 pt-2 border-t border-slate-100"
+                    className="space-y-3.5 pt-2 border-t border-slate-100"
                   >
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 no-print">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 no-print">
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">
                           {lang === 'hi' ? 'महीना चुनें' : 'Month'}
@@ -2082,7 +2234,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                           type="month"
                           value={billYearMonth}
                           onChange={(e) => setBillYearMonth(e.target.value)}
-                          className="w-full min-h-[42px] px-3 py-2 text-sm border border-slate-300 rounded-xl tabular-nums"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm border border-slate-300 rounded-xl tabular-nums"
                         />
                       </div>
                       <div>
@@ -2092,7 +2244,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                         <select
                           value={billCycle}
                           onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
-                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl"
                         >
                           <option value={1}>1 से 10 तारीख (Cycle 1)</option>
                           <option value={2}>11 से 20 तारीख (Cycle 2)</option>
@@ -2101,7 +2253,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">
-                          {lang === 'hi' ? 'किसान चुनें' : 'Select Farmer'}
+                          {lang === 'hi' ? 'किसान चुनें (कोड क्रमानुसार)' : 'Select Farmer'}
                         </label>
                         <select
                           data-testid="tenday-report-farmer-select"
@@ -2113,10 +2265,10 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                               setBillFarmerId(val);
                             }
                           }}
-                          className="w-full min-h-[42px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl font-semibold"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl font-semibold"
                         >
-                          <option value="all">सभी किसान (All Farmers)</option>
-                          {state.farmers.map((f) => (
+                          <option value="all">सभी किसान — कोड नं. 1, 2, 3... (All Farmers)</option>
+                          {sortedFarmers.map((f) => (
                             <option key={f.id} value={f.id}>
                               {f.code} — {f.name}
                             </option>
@@ -2125,18 +2277,63 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Top Summary Cards — Hide empty Evening (or Morning) box when farmer only has one shift */}
+                    {/* TOP DATE HEADER & TOTAL AMOUNT BANNER (ऊपर तो तारीख आ जाए और कुल रकम दिखे) */}
+                    <div
+                      data-testid="tenday-bill-top-date-banner"
+                      className="rounded-2xl p-3 sm:p-4 bg-blue-50/90 border-2 border-blue-300 flex flex-wrap items-center justify-between gap-2 tabular-nums"
+                    >
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <Calendar className="w-4 h-4 text-blue-700 shrink-0" />
+                          <span
+                            data-testid="tenday-bill-date-range-text"
+                            className="text-xs sm:text-sm font-black text-blue-950"
+                          >
+                            तारीख: {formatDateDMY(fromDate)} से {formatDateDMY(toDate)}
+                          </span>
+                        </div>
+                        <p className="text-xs font-extrabold text-slate-800 mt-0.5">
+                          {reportFarmerFilter === 'all'
+                            ? '☀️🌙 सभी किसानों का सुबह-शाम (दोनों शिफ्ट) का 10-दिन बिल — कोड नं. 1, 2, 3... के हिसाब से'
+                            : `किसान: ${selectedReportFarmer?.code} — ${selectedReportFarmer?.name} का 10-दिन का बिल`}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <div className="bg-white border border-blue-200 rounded-xl px-2.5 py-1 text-right">
+                          <span className="block text-[10px] font-bold text-slate-500">
+                            कुल मात्रा (Qty)
+                          </span>
+                          <strong className="text-xs sm:text-sm font-extrabold text-blue-900">
+                            {formatNumber(totalSum.totalLiters, 2)} L
+                          </strong>
+                        </div>
+                        <div className="bg-emerald-600 text-white rounded-xl px-3 py-1 text-right shadow-2xs">
+                          <span className="block text-[10px] font-bold text-emerald-100">
+                            कुल रकम (Total Amount)
+                          </span>
+                          <strong
+                            data-testid="tenday-bill-header-total-amount"
+                            className="text-sm sm:text-base font-black"
+                          >
+                            {formatWholeCurrency(totalSum.totalNetPayable)}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Top Summary Cards — Hide empty Evening (or Morning) box when single farmer only has one shift */}
                     <div
                       className={`grid grid-cols-2 ${
                         showMorningSection && showEveningSection
                           ? 'sm:grid-cols-4'
                           : 'sm:grid-cols-3'
-                      } gap-2.5 text-xs tabular-nums`}
+                      } gap-2 text-xs tabular-nums`}
                     >
                       {showMorningSection && (
                         <div
                           data-testid="tenday-report-morning-summary-box"
-                          className="p-3 bg-amber-50/70 rounded-xl border border-amber-200"
+                          className="p-2.5 bg-amber-50/70 rounded-xl border border-amber-200"
                         >
                           <span className="text-amber-950 font-semibold block">
                             ☀️ 10-दिन सुबह का दूध / टोटल
@@ -2150,7 +2347,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       {showEveningSection && (
                         <div
                           data-testid="tenday-report-evening-summary-box"
-                          className="p-3 bg-indigo-50/70 rounded-xl border border-indigo-200"
+                          className="p-2.5 bg-indigo-50/70 rounded-xl border border-indigo-200"
                         >
                           <span className="text-indigo-950 font-semibold block">
                             🌙 10-दिन शाम का दूध / टोटल
@@ -2161,7 +2358,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                           </span>
                         </div>
                       )}
-                      <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200">
+                      <div className="p-2.5 bg-blue-50/70 rounded-xl border border-blue-200">
                         <span className="text-blue-900 font-semibold block">
                           10-दिन कुल दूध · FAT/SNF
                         </span>
@@ -2170,7 +2367,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                           {formatNumber(totalSum.avgFat, 1)}/{formatNumber(totalSum.avgSnf, 1)}
                         </span>
                       </div>
-                      <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                      <div className="p-2.5 bg-emerald-50 rounded-xl border border-emerald-200">
                         <span className="text-emerald-900 font-semibold block">
                           10-दिन कुल दूध राशि
                         </span>
@@ -2180,246 +2377,384 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                     </div>
 
-                    {/* TABLE 1: सुबह का रिकॉर्ड (Morning Record Table — Shown when farmer brings morning milk) */}
-                    {showMorningSection && (
-                      <div
-                        data-testid="tenday-morning-records-block"
-                        className="bg-white border-2 border-amber-200 rounded-2xl overflow-hidden"
-                      >
-                        <div className="bg-amber-50 px-3 py-2 border-b border-amber-200 flex items-center justify-between gap-2">
-                          <span className="text-xs sm:text-sm font-extrabold text-amber-950 flex items-center gap-1.5">
-                            <Sun className="w-4 h-4 text-amber-600 shrink-0" />
-                            {lang === 'hi'
-                              ? `सुबह का दूध रिकॉर्ड (${formatDateDMY(fromDate)} से ${formatDateDMY(toDate)})`
-                              : `Morning Milk Record (${formatDateDMY(fromDate)} - ${formatDateDMY(toDate)})`}
-                          </span>
-                          <span className="px-2.5 py-0.5 rounded-full bg-white border border-amber-300 text-[11px] font-extrabold text-amber-900 tabular-nums">
-                            {lang === 'hi'
-                              ? `सुबह टोटल: ${formatNumber(mornSum.totalLiters, 2)} L · ${formatWholeCurrency(mornSum.totalAmount)}`
-                              : `AM Total: ${formatNumber(mornSum.totalLiters, 2)} L · ${formatWholeCurrency(mornSum.totalAmount)}`}
-                          </span>
-                        </div>
-
-                        <table className="w-full text-xs sm:text-sm border-collapse tabular-nums">
+                    {/* WHEN ALL FARMERS SELECTED: Show Code-Wise Table (1, 2, 3...) where Dual-Shift Farmers Have 2 Lines (सुबह and शाम) */}
+                    {reportFarmerFilter === 'all' ? (
+                      <div className="bg-white border-2 border-slate-300 rounded-2xl overflow-hidden">
+                        <table
+                          data-testid="all-farmers-both-bill-table"
+                          className="w-full table-fixed text-[10.5px] sm:text-sm border-collapse tabular-nums"
+                        >
+                          <colgroup>
+                            <col className="w-[9%] sm:w-[8%]" />
+                            <col className="w-[25%] sm:w-[28%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[20%] sm:w-[18%]" />
+                          </colgroup>
                           <thead>
-                            <tr className="bg-slate-50 text-slate-800 border-b border-slate-300">
-                              <th className="py-1.5 px-1 sm:px-2 text-left font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'तारीख' : 'Date'}
+                            <tr className="bg-slate-900 text-white">
+                              <th className="py-2 px-0.5 sm:px-1.5 text-center font-extrabold border border-slate-700">
+                                कोड
                               </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'लीटर' : 'Liters'}
+                              <th className="py-2 px-1 sm:px-2 text-left font-extrabold border border-slate-700">
+                                किसान (शिफ्ट)
                               </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-amber-50/60 text-amber-950">
+                              <th className="py-2 px-0.5 sm:px-1.5 text-center font-extrabold border border-slate-700 bg-amber-950/80 text-amber-200">
                                 FAT
                               </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-indigo-50/60 text-indigo-950">
+                              <th className="py-2 px-0.5 sm:px-1.5 text-center font-extrabold border border-slate-700 bg-indigo-950/80 text-indigo-200">
                                 SNF
                               </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'रेट' : 'Rate'}
+                              <th className="py-2 px-0.5 sm:px-1.5 text-right font-extrabold border border-slate-700 bg-blue-950/80 text-blue-200">
+                                रेट
                               </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'रकम' : 'Amt'}
+                              <th className="py-2 px-0.5 sm:px-1.5 text-right font-extrabold border border-slate-700">
+                                लीटर
+                              </th>
+                              <th className="py-2 px-1 sm:px-2 text-right font-extrabold border border-slate-700 bg-emerald-900 text-emerald-100">
+                                कुल रकम ₹
                               </th>
                             </tr>
                           </thead>
                           <tbody>
-                            {mornEntries.length === 0 ? (
+                            {allFarmersBothBill.rows.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={6}
-                                  className="py-4 text-center text-slate-500 border border-slate-300"
+                                  colSpan={7}
+                                  className="py-6 text-center text-slate-500 border border-slate-300"
                                 >
-                                  {lang === 'hi'
-                                    ? 'इस अवधि में सुबह की कोई दूध एंट्री नहीं है।'
-                                    : 'No morning milk entries in this period.'}
+                                  इस 10-दिन की अवधि में कोई दूध रिकॉर्ड नहीं है।
                                 </td>
                               </tr>
                             ) : (
-                              mornEntries.map((ce) => (
-                                <tr key={ce.id} className="hover:bg-amber-50/20">
-                                  <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap">
-                                    <span className="font-mono font-bold text-slate-900 block leading-tight">
-                                      {formatDateDMY(ce.date)}
-                                    </span>
-                                    <span className="text-[10px] font-semibold text-slate-500 block leading-tight truncate max-w-[115px] sm:max-w-none">
-                                      {reportFarmerFilter === 'all'
-                                        ? `${ce.farmerCode}-${ce.farmerName} · `
-                                        : ''}
-                                      {ce.milkType === 'cow' ? 'गाय' : 'भैंस'}
-                                    </span>
+                              allFarmersBothBill.rows.map((r, idx) => (
+                                <tr
+                                  key={r.rowId}
+                                  data-testid={`both-bill-farmer-row-${idx}`}
+                                  className={`${
+                                    r.shift === 'morning'
+                                      ? 'bg-amber-50/20 hover:bg-amber-50/50'
+                                      : 'bg-indigo-50/20 hover:bg-indigo-50/50'
+                                  } ${
+                                    r.isDualShiftFarmer && r.shiftRowIndex === 2
+                                      ? 'border-b-2 border-slate-400'
+                                      : ''
+                                  }`}
+                                >
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-center font-mono font-black text-blue-900 bg-blue-50/60 border border-slate-300">
+                                    {r.farmerCode}
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
-                                    {formatNumber(ce.liters, 2)} L
+                                  <td className="py-1.5 px-1 sm:px-2 border border-slate-300 break-words">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setBillFarmerId(r.farmerId);
+                                        setReportFarmerFilter(r.farmerId);
+                                      }}
+                                      className="text-left font-extrabold text-slate-900 hover:text-blue-700 block leading-tight break-words"
+                                    >
+                                      {r.farmerName}
+                                    </button>
+                                    <div className="flex flex-wrap items-center gap-0.5 mt-0.5">
+                                      <span
+                                        className={`inline-block px-1 py-0.2 rounded text-[9px] sm:text-[10px] font-extrabold ${
+                                          r.shift === 'morning'
+                                            ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                            : 'bg-indigo-100 text-indigo-900 border border-indigo-300'
+                                        }`}
+                                      >
+                                        {r.shift === 'morning' ? '☀️ सुबह' : '🌙 शाम'}
+                                      </span>
+                                      {r.isDualShiftFarmer && r.shiftRowIndex === 2 && (
+                                        <span className="text-[9px] sm:text-[10px] font-extrabold text-emerald-800 bg-emerald-50 px-1 rounded border border-emerald-200 leading-tight">
+                                          दोनों: {formatWholeCurrency(r.farmerCombinedAmount)}
+                                        </span>
+                                      )}
+                                    </div>
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-900 bg-amber-50/30 whitespace-nowrap border border-slate-300">
-                                    {formatNumber(ce.fat, 1)}
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-center font-extrabold text-amber-950 bg-amber-50/30 border border-slate-300">
+                                    {formatNumber(r.avgFat, 1)}
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-900 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
-                                    {formatNumber(ce.snf, 1)}
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-center font-extrabold text-indigo-950 bg-indigo-50/30 border border-slate-300">
+                                    {formatNumber(r.avgSnf, 1)}
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
-                                    ₹{formatNumber(ce.rate, 2)}
+                                  <td
+                                    data-testid={`both-bill-row-rate-${idx}`}
+                                    className="py-1.5 px-0.5 sm:px-1.5 text-right font-extrabold text-blue-900 bg-blue-50/30 border border-slate-300"
+                                  >
+                                    {r.avgRate !== null ? formatNumber(r.avgRate, 2) : '—'}
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
-                                    {formatWholeCurrency(ce.totalAmount)}
+                                  <td className="py-1.5 px-0.5 sm:px-1.5 text-right font-extrabold text-slate-900 border border-slate-300">
+                                    {formatNumber(r.totalLiters, 2)}
+                                  </td>
+                                  <td
+                                    data-testid={`both-bill-row-amount-${idx}`}
+                                    className="py-1.5 px-1 sm:px-2 text-right font-black text-emerald-900 bg-emerald-50/80 text-[11px] sm:text-sm border border-slate-300"
+                                  >
+                                    {formatWholeCurrency(r.totalAmount)}
                                   </td>
                                 </tr>
                               ))
                             )}
                           </tbody>
                           <tfoot>
-                            <tr
-                              data-testid="tenday-morning-total-row"
-                              className="bg-amber-100/90 text-slate-950 font-extrabold border-t-2 border-amber-400"
-                            >
-                              <td className="py-2 px-1 sm:px-2 border border-slate-300">
-                                {lang === 'hi'
-                                  ? `सुबह का टोटल (${mornEntries.length})`
-                                  : `Morning Total (${mornEntries.length})`}
+                            <tr className="bg-amber-50/90 text-amber-950 font-extrabold">
+                              <td colSpan={2} className="py-1.5 px-1 sm:px-2 border border-slate-300">
+                                ☀️ सुबह टोटल
                               </td>
-                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
-                                {formatNumber(mornSum.totalLiters, 2)} L
+                              <td className="py-1.5 px-0.5 text-center border border-slate-300">
+                                {formatNumber(allFarmersBothBill.morningSummary.avgFat, 1)}
                               </td>
-                              <td className="py-2 px-1 sm:px-2 text-center text-amber-950 whitespace-nowrap border border-slate-300">
-                                {formatNumber(mornSum.avgFat, 1)}
+                              <td className="py-1.5 px-0.5 text-center border border-slate-300">
+                                {formatNumber(allFarmersBothBill.morningSummary.avgSnf, 1)}
                               </td>
-                              <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 whitespace-nowrap border border-slate-300">
-                                {formatNumber(mornSum.avgSnf, 1)}
-                              </td>
-                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
-                                {mornSum.avgRate !== null
-                                  ? `₹${formatNumber(mornSum.avgRate, 2)}`
+                              <td className="py-1.5 px-0.5 text-right text-blue-950 border border-slate-300">
+                                {allFarmersBothBill.morningSummary.avgRate !== null
+                                  ? formatNumber(allFarmersBothBill.morningSummary.avgRate, 2)
                                   : '—'}
                               </td>
-                              <td className="py-2 px-1 sm:px-2 text-right text-emerald-900 whitespace-nowrap border border-slate-300">
-                                {formatWholeCurrency(mornSum.totalAmount)}
+                              <td className="py-1.5 px-0.5 text-right border border-slate-300">
+                                {formatNumber(allFarmersBothBill.morningSummary.totalLiters, 2)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-black text-emerald-900 bg-emerald-50/60 border border-slate-300">
+                                {formatWholeCurrency(allFarmersBothBill.morningSummary.totalNetPayable)}
+                              </td>
+                            </tr>
+                            <tr className="bg-indigo-50/90 text-indigo-950 font-extrabold">
+                              <td colSpan={2} className="py-1.5 px-1 sm:px-2 border border-slate-300">
+                                🌙 शाम टोटल
+                              </td>
+                              <td className="py-1.5 px-0.5 text-center border border-slate-300">
+                                {formatNumber(allFarmersBothBill.eveningSummary.avgFat, 1)}
+                              </td>
+                              <td className="py-1.5 px-0.5 text-center border border-slate-300">
+                                {formatNumber(allFarmersBothBill.eveningSummary.avgSnf, 1)}
+                              </td>
+                              <td className="py-1.5 px-0.5 text-right text-blue-950 border border-slate-300">
+                                {allFarmersBothBill.eveningSummary.avgRate !== null
+                                  ? formatNumber(allFarmersBothBill.eveningSummary.avgRate, 2)
+                                  : '—'}
+                              </td>
+                              <td className="py-1.5 px-0.5 text-right border border-slate-300">
+                                {formatNumber(allFarmersBothBill.eveningSummary.totalLiters, 2)}
+                              </td>
+                              <td className="py-1.5 px-1 sm:px-2 text-right font-black text-emerald-900 bg-emerald-50/60 border border-slate-300">
+                                {formatWholeCurrency(allFarmersBothBill.eveningSummary.totalNetPayable)}
+                              </td>
+                            </tr>
+                            <tr
+                              data-testid="both-bill-grand-total-row"
+                              className="bg-emerald-100 text-slate-950 font-black border-t-2 border-emerald-500"
+                            >
+                              <td colSpan={2} className="py-2 px-1 sm:px-2 border border-slate-300">
+                                कुल टोटल रकम ({allFarmersBothBill.distinctFarmerCount} किसान)
+                              </td>
+                              <td className="py-2 px-0.5 text-center text-amber-950 border border-slate-300">
+                                {formatNumber(allFarmersBothBill.overallSummary.avgFat, 1)}
+                              </td>
+                              <td className="py-2 px-0.5 text-center text-indigo-950 border border-slate-300">
+                                {formatNumber(allFarmersBothBill.overallSummary.avgSnf, 1)}
+                              </td>
+                              <td
+                                data-testid="both-bill-grand-total-rate"
+                                className="py-2 px-0.5 text-right text-blue-950 border border-slate-300"
+                              >
+                                {allFarmersBothBill.overallSummary.avgRate !== null
+                                  ? formatNumber(allFarmersBothBill.overallSummary.avgRate, 2)
+                                  : '—'}
+                              </td>
+                              <td className="py-2 px-0.5 text-right text-slate-950 border border-slate-300">
+                                {formatNumber(allFarmersBothBill.overallSummary.totalLiters, 2)}
+                              </td>
+                              <td
+                                data-testid="both-bill-grand-total-amount"
+                                className="py-2 px-1 sm:px-2 text-right text-emerald-950 bg-emerald-200/80 text-xs sm:text-base border border-slate-300"
+                              >
+                                {formatWholeCurrency(allFarmersBothBill.overallSummary.totalNetPayable)}
                               </td>
                             </tr>
                           </tfoot>
                         </table>
                       </div>
-                    )}
+                    ) : (
+                      <>
+                        {/* SINGLE FARMER VIEW: TABLE 1 सुबह का रिकॉर्ड & TABLE 2 शाम का रिकॉर्ड */}
+                        {showMorningSection && (
+                          <div
+                            data-testid="tenday-morning-records-block"
+                            className="bg-white border-2 border-amber-200 rounded-2xl overflow-hidden"
+                          >
+                            <div className="bg-amber-50 px-3 py-2 border-b border-amber-200 flex items-center justify-between gap-2">
+                              <span className="text-xs sm:text-sm font-extrabold text-amber-950 flex items-center gap-1.5">
+                                <Sun className="w-4 h-4 text-amber-600 shrink-0" />
+                                सुबह का दूध रिकॉर्ड ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
+                              </span>
+                              <span className="px-2.5 py-0.5 rounded-full bg-white border border-amber-300 text-[11px] font-extrabold text-amber-900 tabular-nums">
+                                सुबह टोटल: {formatNumber(mornSum.totalLiters, 2)} L · {formatWholeCurrency(mornSum.totalAmount)}
+                              </span>
+                            </div>
 
-                    {/* TABLE 2: शाम का रिकॉर्ड (Evening Record Table — Shown below Morning only when farmer brings evening milk) */}
-                    {showEveningSection && (
-                      <div
-                        data-testid="tenday-evening-records-block"
-                        className="bg-white border-2 border-indigo-200 rounded-2xl overflow-hidden"
-                      >
-                        <div className="bg-indigo-50 px-3 py-2 border-b border-indigo-200 flex items-center justify-between gap-2">
-                          <span className="text-xs sm:text-sm font-extrabold text-indigo-950 flex items-center gap-1.5">
-                            <Moon className="w-4 h-4 text-indigo-600 shrink-0" />
-                            {lang === 'hi'
-                              ? `शाम का दूध रिकॉर्ड (${formatDateDMY(fromDate)} से ${formatDateDMY(toDate)})`
-                              : `Evening Milk Record (${formatDateDMY(fromDate)} - ${formatDateDMY(toDate)})`}
-                          </span>
-                          <span className="px-2.5 py-0.5 rounded-full bg-white border border-indigo-300 text-[11px] font-extrabold text-indigo-900 tabular-nums">
-                            {lang === 'hi'
-                              ? `शाम टोटल: ${formatNumber(eveSum.totalLiters, 2)} L · ${formatWholeCurrency(eveSum.totalAmount)}`
-                              : `PM Total: ${formatNumber(eveSum.totalLiters, 2)} L · ${formatWholeCurrency(eveSum.totalAmount)}`}
-                          </span>
-                        </div>
-
-                        <table className="w-full text-xs sm:text-sm border-collapse tabular-nums">
-                          <thead>
-                            <tr className="bg-slate-50 text-slate-800 border-b border-slate-300">
-                              <th className="py-1.5 px-1 sm:px-2 text-left font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'तारीख' : 'Date'}
-                              </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'लीटर' : 'Liters'}
-                              </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-amber-50/60 text-amber-950">
-                                FAT
-                              </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-indigo-50/60 text-indigo-950">
-                                SNF
-                              </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'रेट' : 'Rate'}
-                              </th>
-                              <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">
-                                {lang === 'hi' ? 'रकम' : 'Amt'}
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {eveEntries.length === 0 ? (
-                              <tr>
-                                <td
-                                  colSpan={6}
-                                  className="py-4 text-center text-slate-500 border border-slate-300"
+                            <table className="w-full text-xs sm:text-sm border-collapse tabular-nums">
+                              <thead>
+                                <tr className="bg-slate-50 text-slate-800 border-b border-slate-300">
+                                  <th className="py-1.5 px-1 sm:px-2 text-left font-extrabold border border-slate-300">तारीख</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">लीटर</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-amber-50/60 text-amber-950">FAT</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-indigo-50/60 text-indigo-950">SNF</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">रेट</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">कुल रकम</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {mornEntries.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={6} className="py-4 text-center text-slate-500 border border-slate-300">
+                                      इस अवधि में सुबह की कोई दूध एंट्री नहीं है।
+                                    </td>
+                                  </tr>
+                                ) : (
+                                  mornEntries.map((ce) => (
+                                    <tr key={ce.id} className="hover:bg-amber-50/20">
+                                      <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap font-mono font-bold text-slate-900">
+                                        {formatDateDMY(ce.date)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
+                                        {formatNumber(ce.liters, 2)} L
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-900 bg-amber-50/30 whitespace-nowrap border border-slate-300">
+                                        {formatNumber(ce.fat, 1)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-900 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
+                                        {formatNumber(ce.snf, 1)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                                        ₹{formatNumber(ce.rate, 2)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
+                                        {formatWholeCurrency(ce.totalAmount)}
+                                      </td>
+                                    </tr>
+                                  ))
+                                )}
+                              </tbody>
+                              <tfoot>
+                                <tr
+                                  data-testid="tenday-morning-total-row"
+                                  className="bg-amber-100/90 text-slate-950 font-extrabold border-t-2 border-amber-400"
                                 >
-                                  {lang === 'hi'
-                                    ? 'इस अवधि में शाम की कोई दूध एंट्री नहीं है।'
-                                    : 'No evening milk entries in this period.'}
-                                </td>
-                              </tr>
-                            ) : (
-                              eveEntries.map((ce) => (
-                                <tr key={ce.id} className="hover:bg-indigo-50/20">
-                                  <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap">
-                                    <span className="font-mono font-bold text-slate-900 block leading-tight">
-                                      {formatDateDMY(ce.date)}
-                                    </span>
-                                    <span className="text-[10px] font-semibold text-slate-500 block leading-tight truncate max-w-[115px] sm:max-w-none">
-                                      {reportFarmerFilter === 'all'
-                                        ? `${ce.farmerCode}-${ce.farmerName} · `
-                                        : ''}
-                                      {ce.milkType === 'cow' ? 'गाय' : 'भैंस'}
-                                    </span>
+                                  <td className="py-2 px-1 sm:px-2 border border-slate-300">
+                                    सुबह का टोटल ({mornEntries.length})
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
-                                    {formatNumber(ce.liters, 2)} L
+                                  <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(mornSum.totalLiters, 2)} L
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-900 bg-amber-50/30 whitespace-nowrap border border-slate-300">
-                                    {formatNumber(ce.fat, 1)}
+                                  <td className="py-2 px-1 sm:px-2 text-center text-amber-950 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(mornSum.avgFat, 1)}
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-900 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
-                                    {formatNumber(ce.snf, 1)}
+                                  <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(mornSum.avgSnf, 1)}
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
-                                    ₹{formatNumber(ce.rate, 2)}
+                                  <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
+                                    {mornSum.avgRate !== null ? `₹${formatNumber(mornSum.avgRate, 2)}` : '—'}
                                   </td>
-                                  <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
-                                    {formatWholeCurrency(ce.totalAmount)}
+                                  <td className="py-2 px-1 sm:px-2 text-right text-emerald-900 whitespace-nowrap border border-slate-300">
+                                    {formatWholeCurrency(mornSum.totalAmount)}
                                   </td>
                                 </tr>
-                              ))
-                            )}
-                          </tbody>
-                          <tfoot>
-                            <tr
-                              data-testid="tenday-evening-total-row"
-                              className="bg-indigo-100/90 text-slate-950 font-extrabold border-t-2 border-indigo-400"
-                            >
-                              <td className="py-2 px-1 sm:px-2 border border-slate-300">
-                                {lang === 'hi'
-                                  ? `शाम का टोटल (${eveEntries.length})`
-                                  : `Evening Total (${eveEntries.length})`}
-                              </td>
-                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
-                                {formatNumber(eveSum.totalLiters, 2)} L
-                              </td>
-                              <td className="py-2 px-1 sm:px-2 text-center text-amber-950 whitespace-nowrap border border-slate-300">
-                                {formatNumber(eveSum.avgFat, 1)}
-                              </td>
-                              <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 whitespace-nowrap border border-slate-300">
-                                {formatNumber(eveSum.avgSnf, 1)}
-                              </td>
-                              <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
-                                {eveSum.avgRate !== null
-                                  ? `₹${formatNumber(eveSum.avgRate, 2)}`
-                                  : '—'}
-                              </td>
-                              <td className="py-2 px-1 sm:px-2 text-right text-emerald-900 whitespace-nowrap border border-slate-300">
-                                {formatWholeCurrency(eveSum.totalAmount)}
-                              </td>
-                            </tr>
-                          </tfoot>
-                        </table>
-                      </div>
+                              </tfoot>
+                            </table>
+                          </div>
+                        )}
+
+                        {showEveningSection && (
+                          <div
+                            data-testid="tenday-evening-records-block"
+                            className="bg-white border-2 border-indigo-200 rounded-2xl overflow-hidden"
+                          >
+                            <div className="bg-indigo-50 px-3 py-2 border-b border-indigo-200 flex items-center justify-between gap-2">
+                              <span className="text-xs sm:text-sm font-extrabold text-indigo-950 flex items-center gap-1.5">
+                                <Moon className="w-4 h-4 text-indigo-600 shrink-0" />
+                                शाम का दूध रिकॉर्ड ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
+                              </span>
+                              <span className="px-2.5 py-0.5 rounded-full bg-white border border-indigo-300 text-[11px] font-extrabold text-indigo-900 tabular-nums">
+                                शाम टोटल: {formatNumber(eveSum.totalLiters, 2)} L · {formatWholeCurrency(eveSum.totalAmount)}
+                              </span>
+                            </div>
+
+                            <table className="w-full text-xs sm:text-sm border-collapse tabular-nums">
+                              <thead>
+                                <tr className="bg-slate-50 text-slate-800 border-b border-slate-300">
+                                  <th className="py-1.5 px-1 sm:px-2 text-left font-extrabold border border-slate-300">तारीख</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">लीटर</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-amber-50/60 text-amber-950">FAT</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-center font-extrabold border border-slate-300 bg-indigo-50/60 text-indigo-950">SNF</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">रेट</th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-right font-extrabold border border-slate-300">कुल रकम</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {eveEntries.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={6} className="py-4 text-center text-slate-500 border border-slate-300">
+                                      इस अवधि में शाम की कोई दूध एंट्री नहीं है।
+                                    </td>
+                                  </tr>
+                                ) : (
+                                  eveEntries.map((ce) => (
+                                    <tr key={ce.id} className="hover:bg-indigo-50/20">
+                                      <td className="py-1.5 px-1 sm:px-2 border border-slate-300 whitespace-nowrap font-mono font-bold text-slate-900">
+                                        {formatDateDMY(ce.date)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-slate-900 whitespace-nowrap border border-slate-300">
+                                        {formatNumber(ce.liters, 2)} L
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-amber-900 bg-amber-50/30 whitespace-nowrap border border-slate-300">
+                                        {formatNumber(ce.fat, 1)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-center font-extrabold text-indigo-900 bg-indigo-50/30 whitespace-nowrap border border-slate-300">
+                                        {formatNumber(ce.snf, 1)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-right font-bold text-blue-900 whitespace-nowrap border border-slate-300">
+                                        ₹{formatNumber(ce.rate, 2)}
+                                      </td>
+                                      <td className="py-1.5 px-1 sm:px-2 text-right font-extrabold text-emerald-800 whitespace-nowrap border border-slate-300">
+                                        {formatWholeCurrency(ce.totalAmount)}
+                                      </td>
+                                    </tr>
+                                  ))
+                                )}
+                              </tbody>
+                              <tfoot>
+                                <tr
+                                  data-testid="tenday-evening-total-row"
+                                  className="bg-indigo-100/90 text-slate-950 font-extrabold border-t-2 border-indigo-400"
+                                >
+                                  <td className="py-2 px-1 sm:px-2 border border-slate-300">
+                                    शाम का टोटल ({eveEntries.length})
+                                  </td>
+                                  <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(eveSum.totalLiters, 2)} L
+                                  </td>
+                                  <td className="py-2 px-1 sm:px-2 text-center text-amber-950 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(eveSum.avgFat, 1)}
+                                  </td>
+                                  <td className="py-2 px-1 sm:px-2 text-center text-indigo-950 whitespace-nowrap border border-slate-300">
+                                    {formatNumber(eveSum.avgSnf, 1)}
+                                  </td>
+                                  <td className="py-2 px-1 sm:px-2 text-right text-blue-950 whitespace-nowrap border border-slate-300">
+                                    {eveSum.avgRate !== null ? `₹${formatNumber(eveSum.avgRate, 2)}` : '—'}
+                                  </td>
+                                  <td className="py-2 px-1 sm:px-2 text-right text-emerald-900 whitespace-nowrap border border-slate-300">
+                                    {formatWholeCurrency(eveSum.totalAmount)}
+                                  </td>
+                                </tr>
+                              </tfoot>
+                            </table>
+                          </div>
+                        )}
+                      </>
                     )}
 
                     {/* COMBINED MORNING + EVENING TOTAL + ADVANCE/BALANCE ADJUSTMENT + INLINE PAYMENT */}
@@ -2430,11 +2765,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-200 pb-2.5">
                         <div>
                           <h4 className="text-xs sm:text-sm font-extrabold text-blue-950">
-                            {showMorningSection && showEveningSection
-                              ? 'सुबह + शाम का टोटल एवं एडवांस / बकाया जोड़-घटाव'
-                              : showMorningSection
-                              ? 'सुबह का कुल टोटल एवं एडवांस / बकाया जोड़-घटाव'
-                              : 'शाम का कुल टोटल एवं एडवांस / बकाया जोड़-घटाव'}
+                            सुबह + शाम का टोटल एवं एडवांस / बकाया जोड़-घटाव व भुगतान
                           </h4>
                           {accountingFarmer && (
                             <p className="text-xs font-bold text-slate-700 mt-0.5">
@@ -2444,20 +2775,19 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                           )}
                         </div>
                         <div className="flex flex-wrap items-center gap-2 no-print">
-                          {reportFarmerFilter === 'all' && state.farmers.length > 0 && (
+                          {sortedFarmers.length > 0 && (
                             <div className="flex items-center gap-1.5">
                               <span className="text-[11px] font-bold text-blue-900">
-                                किसान चुनें:
+                                भुगतान हेतु किसान:
                               </span>
                               <select
                                 value={accountingFarmer?.id || ''}
                                 onChange={(e) => {
                                   setBillFarmerId(e.target.value);
-                                  setReportFarmerFilter(e.target.value);
                                 }}
                                 className="h-8 px-2 text-xs font-bold bg-white border border-blue-300 rounded-lg"
                               >
-                                {state.farmers.map((f) => (
+                                {sortedFarmers.map((f) => (
                                   <option key={f.id} value={f.id}>
                                     {f.code} — {f.name}
                                   </option>
@@ -2494,28 +2824,18 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       {liveFarmerBillData && (
                         <>
                           <div className="bg-white border border-blue-200 rounded-xl divide-y divide-slate-200 text-xs sm:text-sm">
-                            {showMorningSection && showEveningSection && (
-                              <div className="px-3 py-2 flex items-center justify-between gap-2">
-                                <span className="font-semibold text-slate-700">
-                                  सुबह का टोटल ({formatNumber(liveFarmerBillData.morningLiters, 2)}{' '}
-                                  L) + शाम का टोटल (
-                                  {formatNumber(liveFarmerBillData.eveningLiters, 2)} L)
-                                </span>
-                                <span className="font-bold text-slate-900">
-                                  {formatWholeCurrency(liveFarmerBillData.morningAmount)} +{' '}
-                                  {formatWholeCurrency(liveFarmerBillData.eveningAmount)}
-                                </span>
-                              </div>
-                            )}
+                            <div className="px-3 py-2 flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-700">
+                                सुबह का टोटल ({formatNumber(liveFarmerBillData.morningLiters, 2)} L) + शाम का टोटल ({formatNumber(liveFarmerBillData.eveningLiters, 2)} L)
+                              </span>
+                              <span className="font-bold text-slate-900">
+                                {formatWholeCurrency(liveFarmerBillData.morningAmount)} + {formatWholeCurrency(liveFarmerBillData.eveningAmount)}
+                              </span>
+                            </div>
 
                             <div className="px-3 py-2 flex items-center justify-between gap-2 bg-blue-50/50">
                               <span className="font-extrabold text-blue-950">
-                                {showMorningSection && showEveningSection
-                                  ? 'सुबह-शाम का कुल दूध टोटल'
-                                  : showMorningSection
-                                  ? 'सुबह का कुल दूध टोटल'
-                                  : 'शाम का कुल दूध टोटल'}{' '}
-                                ({formatNumber(liveFarmerBillData.totalLiters, 2)} L)
+                                सुबह-शाम का कुल दूध टोटल ({formatNumber(liveFarmerBillData.totalLiters, 2)} L)
                               </span>
                               <span
                                 data-testid="bill-total-milk-amount"
@@ -2625,8 +2945,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                             >
                               <div className="flex items-center justify-between gap-2 flex-wrap">
                                 <span className="text-xs font-extrabold text-blue-950">
-                                  💳 यहीं पर भुगतान करें ({accountingFarmer.code} —{' '}
-                                  {accountingFarmer.name})
+                                  💳 यहीं पर भुगतान करें ({accountingFarmer.code} — {accountingFarmer.name})
                                 </span>
                                 {liveFarmerBillData.netPayable > 0 && (
                                   <button
@@ -2636,8 +2955,7 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                                     }
                                     className="px-2.5 py-1 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-[11px] font-extrabold"
                                   >
-                                    पूरा बकाया भरें (
-                                    {formatWholeCurrency(liveFarmerBillData.netPayable)})
+                                    पूरा बकाया भरें ({formatWholeCurrency(liveFarmerBillData.netPayable)})
                                   </button>
                                 )}
                               </div>

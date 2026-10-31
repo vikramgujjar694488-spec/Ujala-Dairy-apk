@@ -122,10 +122,10 @@ jobs:
             
             - **Direct APK Download**: Click **`Ujalaa-Dairy-debug.apk`** under **Assets** below to download and install directly on your Android phone.
             - **Included Features**:
-              - Photo Milk Entry Preview Table (Date, Shift, Farmer Code, Name, Cow/Buffalo, FAT, SNF, Liters, Rate, Amount) before saving
-              - Max 2 Milk Entries per Farmer per Shift (1 Cow + 1 Buffalo) & strict duplicate blocking
-              - 10-Day Billing Period selection in Payments (`1-10`, `11-20`, `21-End`) with automatic under/over-payment carry-forward adjustment in bills
-              - Auto Today's Date & 12:00 PM Noon Shift switching, Gallery & Camera photo support, 10-Day Sale Bill, and APK-ready Backup/Restore
+              - **Photo & PDF Milk Entry + Editable Preview**: Upload or capture milk slip photos or PDF files, review/edit every row in the preview, and save in one click (works in both Web and Android Debug APK)
+              - **Clean Saved Milk Collection Cards**: Numbered farmer cards with 4-column Liter | FAT | SNF | Rate grid, green Total Amount box, and Edit / WhatsApp / Delete actions
+              - **Single Unified 10-Day Morning-Evening Bill & Inline Payment**: Shows Morning records + Morning Total, Evening records + Evening Total (hiding empty shift boxes for single-shift farmers), Combined Total + Previous Balance/Advance adjustment, and direct inline payment (`यहीं पर भुगतान करें`) with no duplicate bill below
+              - **DD-MM-YYYY Date Format & Zero Horizontal Scroll**: All tables and bills fit cleanly on mobile screens without left-right swiping
             - **Package ID**: `com.ujalaadairy.app`
             - **App Name**: `Ujalaa Dairy`
             - **Commit**: `${{ github.sha }}`

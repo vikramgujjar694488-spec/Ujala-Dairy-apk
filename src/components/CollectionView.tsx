@@ -5,7 +5,6 @@ import {
   Camera,
   CheckCircle2,
   Edit2,
-  FileText,
   Image as ImageIcon,
   Keyboard,
   Loader2,
@@ -27,11 +26,11 @@ import {
 } from '../types/dairy';
 import {
   buildCollectionEntriesFromScannedSlip,
+  normalizeScannedDate,
   calculateCollectionSummary,
   calculateShiftAttendance,
   canSaveFarmerShiftMilkEntry,
   classifyMilkType,
-  extractTextFromPdfBuffer,
   formatAutoDecimalFatSnf,
   formatCurrency,
   formatDateDMY,
@@ -40,12 +39,15 @@ import {
   formatWholeCurrency,
   isFarmerScheduledForShift,
   lookupRateFromChart,
+  matchFarmerByNameThenCode,
   normalizeFarmerShiftSchedule,
   parseMilkSlipTextToRows,
   round2,
   round3,
   ScannedSlipPreviewItem,
   ScannedSlipRawRow,
+  sortCollectionsByFarmerCode,
+  sortFarmersByCode,
   truncatePurchaseAmount,
 } from '../utils/dairyCalculations';
 import { ConfirmDialog, WhatsAppPreviewModal } from './Modals';
@@ -71,7 +73,7 @@ const CLOUD_SCAN_SLIP_URLS = [
 
 async function compressImageFileToDataUrl(
   file: File,
-  maxDimension = 1600,
+  maxDimension = 1800,
   quality = 0.85
 ): Promise<{ dataUrl: string; ocrEnhancedDataUrl: string; mimeType: string }> {
   const rawDataUrl = await new Promise<string>((resolve, reject) => {
@@ -111,10 +113,10 @@ async function compressImageFileToDataUrl(
     ctx.drawImage(img, 0, 0, targetW, targetH);
     const compressed = canvas.toDataURL('image/jpeg', quality);
 
-    // Create a clean < 700 KB version specifically sized for OCR.space (1024KB strict limit) & Tesseract in APK
+    // Create a crisp < 900 KB version specifically sized for OCR.space (1024KB strict limit) & Tesseract in APK
     let ocrEnhanced = compressed;
     try {
-      const ocrMaxDim = 1280;
+      const ocrMaxDim = 1600;
       const ocrScale = Math.min(1, ocrMaxDim / Math.max(width, height));
       const ocrW = Math.max(1, Math.round(width * ocrScale));
       const ocrH = Math.max(1, Math.round(height * ocrScale));
@@ -126,12 +128,12 @@ async function compressImageFileToDataUrl(
         ocrCtx.fillStyle = '#ffffff';
         ocrCtx.fillRect(0, 0, ocrW, ocrH);
         ocrCtx.drawImage(img, 0, 0, ocrW, ocrH);
-        for (const q of [0.78, 0.64, 0.52]) {
+        for (const q of [0.84, 0.74, 0.62]) {
           const candidateUrl = ocrCanvas.toDataURL('image/jpeg', q);
           if (candidateUrl && candidateUrl.startsWith('data:image/')) {
             ocrEnhanced = candidateUrl;
-            // 900,000 base64 chars is ~675 KB, safely below OCR.space 1024 KB limit
-            if (candidateUrl.length < 900_000) break;
+            // 1,200,000 base64 chars is ~900 KB, safely below OCR.space 1024 KB limit while keeping Hindi & decimals sharp
+            if (candidateUrl.length < 1_200_000) break;
           }
         }
       }
@@ -276,10 +278,9 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
   const litersInputRef = useRef<HTMLInputElement | null>(null);
   const saveBtnRef = useRef<HTMLButtonElement | null>(null);
   const formCardRef = useRef<HTMLDivElement | null>(null);
-  // Separate refs for Camera Capture, Gallery Picker, and PDF Document Picker
+  // Separate refs for Camera Capture and Gallery Picker
   const cameraFileInputRef = useRef<HTMLInputElement | null>(null);
   const galleryFileInputRef = useRef<HTMLInputElement | null>(null);
-  const pdfFileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
@@ -292,8 +293,8 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     shift
   );
 
-  // Active farmers eligible for this shift shown first in dropdown (both-shift farmers included in BOTH shifts)
-  const activeFarmers = state.farmers.filter((f) => f.active !== false);
+  // Active farmers eligible for this shift shown first in dropdown (sorted strictly by Code No 1, 2, 3...)
+  const activeFarmers = sortFarmersByCode(state.farmers.filter((f) => f.active !== false));
   const scheduledForShiftFarmers = activeFarmers.filter((f) =>
     isFarmerScheduledForShift(f, shift)
   );
@@ -498,49 +499,69 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     }
   };
 
+  // Sanitize decimal input to allow at most one decimal point (so typing never produces NaN)
+  const cleanDecimalInput = (val: string): string => {
+    const stripped = val.replace(/[^0-9.]/g, "");
+    const parts = stripped.split(".");
+    return parts.length <= 2 ? stripped : `${parts[0]}.${parts.slice(1).join("")}`;
+  };
+
+  // Helper to shift a YYYY-MM-DD date string by deltaDays (-1, +1, etc.)
+  const shiftDateStringByDays = (baseDateStr: string, deltaDays: number): string => {
+    const safeBase = /^\d{4}-\d{2}-\d{2}$/.test(baseDateStr) ? baseDateStr : date;
+    const [y, m, d] = safeBase.split("-").map(Number);
+    const dt = new Date(y || 2026, (m || 1) - 1, (d || 1) + deltaDays);
+    const ny = dt.getFullYear();
+    const nm = String(dt.getMonth() + 1).padStart(2, "0");
+    const nd = String(dt.getDate()).padStart(2, "0");
+    return `${ny}-${nm}-${nd}`;
+  };
+
   // Stage extracted rows into Photo Preview Table BEFORE saving (shows Date, Farmer Code, Name, FAT, SNF, Liters, Rate, Amount, and Duplicate status)
   const stageScannedRowsForPreview = (
     rawRows: ScannedSlipRawRow[],
-    fallbackFarmerId?: string
+    fallbackFarmerId?: string,
+    overrideDefaultDate?: string,
+    overrideDefaultShift?: ShiftType
   ): boolean => {
     const effectiveFallbackFarmerId =
       fallbackFarmerId || photoQuickFarmerId || farmerId || undefined;
-    const combinedFarmers = [
-      ...state.farmers,
-      ...photoPendingAutoFarmers.filter(
-        (af) => !state.farmers.some((sf) => sf.id === af.id || String(sf.code) === String(af.code))
-      ),
-    ];
+    const effectiveDefaultDate = overrideDefaultDate || photoQuickDate || date;
+    const effectiveDefaultShift = overrideDefaultShift || photoQuickShift || shift;
+    const combinedFarmers = state.farmers.length > 0 ? state.farmers : photoPendingAutoFarmers;
     const built = buildCollectionEntriesFromScannedSlip(
       rawRows,
       combinedFarmers,
       state.rateCharts,
-      date,
-      shift,
+      effectiveDefaultDate,
+      effectiveDefaultShift,
       effectiveFallbackFarmerId,
       state.collections
     );
     if (built.previewItems.length === 0) {
+      setPhotoStagedRows([]);
+      setPhotoPreviewItems([]);
       setCameraError(
         built.warningsHi[0] ||
           (lang === 'hi'
-            ? 'फोटो लोड हो गया है! कृपया नीचे "+ नई पंक्ति जोड़ें" या फोटो देखकर मात्रा (लीटर) और FAT भरकर प्रिव्यू देखें।'
-            : 'Photo loaded! Please confirm Liters and FAT below or add a row to preview and save.')
+            ? 'इस फाइल/फोटो में कोई स्पष्ट दूध एंट्री नहीं मिली। कृपया साफ फोटो या सही PDF चुनें।'
+            : 'No valid milk entry found in this photo/PDF. Please select a clear photo or valid PDF.')
       );
       return false;
     }
 
     setPhotoStagedRows(rawRows);
     setPhotoPreviewItems(built.previewItems);
-    setPhotoPendingAutoFarmers((prev) => {
-      const merged = [...prev];
-      for (const nf of built.autoCreatedFarmers || []) {
-        if (!merged.some((m) => m.id === nf.id || String(m.code) === String(nf.code))) {
-          merged.push(nf);
-        }
+    if (state.farmers.length === 0) {
+      if (built.autoCreatedFarmers.length > 0) {
+        setPhotoPendingAutoFarmers((prev) => {
+          const existingIds = new Set(prev.map((f) => f.id));
+          return [...prev, ...built.autoCreatedFarmers.filter((f) => !existingIds.has(f.id))];
+        });
       }
-      return merged;
-    });
+    } else {
+      setPhotoPendingAutoFarmers([]);
+    }
     if (built.skippedDuplicates.length > 0 && built.entries.length === 0) {
       setCameraError(
         lang === 'hi'
@@ -560,8 +581,10 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
   };
 
   // Convert current photoPreviewItems back into ScannedSlipRawRow[] for live inline editing
+  // Preserves item.entry.id and sets isManualRow: true so React keys/IDs stay 100% stable and keyboard never closes!
   const getRawRowsFromCurrentPreview = (): ScannedSlipRawRow[] => {
     return photoPreviewItems.map((item) => ({
+      id: item.entry.id,
       farmerCode: item.entry.farmerCode,
       farmerName: item.entry.farmerName,
       date: item.entry.date,
@@ -573,6 +596,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       rate: item.entry.rate,
       manualRate: item.manualRate,
       overwriteExisting: item.overwriteExisting,
+      isManualRow: true,
     }));
   };
 
@@ -634,13 +658,15 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     }
 
     const newRow: ScannedSlipRawRow = {
+      id: `col_manual_${Date.now()}_${currentRows.length}`,
       farmerCode: lastRow?.farmerCode || chosenFarmer?.code || '101',
       farmerName: lastRow?.farmerName || chosenFarmer?.name || 'किसान',
       date: nextDate,
-      shift: lastRow?.shift || shift,
+      shift: lastRow?.shift || photoQuickShift || shift,
       liters: lastRow?.liters || 5.0,
       fat: lastRow?.fat || 4.5,
       snf: lastRow?.snf || 8.5,
+      isManualRow: true,
     };
     stageScannedRowsForPreview([...currentRows, newRow], chosenFarmer?.id);
   };
@@ -653,6 +679,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     if (!chosenFarmer || photoPreviewItems.length === 0) return;
 
     const updatedRows: ScannedSlipRawRow[] = photoPreviewItems.map((item) => ({
+      id: item.entry.id,
       farmerCode: chosenFarmer.code,
       farmerName: chosenFarmer.name,
       date: item.entry.date,
@@ -662,15 +689,43 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       fat: item.entry.fat,
       snf: item.entry.snf,
       rate: item.entry.rate,
+      manualRate: item.manualRate,
       overwriteExisting: item.overwriteExisting,
+      isManualRow: true,
     }));
     stageScannedRowsForPreview(updatedRows, chosenFarmer.id);
   };
 
-  // Apply Morning or Evening shift to all current photo preview rows
-  const handleApplyShiftToPreview = (targetShift: ShiftType) => {
+  // Apply a single date (YYYY-MM-DD) to all current photo preview rows
+  const handleApplyDateToPreview = (targetDate: string) => {
+    if (!targetDate) return;
+    const normalized = normalizeScannedDate(targetDate, photoQuickDate || date);
+    setPhotoQuickDate(normalized);
     if (photoPreviewItems.length === 0) return;
     const updatedRows: ScannedSlipRawRow[] = photoPreviewItems.map((item) => ({
+      id: item.entry.id,
+      farmerCode: item.entry.farmerCode,
+      farmerName: item.entry.farmerName,
+      date: normalized,
+      shift: item.entry.shift,
+      milkType: item.entry.milkType,
+      liters: item.entry.liters,
+      fat: item.entry.fat,
+      snf: item.entry.snf,
+      rate: item.entry.rate,
+      manualRate: item.manualRate,
+      overwriteExisting: item.overwriteExisting,
+      isManualRow: true,
+    }));
+    stageScannedRowsForPreview(updatedRows, undefined, normalized);
+  };
+
+  // Apply Morning or Evening shift to all current photo preview rows
+  const handleApplyShiftToPreview = (targetShift: ShiftType) => {
+    setPhotoQuickShift(targetShift);
+    if (photoPreviewItems.length === 0) return;
+    const updatedRows: ScannedSlipRawRow[] = photoPreviewItems.map((item) => ({
+      id: item.entry.id,
       farmerCode: item.entry.farmerCode,
       farmerName: item.entry.farmerName,
       date: item.entry.date,
@@ -680,15 +735,17 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       fat: item.entry.fat,
       snf: item.entry.snf,
       rate: item.entry.rate,
+      manualRate: item.manualRate,
       overwriteExisting: item.overwriteExisting,
+      isManualRow: true,
     }));
-    stageScannedRowsForPreview(updatedRows);
+    stageScannedRowsForPreview(updatedRows, undefined, undefined, targetShift);
   };
 
   // Apply sequential dates for a 10-11 day billing cycle (1-10, 11-20, or 21-31) to all current photo preview rows
   const handleApplyCycleDatesToPreview = (cycleNum: 1 | 2 | 3) => {
     if (photoPreviewItems.length === 0) return;
-    const ym = (passbookYearMonth || date.slice(0, 7)).slice(0, 7);
+    const ym = (passbookYearMonth || (photoQuickDate || date).slice(0, 7)).slice(0, 7);
     const [yStr, mStr] = ym.split('-');
     const y = Number(yStr) || 2026;
     const m = Number(mStr) || 10;
@@ -706,6 +763,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
         dayVal
       ).padStart(2, '0')}`;
       return {
+        id: item.entry.id,
         farmerCode: chosenFarmer?.code || item.entry.farmerCode,
         farmerName: chosenFarmer?.name || item.entry.farmerName,
         date: nextDate,
@@ -715,37 +773,52 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
         fat: item.entry.fat,
         snf: item.entry.snf,
         rate: item.entry.rate,
+        manualRate: item.manualRate,
         overwriteExisting: item.overwriteExisting,
+        isManualRow: true,
       };
     });
     stageScannedRowsForPreview(updatedRows, chosenFarmer?.id);
   };
 
-  // Confirm and save non-duplicate entries from Photo Preview Table (Atomically saves all 10-11 entries in APK & Web)
-  const handleConfirmSavePhotoPreview = () => {
-    const savableEntries = photoPreviewItems
-      .filter((item) => !item.isDuplicate)
-      .map((item) => ({
-        ...item.entry,
-        totalAmount: truncatePurchaseAmount(item.entry.totalAmount),
-        deduction: truncatePurchaseAmount(item.entry.deduction),
-        netPayable: truncatePurchaseAmount(
-          truncatePurchaseAmount(item.entry.totalAmount) -
-            truncatePurchaseAmount(item.entry.deduction)
-        ),
-      }));
+  // Confirm and save entries from Photo/PDF Preview Table in 1 click (saves new entries, or updates existing if all are existing)
+  const handleConfirmSavePhotoPreview = (forceOverwriteAll = false) => {
+    const nonDuplicateItems = photoPreviewItems.filter((item) => !item.isDuplicate);
+    const targetItems =
+      forceOverwriteAll || nonDuplicateItems.length === 0
+        ? photoPreviewItems.filter(
+            (item) => !item.isDuplicate || item.duplicateSource === 'existing'
+          )
+        : nonDuplicateItems;
+
+    const savableEntries = targetItems.map((item) => ({
+      ...item.entry,
+      id:
+        item.isDuplicate && item.existingConflictId
+          ? item.existingConflictId
+          : item.entry.id,
+      totalAmount: truncatePurchaseAmount(item.entry.totalAmount),
+      deduction: truncatePurchaseAmount(item.entry.deduction),
+      netPayable: truncatePurchaseAmount(
+        truncatePurchaseAmount(item.entry.totalAmount) -
+          truncatePurchaseAmount(item.entry.deduction)
+      ),
+    }));
 
     if (savableEntries.length === 0) {
       setCameraError(
         lang === 'hi'
-          ? 'सेव करने के लिए कोई नई एंट्री नहीं है। यदि आप पुरानी एंट्री को अपडेट करना चाहते हैं तो प्रिव्यू टेबल में "अपडेट करें" बटन दबाएँ।'
-          : 'No new entries to save. Click Overwrite in the preview table if you want to update existing entries.'
+          ? 'सेव करने के लिए कोई वैध एंट्री नहीं है।'
+          : 'No valid entries to save.'
       );
       return;
     }
 
     const usedFarmerIds = new Set(savableEntries.map((e) => e.farmerId));
-    const usedAutoFarmers = photoPendingAutoFarmers.filter((nf) => usedFarmerIds.has(nf.id));
+    const usedAutoFarmers =
+      state.farmers.length === 0
+        ? photoPendingAutoFarmers.filter((nf) => usedFarmerIds.has(nf.id))
+        : [];
 
     if (onSaveBatchEntries) {
       onSaveBatchEntries(savableEntries, usedAutoFarmers);
@@ -787,7 +860,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     setPhotoPendingAutoFarmers([]);
   };
 
-  // Handle photo OR PDF file (from camera capture, gallery selection, or PDF picker — works in both Web Preview & Installed Android Debug APK)
+  // Handle photo file (from camera capture or gallery selection — works in both Web Preview & Installed Android Debug APK)
   const handleSlipPhotoFile = async (file: File) => {
     setCameraError(null);
     setScanEngineBadge(null);
@@ -801,9 +874,6 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
     }
 
     try {
-      const isPdfFile =
-        file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-
       // Detect Capacitor Android Debug APK accurately (`https://localhost` with no port, `capacitor:`, `file:`, or Capacitor bridge)
       const isNativeApk =
         typeof window !== 'undefined' &&
@@ -818,302 +888,267 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
             ).Capacitor?.isNativePlatform?.()
           ));
 
-      const candidateUrls = isNativeApk
-        ? CLOUD_SCAN_SLIP_URLS.filter((u) => u.startsWith('https://')).concat([
-            '/api/scan-milk-slip',
-          ])
-        : CLOUD_SCAN_SLIP_URLS;
+      const { dataUrl, ocrEnhancedDataUrl, mimeType } = await compressImageFileToDataUrl(
+        file,
+        1800,
+        0.85
+      );
+      setCameraPreviewUrl(dataUrl);
+      setPhotoZoomLevel(1);
 
-      let extractedRows: ScannedSlipRawRow[] = [];
+      const effectiveScanDate = photoQuickDate || date;
+      const effectiveScanShift = photoQuickShift || shift;
 
-      if (isPdfFile) {
-        setCameraPreviewUrl(null);
+      // Score candidate rows by how many UNIQUE registered (farmer + date + shift) entries they match,
+      // penalizing duplicate rows for the same farmer so an engine with 2-3 duplicates per farmer never wins!
+      const scoreCandidateRows = (rows: ScannedSlipRawRow[]): number => {
+        if (!Array.isArray(rows) || rows.length === 0) return 0;
+        if (state.farmers.length === 0) return rows.length;
+        const uniqueMatchedKeys = new Set<string>();
+        let duplicatePenalty = 0;
+        for (const r of rows) {
+          const m = matchFarmerByNameThenCode(state.farmers, r.farmerName, r.farmerCode);
+          if (m) {
+            const dKey = normalizeScannedDate(r.date, effectiveScanDate);
+            const sKey = String(r.shift || effectiveScanShift).toLowerCase();
+            const key = `${m.id}|${dKey}|${sKey}`;
+            if (uniqueMatchedKeys.has(key)) {
+              duplicatePenalty += 5;
+            } else {
+              uniqueMatchedKeys.add(key);
+            }
+          }
+        }
+        return Math.max(1, uniqueMatchedKeys.size * 15 - duplicatePenalty);
+      };
 
-        // PDF Engine 1: 100% Offline Built-in PDF Stream Text Extractor (Works instantly inside APK & Web without internet)
+      // Helper 1: Direct HTTPS Table OCR via OCR.space (Works 100% directly inside installed Android Debug APK!)
+      const runOcrSpaceEngine = async (
+        engineNum: '2' | '1',
+        timeoutMs = 15000
+      ): Promise<{ rows: ScannedSlipRawRow[]; badge: string }> => {
         try {
-          const pdfBuffer = await file.arrayBuffer();
-          const extractedPdfText = await extractTextFromPdfBuffer(pdfBuffer);
-          if (extractedPdfText && extractedPdfText.trim()) {
-            const rowsFromPdf = parseMilkSlipTextToRows(extractedPdfText, date, shift);
-            if (rowsFromPdf.length > 0) {
-              extractedRows = rowsFromPdf;
-              setScanEngineBadge('PDF स्मार्ट टेक्स्ट स्कैन ✓');
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+          const formBody = new URLSearchParams();
+          formBody.append('apikey', 'helloworld');
+          formBody.append('base64Image', ocrEnhancedDataUrl || dataUrl);
+          formBody.append('filetype', 'JPG');
+          formBody.append('isTable', 'true');
+          formBody.append('OCREngine', engineNum);
+          formBody.append('scale', 'true');
+          formBody.append('detectOrientation', 'true');
+
+          const ocrResp = await fetch(OCR_SPACE_API_URL, {
+            method: 'POST',
+            body: formBody,
+            signal: ctrl.signal,
+          });
+          clearTimeout(timer);
+          if (ocrResp.ok) {
+            const ocrJson = await ocrResp.json();
+            const parsedText = Array.isArray(ocrJson?.ParsedResults)
+              ? ocrJson.ParsedResults.map((p: { ParsedText?: string }) => p?.ParsedText || '').join(
+                  '\n'
+                )
+              : '';
+            if (typeof parsedText === 'string' && parsedText.trim()) {
+              const rowsFromOcrSpace = parseMilkSlipTextToRows(parsedText, effectiveScanDate, effectiveScanShift, state.farmers);
+              if (rowsFromOcrSpace.length > 0) {
+                return {
+                  rows: rowsFromOcrSpace,
+                  badge: 'स्मार्ट टेबल OCR स्कैन ✓',
+                };
+              }
             }
           }
         } catch {
-          // Proceed to cloud/OCR PDF engines
+          // Ignore and allow parallel/fallback engine
         }
+        return { rows: [], badge: '' };
+      };
 
-        // Read PDF as base64 DataURL for Cloud AI / OCR.space fallback if needed
-        let pdfDataUrl = '';
-        if (extractedRows.length === 0) {
-          try {
-            pdfDataUrl = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(String(reader.result || ''));
-              reader.onerror = () => reject(new Error('PDF read error'));
-              reader.readAsDataURL(file);
-            });
-          } catch {
-            pdfDataUrl = '';
-          }
-        }
-
-        // PDF Engine 2: Gemini AI PDF Document Scanner
-        if (extractedRows.length === 0 && pdfDataUrl) {
-          for (const apiUrl of candidateUrls) {
-            if (extractedRows.length > 0) break;
-            try {
-              const ctrl = new AbortController();
-              const timer = setTimeout(() => ctrl.abort(), 20000);
-              const resp = await fetch(apiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  imageBase64: pdfDataUrl,
-                  mimeType: 'application/pdf',
-                  farmers: state.farmers.map((f) => ({ code: f.code, name: f.name })),
-                  defaultDate: date,
-                  defaultShift: shift,
-                }),
-                signal: ctrl.signal,
-              });
-              clearTimeout(timer);
-              if (resp.ok) {
-                const contentType = resp.headers.get('content-type') || '';
-                if (contentType.includes('application/json')) {
-                  const json = await resp.json();
-                  if (Array.isArray(json?.entries) && json.entries.length > 0) {
-                    extractedRows = json.entries;
-                    setScanEngineBadge('AI PDF स्मार्ट स्कैन ✓');
-                    break;
-                  } else if (
-                    typeof json?.rawTextSummary === 'string' &&
-                    json.rawTextSummary.trim()
-                  ) {
-                    const parsedFromSummary = parseMilkSlipTextToRows(
-                      json.rawTextSummary,
-                      date,
-                      shift
-                    );
-                    if (parsedFromSummary.length > 0) {
-                      extractedRows = parsedFromSummary;
-                      setScanEngineBadge('AI PDF टेक्स्ट स्कैन ✓');
-                      break;
-                    }
-                  }
-                }
-              }
-            } catch {
-              // Try next endpoint
-            }
-          }
-        }
-
-        // PDF Engine 3: Direct HTTPS OCR.space PDF Table OCR (Works inside Android Debug APK)
-        if (extractedRows.length === 0 && pdfDataUrl && pdfDataUrl.length < 1_350_000) {
-          try {
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 18000);
-            const formBody = new URLSearchParams();
-            formBody.append('apikey', 'helloworld');
-            formBody.append('base64Image', pdfDataUrl);
-            formBody.append('filetype', 'PDF');
-            formBody.append('isTable', 'true');
-            formBody.append('OCREngine', '2');
-            formBody.append('scale', 'true');
-
-            const ocrResp = await fetch(OCR_SPACE_API_URL, {
-              method: 'POST',
-              body: formBody,
-              signal: ctrl.signal,
-            });
-            clearTimeout(timer);
-            if (ocrResp.ok) {
-              const ocrJson = await ocrResp.json();
-              const allPagesText = Array.isArray(ocrJson?.ParsedResults)
-                ? ocrJson.ParsedResults.map(
-                    (p: { ParsedText?: string }) => p?.ParsedText || ''
-                  ).join('\n')
-                : '';
-              if (allPagesText.trim()) {
-                const rowsFromPdfOcr = parseMilkSlipTextToRows(allPagesText, date, shift);
-                if (rowsFromPdfOcr.length > 0) {
-                  extractedRows = rowsFromPdfOcr;
-                  setScanEngineBadge('PDF टेबल OCR स्कैन ✓');
+      // Helper 2: Gemini Vision AI OCR endpoint
+      const runCloudVisionEngine = async (
+        apiUrl: string,
+        timeoutMs = 12000
+      ): Promise<{ rows: ScannedSlipRawRow[]; badge: string }> => {
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+          const resp = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageBase64: dataUrl,
+              mimeType,
+              farmers: state.farmers.map((f) => ({ code: f.code, name: f.name })),
+              defaultDate: effectiveScanDate, defaultShift: effectiveScanShift,
+            }),
+            signal: ctrl.signal,
+          });
+          clearTimeout(timer);
+          if (resp.ok) {
+            const contentType = resp.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+              const json = await resp.json();
+              if (Array.isArray(json?.entries) && json.entries.length > 0) {
+                return {
+                  rows: json.entries,
+                  badge: 'AI स्मार्ट विज़न स्कैन ✓',
+                };
+              } else if (typeof json?.rawTextSummary === 'string' && json.rawTextSummary.trim()) {
+                const parsedFromSummary = parseMilkSlipTextToRows(json.rawTextSummary, effectiveScanDate, effectiveScanShift, state.farmers);
+                if (parsedFromSummary.length > 0) {
+                  return {
+                    rows: parsedFromSummary,
+                    badge: 'AI स्मार्ट विज़न टेक्स्ट ✓',
+                  };
                 }
               }
             }
-          } catch {
-            // Proceed to fallback
           }
+        } catch {
+          // Ignore and allow parallel/fallback engine
         }
-      } else {
-        // IMAGE FILE FLOW (Camera Photo or Gallery Screenshot)
-        const { dataUrl, ocrEnhancedDataUrl, mimeType } = await compressImageFileToDataUrl(
-          file,
-          1600,
-          0.85
-        );
-        setCameraPreviewUrl(dataUrl);
-        setPhotoZoomLevel(1);
+        return { rows: [], badge: '' };
+      };
 
-        // Image Engine 1: Gemini Vision AI OCR endpoint
-        for (const apiUrl of candidateUrls) {
-          if (extractedRows.length > 0) break;
-          try {
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 18000);
-            const resp = await fetch(apiUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                imageBase64: dataUrl,
-                mimeType,
-                farmers: state.farmers.map((f) => ({ code: f.code, name: f.name })),
-                defaultDate: date,
-                defaultShift: shift,
-              }),
-              signal: ctrl.signal,
-            });
-            clearTimeout(timer);
-            if (resp.ok) {
-              const contentType = resp.headers.get('content-type') || '';
-              if (contentType.includes('application/json')) {
-                const json = await resp.json();
-                if (Array.isArray(json?.entries) && json.entries.length > 0) {
-                  extractedRows = json.entries;
-                  setScanEngineBadge('AI स्मार्ट विज़न स्कैन ✓');
-                  break;
-                } else if (typeof json?.rawTextSummary === 'string' && json.rawTextSummary.trim()) {
-                  const parsedFromSummary = parseMilkSlipTextToRows(
-                    json.rawTextSummary,
-                    date,
-                    shift
-                  );
-                  if (parsedFromSummary.length > 0) {
-                    extractedRows = parsedFromSummary;
-                    setScanEngineBadge('AI स्मार्ट विज़न टेक्स्ट ✓');
-                    break;
-                  }
-                }
-              }
-            }
-          } catch {
-            // Try next endpoint or fallback OCR engine
-          }
+      let extractedRows: ScannedSlipRawRow[] = [];
+
+      // Run primary engines in parallel with fast early resolution:
+      // As soon as one engine returns matched rows, give the other engine a brief 500ms window,
+      // so the downloaded Android Debug APK shows the preview in ~2 seconds without waiting on any slow server!
+      const primaryCloudUrl = isNativeApk
+        ? CLOUD_SCAN_SLIP_URLS.find((u) => u.startsWith('https://')) || CLOUD_SCAN_SLIP_URLS[1]
+        : '/api/scan-milk-slip';
+
+      let cloudDone = false;
+      let ocr2Done = false;
+      let cloudRes: { rows: ScannedSlipRawRow[]; badge: string } = { rows: [], badge: '' };
+      let ocrEngine2Res: { rows: ScannedSlipRawRow[]; badge: string } = { rows: [], badge: '' };
+
+      const cloudTask = runCloudVisionEngine(primaryCloudUrl, isNativeApk ? 7000 : 12000).then(
+        (r) => {
+          cloudDone = true;
+          cloudRes = r;
+          return r;
         }
+      );
+      const ocr2Task = runOcrSpaceEngine('2', 15000).then((r) => {
+        ocr2Done = true;
+        ocrEngine2Res = r;
+        return r;
+      });
 
-        // Image Engine 2: Direct HTTPS Table OCR (ocr.space Engine 2 + Hindi Engine 1 fallback — works directly in Android APK)
-        if (extractedRows.length === 0) {
-          for (const ocrCfg of [
-            { engine: '2', langCode: '' },
-            { engine: '1', langCode: 'hin' },
-          ]) {
-            if (extractedRows.length > 0) break;
-            try {
-              const ctrl = new AbortController();
-              const timer = setTimeout(() => ctrl.abort(), 16000);
-              const formBody = new URLSearchParams();
-              formBody.append('apikey', 'helloworld');
-              formBody.append('base64Image', ocrEnhancedDataUrl || dataUrl);
-              formBody.append('filetype', 'JPG');
-              formBody.append('isTable', 'true');
-              formBody.append('OCREngine', ocrCfg.engine);
-              formBody.append('scale', 'true');
-              if (ocrCfg.langCode) {
-                formBody.append('language', ocrCfg.langCode);
-              }
-
-              const ocrResp = await fetch(OCR_SPACE_API_URL, {
-                method: 'POST',
-                body: formBody,
-                signal: ctrl.signal,
-              });
-              clearTimeout(timer);
-              if (ocrResp.ok) {
-                const ocrJson = await ocrResp.json();
-                const parsedText = ocrJson?.ParsedResults?.[0]?.ParsedText || '';
-                if (typeof parsedText === 'string' && parsedText.trim()) {
-                  const rowsFromOcrSpace = parseMilkSlipTextToRows(parsedText, date, shift);
-                  if (rowsFromOcrSpace.length > 0) {
-                    extractedRows = rowsFromOcrSpace;
-                    setScanEngineBadge('स्मार्ट टेबल OCR स्कैन ✓');
-                    break;
-                  }
-                }
-              }
-            } catch {
-              // Proceed to next OCR fallback
-            }
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (!settled) {
+            settled = true;
+            resolve();
           }
-        }
-
-        // Image Engine 3: Bundled On-Device Tesseract.js OCR (works 100% offline inside installed APK)
-        if (extractedRows.length === 0) {
-          try {
-            const TesseractModule = await import('tesseract.js');
-            const recognizeFn =
-              TesseractModule.recognize ||
-              (TesseractModule.default && TesseractModule.default.recognize);
-            if (typeof recognizeFn === 'function') {
-              const ocrResult = await Promise.race([
-                recognizeFn(ocrEnhancedDataUrl || dataUrl, 'eng'),
-                new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000)),
-              ]);
-              const rawText = ocrResult?.data?.text || '';
-              if (rawText.trim()) {
-                const rowsFromTesseract = parseMilkSlipTextToRows(rawText, date, shift);
-                if (rowsFromTesseract.length > 0) {
-                  extractedRows = rowsFromTesseract;
-                  setScanEngineBadge('ऑफलाइन स्मार्ट OCR स्कैन ✓');
-                }
-              }
-            }
-          } catch {
-            // Ignore and try next fallback
+        };
+        cloudTask.then((r) => {
+          if (scoreCandidateRows(r.rows) > 0) {
+            setTimeout(finish, 400);
+          } else if (ocr2Done) {
+            finish();
           }
-        }
-
-        // Image Engine 4: Browser/Android WebView native TextDetector API if available
-        if (extractedRows.length === 0 && typeof window !== 'undefined' && 'TextDetector' in window) {
-          try {
-            const img = document.createElement('img');
-            img.src = ocrEnhancedDataUrl || dataUrl;
-            await new Promise((res) => {
-              img.onload = res;
-              img.onerror = res;
-            });
-            // @ts-ignore
-            const detector = new window.TextDetector();
-            const detected = await detector.detect(img);
-            const rawText = detected.map((d: { rawValue?: string }) => d.rawValue || '').join('\n');
-            if (rawText.trim()) {
-              const rowsFromDetector = parseMilkSlipTextToRows(rawText, date, shift);
-              if (rowsFromDetector.length > 0) {
-                extractedRows = rowsFromDetector;
-                setScanEngineBadge('डिवाइस टेक्स्ट स्कैनर ✓');
-              }
-            }
-          } catch {
-            // ignore
+        });
+        ocr2Task.then((r) => {
+          if (scoreCandidateRows(r.rows) > 0) {
+            setTimeout(finish, 400);
+          } else if (cloudDone) {
+            finish();
           }
+        });
+      });
+
+      const cloudScore = scoreCandidateRows(cloudRes.rows);
+      const ocr2Score = scoreCandidateRows(ocrEngine2Res.rows);
+
+      if (cloudScore > 0 && cloudScore >= ocr2Score) {
+        extractedRows = cloudRes.rows;
+        setScanEngineBadge(cloudRes.badge);
+      } else if (ocr2Score > 0) {
+        extractedRows = ocrEngine2Res.rows;
+        setScanEngineBadge(ocrEngine2Res.badge);
+      }
+
+      // Secondary fallback: Try OCR.space Engine 1 if both primary engines returned 0 rows
+      if (extractedRows.length === 0) {
+        const ocrEngine1Res = await runOcrSpaceEngine('1', 12000);
+        if (ocrEngine1Res.rows.length > 0) {
+          extractedRows = ocrEngine1Res.rows;
+          setScanEngineBadge(ocrEngine1Res.badge);
         }
       }
 
-      // Engine 5: If user typed slip text or if filename encodes slip values (e.g. "101_6.55_4.5_8.5.pdf")
+      // Image Engine 3: Bundled On-Device Tesseract.js OCR (works 100% offline inside installed APK)
+      if (extractedRows.length === 0) {
+        try {
+          const TesseractModule = await import('tesseract.js');
+          const recognizeFn =
+            TesseractModule.recognize ||
+            (TesseractModule.default && TesseractModule.default.recognize);
+          if (typeof recognizeFn === 'function') {
+            const ocrResult = await Promise.race([
+              recognizeFn(ocrEnhancedDataUrl || dataUrl, 'eng'),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000)),
+            ]);
+            const rawText = ocrResult?.data?.text || '';
+            if (rawText.trim()) {
+              const rowsFromTesseract = parseMilkSlipTextToRows(rawText, effectiveScanDate, effectiveScanShift, state.farmers);
+              if (rowsFromTesseract.length > 0) {
+                extractedRows = rowsFromTesseract;
+                setScanEngineBadge('ऑफलाइन स्मार्ट OCR स्कैन ✓');
+              }
+            }
+          }
+        } catch {
+          // Ignore and try next fallback
+        }
+      }
+
+      // Image Engine 4: Browser/Android WebView native TextDetector API if available
+      if (extractedRows.length === 0 && typeof window !== 'undefined' && 'TextDetector' in window) {
+        try {
+          const img = document.createElement('img');
+          img.src = ocrEnhancedDataUrl || dataUrl;
+          await new Promise((res) => {
+            img.onload = res;
+            img.onerror = res;
+          });
+          // @ts-ignore
+          const detector = new window.TextDetector();
+          const detected = await detector.detect(img);
+          const rawText = detected.map((d: { rawValue?: string }) => d.rawValue || '').join('\n');
+          if (rawText.trim()) {
+            const rowsFromDetector = parseMilkSlipTextToRows(rawText, effectiveScanDate, effectiveScanShift, state.farmers);
+            if (rowsFromDetector.length > 0) {
+              extractedRows = rowsFromDetector;
+              setScanEngineBadge('डिवाइस टेक्स्ट स्कैनर ✓');
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      // Engine 5: If user typed slip text or if filename encodes slip values (e.g. "101_6.55_4.5_8.5.jpg")
       if (extractedRows.length === 0 && slipManualText.trim()) {
-        extractedRows = parseMilkSlipTextToRows(slipManualText, date, shift);
+        extractedRows = parseMilkSlipTextToRows(slipManualText, effectiveScanDate, effectiveScanShift, state.farmers);
       }
       if (extractedRows.length === 0 && file.name) {
         const nameClean = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ');
-        const fromName = parseMilkSlipTextToRows(nameClean, date, shift);
+        const fromName = parseMilkSlipTextToRows(nameClean, effectiveScanDate, effectiveScanShift, state.farmers);
         if (fromName.length > 0) {
           extractedRows = fromName;
         }
       }
 
-      // Engine 6: If current form or quick photo input has valid numbers entered before clicking photo/PDF, use them
+      // Engine 6: If current form or quick photo input has valid numbers entered before clicking photo, use them
       if (extractedRows.length === 0) {
         const qLit = Number(photoQuickLiters);
         const qFat = Number(photoQuickFat);
@@ -1150,34 +1185,24 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
         }
       }
 
-      // If the photo/PDF was blank or handwriting could not be parsed automatically,
-      // still open the Editable Preview Table with 1 ready-to-edit row so the user can view & type/edit directly in the Preview Table!
+      // Strictly do NOT inject fake dummy rows if nothing valid was scanned!
       if (extractedRows.length === 0) {
-        const chosenFarmer =
-          state.farmers.find((f) => f.id === defaultTargetFarmerId) ||
-          selectedFarmerObj ||
-          scheduledForShiftFarmers[0] ||
-          state.farmers[0];
-        extractedRows = [
-          {
-            farmerCode: chosenFarmer?.code || '101',
-            farmerName: chosenFarmer?.name || 'किसान',
-            date: photoQuickDate || date,
-            shift: photoQuickShift || shift,
-            liters: 5.0,
-            fat: 5.0,
-            snf: 8.5,
-          },
-        ];
-        setScanEngineBadge('मैनुअल प्रिव्यू सुधार मोड');
+        setPhotoStagedRows([]);
+        setPhotoPreviewItems([]);
+        setCameraError(
+          lang === 'hi'
+            ? 'फोटो में कोई स्पष्ट दूध एंट्री नहीं दिखी। कृपया साफ फोटो लें या नीचे मात्रा (L) व FAT भरकर प्रिव्यू देखें।'
+            : 'No valid milk entry detected in photo. Please take a clear photo or enter Liters & FAT below.'
+        );
+        return;
       }
 
       stageScannedRowsForPreview(extractedRows, defaultTargetFarmerId);
     } catch {
       setCameraError(
         lang === 'hi'
-          ? 'फोटो/PDF स्कैन करने में समस्या आई। कृपया नीचे प्रिव्यू में मात्रा व FAT भरें।'
-          : 'Error scanning photo/PDF. Please enter Liters and FAT in preview below.'
+          ? 'फोटो स्कैन करने में समस्या आई। कृपया नीचे प्रिव्यू में मात्रा व FAT भरें।'
+          : 'Error scanning photo. Please enter Liters and FAT in preview below.'
       );
     } finally {
       setIsScanningSlip(false);
@@ -1322,42 +1347,51 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
   const shiftEntries = state.collections.filter((c) => c.date === date && c.shift === shift);
   const fullShiftSummary = calculateCollectionSummary(shiftEntries);
 
-  // Filtered entries for the bottom Saved Collection List
-  const filteredEntries = state.collections.filter((c) => {
-    if (listDateFilter && c.date !== listDateFilter) return false;
-    if (listShiftFilter === 'current' && c.shift !== shift) return false;
-    if (listShiftFilter === 'morning' && c.shift !== 'morning') return false;
-    if (listShiftFilter === 'evening' && c.shift !== 'evening') return false;
-    if (milkFilter !== 'all' && c.milkType !== milkFilter) return false;
-    if (entrySearch.trim()) {
-      const q = entrySearch.trim().toLowerCase();
-      if (
-        !c.farmerName.toLowerCase().includes(q) &&
-        !c.farmerCode.toLowerCase().includes(q)
-      ) {
-        return false;
+  // Filtered entries for the bottom Saved Collection List — strictly sorted by Farmer Code No (1, 2, 3...)
+  const filteredEntries = sortCollectionsByFarmerCode(
+    state.collections.filter((c) => {
+      if (listDateFilter && c.date !== listDateFilter) return false;
+      if (listShiftFilter === 'current' && c.shift !== shift) return false;
+      if (listShiftFilter === 'morning' && c.shift !== 'morning') return false;
+      if (listShiftFilter === 'evening' && c.shift !== 'evening') return false;
+      if (milkFilter !== 'all' && c.milkType !== milkFilter) return false;
+      if (entrySearch.trim()) {
+        const q = entrySearch.trim().toLowerCase();
+        if (
+          !c.farmerName.toLowerCase().includes(q) &&
+          !c.farmerCode.toLowerCase().includes(q)
+        ) {
+          return false;
+        }
       }
-    }
-    return true;
-  });
+      return true;
+    }),
+    state.farmers
+  );
 
   const filteredSummary = calculateCollectionSummary(filteredEntries);
 
-  // Filter attendance lists by search query
+  // Filter attendance lists by search query and sort by Farmer Code No (1, 2, 3...)
   const qAtt = farmerSearch.trim().toLowerCase();
-  const filteredPendingFarmers = attendance.pendingFarmers.filter(
-    (f) =>
-      !qAtt ||
-      f.name.toLowerCase().includes(qAtt) ||
-      f.code.toLowerCase().includes(qAtt) ||
-      f.mobile.includes(qAtt)
+  const filteredPendingFarmers = sortFarmersByCode(
+    attendance.pendingFarmers.filter(
+      (f) =>
+        !qAtt ||
+        f.name.toLowerCase().includes(qAtt) ||
+        f.code.toLowerCase().includes(qAtt) ||
+        f.mobile.includes(qAtt)
+    )
   );
-  const filteredPresentFarmers = attendance.presentFarmers.filter(
-    (pf) =>
-      !qAtt ||
-      pf.farmer.name.toLowerCase().includes(qAtt) ||
-      pf.farmer.code.toLowerCase().includes(qAtt)
-  );
+  const filteredPresentFarmers = [...attendance.presentFarmers]
+    .filter(
+      (pf) =>
+        !qAtt ||
+        pf.farmer.name.toLowerCase().includes(qAtt) ||
+        pf.farmer.code.toLowerCase().includes(qAtt)
+    )
+    .sort((a, b) =>
+      sortFarmersByCode([a.farmer, b.farmer])[0]?.id === a.farmer.id ? -1 : 1
+    );
 
   const scheduleBadgeText = (sched: Farmer['shiftSchedule']) => {
     const norm = normalizeFarmerShiftSchedule(sched);
@@ -1372,88 +1406,88 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
       {/* TOP MOBILE-KEYBOARD-SAFE COMPACT MILK COLLECTION COCKPIT (VERY FIRST CARD) */}
       {/* Fits 100% above the mobile keyboard (y = 48px to y = 350px) with NO swipe! */}
       {/* ========================================================================== */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 sm:gap-4 items-start">
         <div
           ref={formCardRef}
           data-testid="collection-top-cockpit"
-          className="lg:col-span-7 bg-white border-2 border-blue-600/80 rounded-2xl p-2.5 sm:p-4 shadow-xs space-y-2"
+          className="lg:col-span-7 bg-white border-2 border-blue-600/80 rounded-2xl p-2 sm:p-3.5 shadow-xs space-y-1.5"
         >
-          {/* Row 1: Compact Date + Morning/Evening Switch + Today's Saved Totals Bar */}
+          {/* Row 1: Ultra-Compact Date + Morning/Evening Switch + Today's Saved Totals + Live Preview */}
           <div
             data-testid="mobile-keyboard-live-bar"
-            className={`rounded-xl bg-slate-900 text-white px-2.5 py-2 space-y-1.5 border ${
+            className={`rounded-xl bg-slate-900 text-white px-2 py-1.5 space-y-1 border ${
               isInputFocused ? 'border-blue-400' : 'border-slate-800'
             }`}
           >
-            <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-slate-700/80 pb-1.5">
+            <div className="flex items-center justify-between gap-1 border-b border-slate-700/80 pb-1">
               {/* Date & Shift inline selector */}
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <Calendar className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+              <div className="flex items-center gap-1 min-w-0">
+                <Calendar className="w-3 h-3 text-blue-400 shrink-0 hidden sm:inline" />
                 <input
                   id="collection-date"
                   type="date"
                   aria-label="Collection Date"
                   value={date}
                   onChange={(e) => onChangeDate(e.target.value)}
-                  className="text-xs font-bold bg-slate-800 text-white px-1.5 py-0.5 rounded border border-slate-700 focus:outline-none tabular-nums"
+                  className="text-[11px] font-bold bg-slate-800 text-white px-1 py-0.5 rounded border border-slate-700 focus:outline-none tabular-nums w-[108px] sm:w-auto"
                 />
                 <span
                   data-testid="collection-date-dmy-badge"
-                  className="text-[11px] font-extrabold text-amber-300 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 tabular-nums"
+                  className="hidden sm:inline-block text-[10px] font-extrabold text-amber-300 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 tabular-nums"
                 >
                   {formatDateDMY(date)}
                 </span>
-                <div className="flex items-center bg-slate-800 p-0.5 rounded-lg border border-slate-700">
+                <div className="flex items-center bg-slate-800 p-0.5 rounded-md border border-slate-700 shrink-0">
                   <button
                     type="button"
                     onClick={() => onChangeShift('morning')}
-                    className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 ${
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-0.5 ${
                       shift === 'morning' ? 'bg-blue-600 text-white' : 'text-slate-300'
                     }`}
                   >
-                    <Sun className="w-3 h-3" />
+                    <Sun className="w-2.5 h-2.5" />
                     {lang === 'hi' ? 'सुबह' : 'AM'}
                   </button>
                   <button
                     type="button"
                     onClick={() => onChangeShift('evening')}
-                    className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 ${
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-0.5 ${
                       shift === 'evening' ? 'bg-blue-600 text-white' : 'text-slate-300'
                     }`}
                   >
-                    <Moon className="w-3 h-3" />
+                    <Moon className="w-2.5 h-2.5" />
                     {lang === 'hi' ? 'शाम' : 'PM'}
                   </button>
                 </div>
               </div>
 
               {/* Today's Saved Totals (Strictly separated from current unsaved entry) */}
-              <div className="flex items-center gap-2 text-[11px] tabular-nums">
-                <span className="text-slate-400 flex items-center gap-1">
-                  <Keyboard className="w-3 h-3 text-blue-400" />
+              <div className="flex items-center gap-1 text-[10px] tabular-nums shrink-0">
+                <span className="text-slate-400 hidden sm:flex items-center gap-0.5">
+                  <Keyboard className="w-2.5 h-2.5 text-blue-400" />
                   {lang === 'hi' ? 'आज सेव:' : 'Saved:'}
                 </span>
                 <span
                   data-testid="today-saved-liters"
-                  className="font-bold text-white bg-slate-800 px-1.5 py-0.5 rounded"
+                  className="font-bold text-white bg-slate-800 px-1 py-0.5 rounded"
                 >
-                  {formatNumber(todaySavedSummary.totalLiters, 3)} L
+                  {formatNumber(todaySavedSummary.totalLiters, 2)}L
                 </span>
                 <span className="hidden sm:inline text-amber-300 font-semibold">
-                  F:{' '}
+                  F:
                   <strong data-testid="today-saved-avg-fat">
                     {formatNumber(todaySavedSummary.avgFat, 2)}
                   </strong>
                 </span>
                 <span className="hidden sm:inline text-cyan-300 font-semibold">
-                  S:{' '}
+                  S:
                   <strong data-testid="today-saved-avg-snf">
                     {formatNumber(todaySavedSummary.avgSnf, 2)}
                   </strong>
                 </span>
                 <span
                   data-testid="today-saved-amount"
-                  className="font-bold text-emerald-400 bg-slate-800 px-1.5 py-0.5 rounded"
+                  className="font-bold text-emerald-400 bg-slate-800 px-1 py-0.5 rounded"
                 >
                   {formatWholeCurrency(todaySavedSummary.totalAmount)}
                 </span>
@@ -1463,13 +1497,13 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
             {/* Row 2: Ultra-Compact Live Preview Strip (FAT · SNF · Qty · Rate/L · Total Amount) */}
             <div
               data-testid="live-collection-preview"
-              className="grid grid-cols-5 gap-1 text-center tabular-nums items-center bg-blue-950/90 border border-blue-700/70 rounded-lg px-1.5 py-1"
+              className="grid grid-cols-5 gap-1 text-center tabular-nums items-center bg-blue-950/90 border border-blue-700/70 rounded-lg px-1 py-0.5"
             >
               <div>
-                <span className="block text-[9px] text-blue-300 leading-tight">
-                  {lang === 'hi' ? 'प्रकार / FAT' : 'Type / FAT'}
+                <span className="block text-[8px] text-blue-300 leading-none">
+                  {lang === 'hi' ? 'प्रकार/FAT' : 'Type/FAT'}
                 </span>
-                <span className="text-[11px] sm:text-xs font-bold text-white leading-tight block truncate">
+                <span className="text-[10px] sm:text-xs font-bold text-white leading-tight block truncate">
                   <span data-testid="live-preview-milk-type">
                     {effectiveMilkType === 'cow'
                       ? lang === 'hi'
@@ -1486,43 +1520,43 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               </div>
 
               <div>
-                <span className="block text-[9px] text-blue-300 leading-tight">SNF</span>
-                <span className="text-xs font-bold text-white leading-tight">
+                <span className="block text-[8px] text-blue-300 leading-none">SNF</span>
+                <span className="text-[11px] font-bold text-white leading-tight">
                   {hasValidSnf ? snfNum.toFixed(1) : '—'}
                 </span>
               </div>
 
               <div>
-                <span className="block text-[9px] text-blue-300 leading-tight">
+                <span className="block text-[8px] text-blue-300 leading-none">
                   {lang === 'hi' ? 'मात्रा (L)' : 'Qty (L)'}
                 </span>
                 <span
                   data-testid="live-preview-liters"
-                  className="text-xs font-bold text-white leading-tight"
+                  className="text-[11px] font-bold text-white leading-tight"
                 >
                   {hasValidLiters ? formatNumber(litersNum, 3) : '—'}
                 </span>
               </div>
 
               <div>
-                <span className="block text-[9px] text-cyan-300 leading-tight">
+                <span className="block text-[8px] text-cyan-300 leading-none">
                   {lang === 'hi' ? 'रेट/L' : 'Rate/L'}
                 </span>
                 <span
                   data-testid="live-preview-rate"
-                  className="text-xs font-bold text-cyan-300 leading-tight"
+                  className="text-[11px] font-bold text-cyan-300 leading-tight"
                 >
                   {liveRate !== null ? formatCurrency(liveRate) : '—'}
                 </span>
               </div>
 
               <div className="bg-emerald-900/90 border border-emerald-500/60 rounded px-1 py-0.5">
-                <span className="block text-[9px] text-emerald-200 leading-tight">
-                  {lang === 'hi' ? 'कुल रकम (पूर्णांक)' : 'Total Amt'}
+                <span className="block text-[8px] text-emerald-200 leading-none">
+                  {lang === 'hi' ? 'कुल रकम' : 'Total Amt'}
                 </span>
                 <span
                   data-testid="live-preview-amount"
-                  className="text-xs sm:text-sm font-bold text-emerald-300 leading-tight"
+                  className="text-[11px] sm:text-xs font-bold text-emerald-300 leading-tight"
                 >
                   {liveTotalAmount !== null ? formatWholeCurrency(liveTotalAmount) : '—'}
                 </span>
@@ -1531,7 +1565,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
 
             {/* Warning if rate chart not found */}
             {hasValidFat && hasValidSnf && !rateLookup.found && (
-              <div className="flex items-center justify-between gap-2 text-[11px] text-amber-200 bg-amber-950/90 px-2 py-1 rounded border border-amber-600/60">
+              <div className="flex items-center justify-between gap-2 text-[10px] text-amber-200 bg-amber-950/90 px-2 py-0.5 rounded border border-amber-600/60">
                 <span className="truncate">
                   {lang === 'hi' ? rateLookup.warningHi : rateLookup.warningEn}
                 </span>
@@ -1539,7 +1573,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   <button
                     type="button"
                     onClick={() => onNavigate('ratechart')}
-                    className="px-2 py-0.5 bg-amber-500 text-slate-950 font-bold rounded shrink-0 text-[10px]"
+                    className="px-1.5 py-0.5 bg-amber-500 text-slate-950 font-bold rounded shrink-0 text-[9px]"
                   >
                     {lang === 'hi' ? 'रेट चार्ट इंपोर्ट' : 'Import Chart'}
                   </button>
@@ -1548,7 +1582,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
             )}
           </div>
 
-          {/* COMPACT SINGLE-VIEW ENTRY FORM (All fields side-by-side above mobile keyboard) */}
+          {/* COMPACT SINGLE-VIEW ENTRY FORM (Fits 100% above mobile keyboard without swiping) */}
           <form
             onSubmit={handleSubmit}
             onFocus={() => setIsInputFocused(true)}
@@ -1557,24 +1591,24 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 setIsInputFocused(false);
               }
             }}
-            className="space-y-2"
+            className="space-y-1.5"
           >
-            {/* Row 3: Farmer Select (8 cols) + Milk Type Override (4 cols) in ONE row */}
+            {/* Row 3: Farmer Select (8 cols) + Milk Type Override (4 cols) in ONE compact row */}
             <div className="grid grid-cols-12 gap-1.5 items-end">
               <div className="col-span-8">
                 <div className="flex items-center justify-between mb-0.5">
                   <label
                     htmlFor="col-farmer-select"
-                    className="text-[11px] font-bold text-slate-700"
+                    className="text-[10px] font-bold text-slate-700 leading-none"
                   >
-                    {lang === 'hi' ? 'किसान चुनें *' : 'Farmer *'}
+                    {lang === 'hi' ? 'किसान चुनें (कोड क्रमानुसार) *' : 'Farmer (By Code) *'}
                     {selectedFarmerObj ? ` (${selectedFarmerObj.code})` : ''}
                   </label>
                   {state.farmers.length === 0 && (
                     <button
                       type="button"
                       onClick={() => onNavigate('farmers')}
-                      className="text-[10px] font-bold text-blue-600 hover:underline"
+                      className="text-[10px] font-bold text-blue-600 hover:underline leading-none"
                     >
                       {lang === 'hi' ? '+ किसान जोड़ें' : '+ Add Farmer'}
                     </button>
@@ -1589,7 +1623,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                       setTimeout(() => fatInputRef.current?.focus(), 20);
                     }
                   }}
-                  className="w-full h-9 px-2.5 text-xs font-semibold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  className="w-full h-8 px-2 text-xs font-semibold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                 >
                   <option value="">
                     {lang === 'hi'
@@ -1628,7 +1662,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               <div className="col-span-4">
                 <label
                   htmlFor="col-milk-type"
-                  className="block text-[11px] font-bold text-slate-700 mb-0.5 truncate"
+                  className="block text-[10px] font-bold text-slate-700 mb-0.5 truncate leading-none"
                 >
                   {lang === 'hi' ? 'दूध प्रकार' : 'Milk Type'}
                 </label>
@@ -1636,7 +1670,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   id="col-milk-type"
                   value={milkTypeOverride}
                   onChange={(e) => setMilkTypeOverride(e.target.value as 'auto' | MilkType)}
-                  className="w-full h-9 px-2 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  className="w-full h-8 px-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                 >
                   <option value="auto">
                     {lang === 'hi'
@@ -1654,11 +1688,11 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
             </div>
 
             {/* Row 4: FAT, SNF, AND QUANTITY ALL IN ONE SINGLE HORIZONTAL ROW ON MOBILE (grid-cols-3) */}
-            <div className="grid grid-cols-3 gap-1.5 sm:gap-2.5">
+            <div className="grid grid-cols-3 gap-1.5">
               <div>
                 <label
                   htmlFor="col-fat"
-                  className="block text-[11px] font-bold text-slate-800 mb-0.5 truncate"
+                  className="block text-[10px] font-bold text-slate-800 mb-0.5 truncate leading-none"
                 >
                   {lang === 'hi' ? '1. FAT (51→5.1)*' : '1. FAT *'}
                 </label>
@@ -1671,14 +1705,14 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   placeholder="5.1"
                   value={fatStr}
                   onChange={handleFatChange}
-                  className="w-full h-10 px-2.5 text-sm sm:text-base font-bold font-mono border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
+                  className="w-full h-9 px-2 text-sm font-bold font-mono border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
                 />
               </div>
 
               <div>
                 <label
                   htmlFor="col-snf"
-                  className="block text-[11px] font-bold text-slate-800 mb-0.5 truncate"
+                  className="block text-[10px] font-bold text-slate-800 mb-0.5 truncate leading-none"
                 >
                   {lang === 'hi' ? '2. SNF (85→8.5)*' : '2. SNF *'}
                 </label>
@@ -1691,14 +1725,14 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   placeholder="8.5"
                   value={snfStr}
                   onChange={handleSnfChange}
-                  className="w-full h-10 px-2.5 text-sm sm:text-base font-bold font-mono border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
+                  className="w-full h-9 px-2 text-sm font-bold font-mono border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
                 />
               </div>
 
               <div>
                 <label
                   htmlFor="col-liters"
-                  className="block text-[11px] font-bold text-slate-800 mb-0.5 truncate"
+                  className="block text-[10px] font-bold text-slate-800 mb-0.5 truncate leading-none"
                 >
                   {lang === 'hi' ? '3. मात्रा L (5258)*' : '3. Qty (L) *'}
                 </label>
@@ -1711,30 +1745,30 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   placeholder="5.258"
                   value={litersStr}
                   onChange={handleLitersChange}
-                  className="w-full h-10 px-2.5 text-sm sm:text-base font-bold font-mono border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
+                  className="w-full h-9 px-2 text-sm font-bold font-mono border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-600 tabular-nums"
                 />
               </div>
             </div>
 
-            {/* Row 5: Rate + Total Amount (Whole Integer) + Save Button + Camera Button + Options Toggle */}
-            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            {/* Row 5: Single Non-Wrapping Row for Rate/Total + Save Button + Camera + Gallery (No Swipe Required) */}
+            <div className="flex items-center gap-1 pt-0.5">
               {/* Inline Rate & Total Pill */}
-              <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5 text-xs tabular-nums shrink-0">
+              <div className="flex items-center gap-1.5 bg-blue-50 border border-blue-200 rounded-lg px-2 py-1 text-[11px] tabular-nums shrink-0">
                 <div>
-                  <span className="block text-[9px] text-slate-500 leading-none">
+                  <span className="block text-[8px] text-slate-500 leading-none">
                     {lang === 'hi' ? 'रेट/L' : 'Rate/L'}
                   </span>
-                  <strong className="text-blue-800 font-bold">
+                  <strong className="text-blue-800 font-bold leading-tight">
                     {liveRate !== null ? formatCurrency(liveRate) : '—'}
                   </strong>
                 </div>
-                <div className="border-l border-blue-200 pl-2">
-                  <span className="block text-[9px] text-slate-500 leading-none">
-                    {lang === 'hi' ? 'कुल रकम (पूर्ण)' : 'Total'}
+                <div className="border-l border-blue-200 pl-1.5">
+                  <span className="block text-[8px] text-slate-500 leading-none">
+                    {lang === 'hi' ? 'कुल रकम' : 'Total'}
                   </span>
                   <strong
                     data-testid="inline-live-total-amount"
-                    className="text-emerald-700 font-bold text-xs sm:text-sm"
+                    className="text-emerald-700 font-extrabold text-xs"
                   >
                     {liveTotalAmount !== null ? formatWholeCurrency(liveTotalAmount) : '—'}
                   </strong>
@@ -1743,7 +1777,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                     liveRawTotalAmount !== liveTotalAmount && (
                       <span
                         data-testid="inline-truncated-decimal-hint"
-                        className="ml-1 text-[10px] text-slate-400 line-through"
+                        className="ml-0.5 text-[9px] text-slate-400 line-through hidden sm:inline"
                       >
                         ₹{liveRawTotalAmount.toFixed(2)}
                       </span>
@@ -1756,9 +1790,9 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 ref={saveBtnRef}
                 data-testid="save-collection-btn"
                 type="submit"
-                className="flex-1 min-w-[130px] h-10 px-3 bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-bold rounded-lg shadow-xs transition-colors flex items-center justify-center gap-1.5"
+                className="flex-1 min-w-0 h-9 px-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center justify-center gap-1"
               >
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">
                   {editingId
                     ? lang === 'hi'
@@ -1788,13 +1822,14 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                     ? 'लिखी हुई दूध पर्ची का कैमरा से फोटो खींचकर या गैलरी से अपलोड करके ऑटोमैटिक सेव करें'
                     : 'Take a camera photo or pick from gallery to auto-save milk entry'
                 }
-                className="h-10 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1 shrink-0"
+                className="h-9 px-2 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg shadow-xs flex items-center gap-1 shrink-0"
               >
-                <Camera className="w-4 h-4 shrink-0" />
-                <span>{lang === 'hi' ? 'कैमरा / फोटो' : 'Camera'}</span>
+                <Camera className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{lang === 'hi' ? 'कैमरा / फोटो' : 'Camera'}</span>
+                <span className="sm:hidden">{lang === 'hi' ? 'फोटो' : 'Cam'}</span>
               </button>
 
-              {/* Direct Gallery Photo Picker Button (Opens Phone Gallery without Camera forced) */}
+              {/* Direct Gallery Photo Picker Button */}
               <button
                 type="button"
                 data-testid="direct-gallery-slip-btn"
@@ -1807,29 +1842,11 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                     ? 'गैलरी से लिखी हुई दूध पर्ची का फोटो चुनें'
                     : 'Choose milk slip photo from Gallery'
                 }
-                className="h-10 px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1 shrink-0"
+                className="h-9 px-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold rounded-lg shadow-xs flex items-center gap-1 shrink-0"
               >
-                <ImageIcon className="w-4 h-4 shrink-0" />
-                <span>{lang === 'hi' ? 'गैलरी से फोटो' : 'Gallery'}</span>
-              </button>
-
-              {/* Direct PDF Slip Upload Button (Opens PDF / Document Picker for PDF milk slips) */}
-              <button
-                type="button"
-                data-testid="direct-pdf-slip-btn"
-                onClick={() => {
-                  setCameraError(null);
-                  pdfFileInputRef.current?.click();
-                }}
-                title={
-                  lang === 'hi'
-                    ? 'PDF फाइल से दूध की एंट्री पढ़ें और सेव करें'
-                    : 'Upload PDF file for milk entry'
-                }
-                className="h-10 px-2.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1 shrink-0"
-              >
-                <FileText className="w-4 h-4 shrink-0" />
-                <span>{lang === 'hi' ? 'PDF से एंट्री' : 'PDF Slip'}</span>
+                <ImageIcon className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{lang === 'hi' ? 'गैलरी से फोटो' : 'Gallery'}</span>
+                <span className="sm:hidden">{lang === 'hi' ? 'गैलरी' : 'Gal'}</span>
               </button>
 
               {/* File input 1: Direct Camera Capture (capture="environment", sr-only for Android WebView APK compatibility) */}
@@ -1850,30 +1867,13 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 }}
               />
 
-              {/* File input 2: Phone Gallery / File Picker (NO capture attribute, accepts images & PDFs) */}
+              {/* File input 2: Phone Gallery / File Picker (NO capture attribute, accepts images) */}
               <input
                 ref={galleryFileInputRef}
                 id="gallery-file-input"
                 data-testid="gallery-file-input"
                 type="file"
-                accept="image/*,.pdf,application/pdf"
-                className="sr-only"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) {
-                    handleSlipPhotoFile(file);
-                  }
-                  e.target.value = '';
-                }}
-              />
-
-              {/* File input 3: Dedicated PDF Picker */}
-              <input
-                ref={pdfFileInputRef}
-                id="pdf-file-input"
-                data-testid="pdf-file-input"
-                type="file"
-                accept=".pdf,application/pdf,image/*"
+                accept="image/*"
                 className="sr-only"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -2398,15 +2398,20 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 data-testid={`saved-entry-card-${idx}`}
                 className="bg-white border border-blue-200/90 rounded-2xl p-2.5 sm:p-3.5 shadow-2xs space-y-2"
               >
-                {/* Card Top Header: Circle Index + Code – Farmer Name + Date | Shift | MilkType + Farmer Code Pill */}
+                {/* Card Top Header: Circle Code No + Code – Farmer Name + Date | Shift | MilkType + Farmer Code Pill */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-extrabold text-sm flex items-center justify-center shrink-0 shadow-2xs">
-                      {idx + 1}
+                    <div
+                      data-testid={`saved-entry-code-badge-${idx}`}
+                      className="w-8 h-8 rounded-full bg-blue-600 text-white font-extrabold text-sm flex items-center justify-center shrink-0 shadow-2xs"
+                    >
+                      {entry.farmerCode || idx + 1}
                     </div>
                     <div className="min-w-0">
                       <div className="font-extrabold text-slate-900 text-sm sm:text-base leading-tight truncate">
-                        {entry.farmerCode} – {entry.farmerName}
+                        {/^\d+\s*[-–—]/.test((entry.farmerName || '').trim())
+                          ? entry.farmerName
+                          : `${entry.farmerCode} – ${entry.farmerName}`}
                       </div>
                       <div className="flex items-center gap-1.5 flex-wrap mt-1 text-xs">
                         <span className="font-semibold text-slate-600 tabular-nums">
@@ -2727,12 +2732,97 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
               </button>
             </div>
 
-            {/* Option 1: Separate Camera Capture, Gallery Picker, PDF Picker, and Live Camera Buttons */}
+            {/* Top Date & Shift Bar for Photo Entry (so user can set or verify date BEFORE or AFTER scanning) */}
+            <div className="bg-blue-50/90 border border-blue-200 rounded-xl p-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11px] font-extrabold text-blue-950 flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-700 shrink-0" />
+                  {lang === "hi" ? "पर्ची तारीख:" : "Slip Date:"}
+                </span>
+                <button
+                  type="button"
+                  data-testid="photo-modal-prev-date-btn"
+                  onClick={() => {
+                    const nextD = shiftDateStringByDays(
+                      photoPreviewItems[0]?.entry.date || photoQuickDate || date,
+                      -1
+                    );
+                    handleApplyDateToPreview(nextD);
+                  }}
+                  className="px-2 py-1 rounded-lg bg-white hover:bg-blue-100 border border-blue-300 text-blue-900 text-[11px] font-extrabold"
+                  title={lang === "hi" ? "पिछला दिन (-1)" : "Previous Day"}
+                >
+                  ◀ -1
+                </button>
+                <input
+                  data-testid="photo-modal-top-date-input"
+                  type="date"
+                  aria-label="Photo Slip Date"
+                  value={photoPreviewItems[0]?.entry.date || photoQuickDate || date}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      handleApplyDateToPreview(e.target.value);
+                    }
+                  }}
+                  className="h-8 px-2 text-xs font-extrabold text-blue-950 bg-white border-2 border-blue-400 rounded-lg tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+                <button
+                  type="button"
+                  data-testid="photo-modal-next-date-btn"
+                  onClick={() => {
+                    const nextD = shiftDateStringByDays(
+                      photoPreviewItems[0]?.entry.date || photoQuickDate || date,
+                      1
+                    );
+                    handleApplyDateToPreview(nextD);
+                  }}
+                  className="px-2 py-1 rounded-lg bg-white hover:bg-blue-100 border border-blue-300 text-blue-900 text-[11px] font-extrabold"
+                  title={lang === "hi" ? "अगला दिन (+1)" : "Next Day"}
+                >
+                  +1 ▶
+                </button>
+                <button
+                  type="button"
+                  data-testid="photo-modal-today-date-btn"
+                  onClick={() => handleApplyDateToPreview(date)}
+                  className="px-2 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-extrabold"
+                >
+                  {lang === "hi" ? "आज" : "Today"}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleApplyShiftToPreview("morning")}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold border ${
+                    (photoPreviewItems[0]?.entry.shift || photoQuickShift || shift) === "morning"
+                      ? "bg-amber-500 text-slate-950 border-amber-600 shadow-2xs"
+                      : "bg-white text-slate-700 border-slate-300"
+                  }`}
+                >
+                  {lang === "hi" ? "☀️ सुबह" : "☀️ AM"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleApplyShiftToPreview("evening")}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold border ${
+                    (photoPreviewItems[0]?.entry.shift || photoQuickShift || shift) === "evening"
+                      ? "bg-indigo-600 text-white border-indigo-700 shadow-2xs"
+                      : "bg-white text-slate-700 border-slate-300"
+                  }`}
+                >
+                  {lang === "hi" ? "🌙 शाम" : "🌙 PM"}
+                </button>
+              </div>
+            </div>
+
+            {/* Option 1: Separate Camera Capture, Gallery Picker, and Live Camera Buttons */}
             <div
               className={
                 photoPreviewItems.length > 0
-                  ? 'grid grid-cols-2 sm:grid-cols-4 gap-1.5'
-                  : 'grid grid-cols-2 sm:grid-cols-4 gap-2'
+                  ? 'grid grid-cols-3 gap-1.5'
+                  : 'grid grid-cols-3 gap-2'
               }
             >
               <button
@@ -2793,21 +2883,6 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                     </span>
                   </>
                 )}
-              </button>
-
-              <button
-                type="button"
-                data-testid="modal-pdf-slip-btn"
-                disabled={isScanningSlip}
-                onClick={() => pdfFileInputRef.current?.click()}
-                className={`${
-                  photoPreviewItems.length > 0 ? 'min-h-[36px] px-2 py-1.5 text-[11px]' : 'min-h-[44px] px-2.5 py-2 text-xs'
-                } bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold rounded-xl flex items-center justify-center gap-1 shadow-xs`}
-              >
-                <FileText className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">
-                  {lang === 'hi' ? 'PDF अपलोड करें' : 'Upload PDF'}
-                </span>
               </button>
 
               {!isLiveCameraActive ? (
@@ -2927,6 +3002,19 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <button
                       type="button"
+                      data-testid="top-confirm-photo-preview-save-btn"
+                      onClick={() => handleConfirmSavePhotoPreview(false)}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-lg shadow-xs flex items-center gap-1"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {lang === 'hi'
+                          ? `एक बार में सेव करें (${photoPreviewItems.length})`
+                          : `1-Click Save (${photoPreviewItems.length})`}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
                       data-testid="preview-add-empty-row-btn"
                       onClick={() => {
                         setPreviewDrafts({});
@@ -3021,7 +3109,48 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                     </select>
                   </div>
 
-                  <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                  {/* Batch Date Selector: Apply single date to all preview rows in 1 tap */}
+                  <div className="flex items-center justify-between gap-1.5 flex-wrap pt-1 border-t border-slate-100">
+                    <div className="flex items-center gap-1 flex-wrap">
+                      <span className="text-[11px] font-extrabold text-blue-950">
+                        {lang === 'hi' ? 'सब पर तारीख:' : 'All Date:'}
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="preview-date-prev-day-btn"
+                        onClick={() => {
+                          const baseD = photoPreviewItems[0]?.entry.date || photoQuickDate || date;
+                          handleApplyDateToPreview(shiftDateStringByDays(baseD, -1));
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-900 text-[10px] font-extrabold"
+                      >
+                        ◀ -1
+                      </button>
+                      <input
+                        data-testid="preview-apply-all-date-input"
+                        type="date"
+                        aria-label="Apply Date to All Preview Entries"
+                        value={photoPreviewItems[0]?.entry.date || photoQuickDate || date}
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            handleApplyDateToPreview(e.target.value);
+                          }
+                        }}
+                        className="h-7 px-1.5 text-xs font-extrabold text-blue-950 bg-blue-50/70 border border-blue-400 rounded-md tabular-nums"
+                      />
+                      <button
+                        type="button"
+                        data-testid="preview-date-next-day-btn"
+                        onClick={() => {
+                          const baseD = photoPreviewItems[0]?.entry.date || photoQuickDate || date;
+                          handleApplyDateToPreview(shiftDateStringByDays(baseD, 1));
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-900 text-[10px] font-extrabold"
+                      >
+                        +1 ▶
+                      </button>
+                    </div>
+
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
@@ -3040,10 +3169,12 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                         {lang === 'hi' ? '🌙 सब शाम' : '🌙 All PM'}
                       </button>
                     </div>
+                  </div>
 
+                  <div className="flex items-center justify-between gap-1.5 flex-wrap pt-1 border-t border-slate-100">
                     <div className="flex items-center gap-1 flex-wrap">
                       <span className="text-[10px] font-bold text-slate-600">
-                        {lang === 'hi' ? 'तारीख क्रम:' : 'Dates:'}
+                        {lang === 'hi' ? '10-दिन पासबुक तारीख क्रम:' : '10-Day Cycle Dates:'}
                       </span>
                       <button
                         type="button"
@@ -3116,7 +3247,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                         const rateDraftKey = `${idx}_rate`;
 
                         return (
-                          <React.Fragment key={en.id || idx}>
+                          <React.Fragment key={`preview-row-${idx}`}>
                             {/* Sub-Row 1: Full-Width Farmer + Date (DD-MM-YYYY) + Shift + Animal + Status + Delete */}
                             <tr
                               data-testid={`photo-preview-row-${idx}`}
@@ -3160,15 +3291,22 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                                     </select>
                                   </div>
 
-                                  {/* Right: DD-MM-YYYY Date Picker Badge + Shift Toggle + Animal Toggle + Delete */}
+                                  {/* Right: Direct Visible Date Input + Step Buttons + Shift Toggle + Animal Toggle + Delete */}
                                   <div className="flex items-center gap-1 flex-wrap">
-                                    {/* Relative DD-MM-YYYY Date Badge with transparent native date input overlay */}
-                                    <label
-                                      className="relative inline-flex items-center gap-1 px-2 py-1 rounded-md bg-white border border-blue-300 text-blue-950 text-[11px] font-extrabold cursor-pointer hover:bg-blue-50 shadow-2xs"
-                                      title={lang === 'hi' ? 'तारीख बदलने के लिए टैप करें' : 'Tap to change date'}
-                                    >
-                                      <Calendar className="w-3 h-3 text-blue-600 shrink-0" />
-                                      <span>{formatDateDMY(en.date)}</span>
+                                    <div className="inline-flex items-center bg-white border border-blue-400 rounded-md overflow-hidden shadow-2xs">
+                                      <button
+                                        type="button"
+                                        data-testid={`preview-row-date-prev-${idx}`}
+                                        onClick={() =>
+                                          handleUpdatePreviewRow(idx, {
+                                            date: shiftDateStringByDays(en.date, -1),
+                                          })
+                                        }
+                                        className="px-1.5 h-7 bg-blue-50 hover:bg-blue-100 text-blue-900 text-[10px] font-extrabold border-r border-blue-200"
+                                        title={lang === 'hi' ? '-1 दिन' : '-1 Day'}
+                                      >
+                                        -
+                                      </button>
                                       <input
                                         data-testid={`preview-row-date-input-${idx}`}
                                         type="date"
@@ -3179,9 +3317,22 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                                             handleUpdatePreviewRow(idx, { date: e.target.value });
                                           }
                                         }}
-                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                        className="h-7 px-1.5 text-[11px] font-extrabold text-blue-950 bg-white tabular-nums focus:outline-none focus:bg-blue-50"
                                       />
-                                    </label>
+                                      <button
+                                        type="button"
+                                        data-testid={`preview-row-date-next-${idx}`}
+                                        onClick={() =>
+                                          handleUpdatePreviewRow(idx, {
+                                            date: shiftDateStringByDays(en.date, 1),
+                                          })
+                                        }
+                                        className="px-1.5 h-7 bg-blue-50 hover:bg-blue-100 text-blue-900 text-[10px] font-extrabold border-l border-blue-200"
+                                        title={lang === 'hi' ? '+1 दिन' : '+1 Day'}
+                                      >
+                                        +
+                                      </button>
+                                    </div>
 
                                     <button
                                       type="button"
@@ -3286,15 +3437,16 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                             {/* Sub-Row 2: 5 Spacious Data Cells with Crisp Vertical Lines (Liters | FAT | SNF | Rate | Amount) */}
                             <tr className="bg-white">
                               {/* Col 1: Liters */}
-                              <td className="p-1.5 border border-slate-300 text-center align-middle">
+                              <td className="p-1 border border-slate-300 text-center align-middle">
                                 <input
                                   data-testid={`preview-row-liters-input-${idx}`}
                                   type="text"
                                   inputMode="decimal"
                                   aria-label={`Row ${idx + 1} Liters`}
                                   value={previewDrafts[litDraftKey] ?? String(en.liters)}
+                                  onFocus={(e) => e.currentTarget.select()}
                                   onChange={(e) => {
-                                    const raw = e.target.value.replace(/[^0-9.]/g, '');
+                                    const raw = cleanDecimalInput(e.target.value);
                                     setPreviewDrafts((prev) => ({ ...prev, [litDraftKey]: raw }));
                                     const v = Number(raw);
                                     if (raw !== '' && !raw.endsWith('.') && Number.isFinite(v) && v > 0) {
@@ -3308,20 +3460,21 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                                       return next;
                                     });
                                   }}
-                                  className="w-full h-8 px-1 text-center font-extrabold text-sm sm:text-base text-slate-950 bg-blue-50/50 focus:bg-white border border-blue-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                  className="w-full h-8 px-0.5 text-center font-extrabold text-xs sm:text-sm text-slate-950 bg-blue-50/50 focus:bg-white border border-blue-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600"
                                 />
                               </td>
 
                               {/* Col 2: FAT */}
-                              <td className="p-1.5 border border-slate-300 text-center align-middle">
+                              <td className="p-1 border border-slate-300 text-center align-middle">
                                 <input
                                   data-testid={`preview-row-fat-input-${idx}`}
                                   type="text"
                                   inputMode="decimal"
                                   aria-label={`Row ${idx + 1} FAT`}
                                   value={previewDrafts[fatDraftKey] ?? String(en.fat)}
+                                  onFocus={(e) => e.currentTarget.select()}
                                   onChange={(e) => {
-                                    const raw = e.target.value.replace(/[^0-9.]/g, '');
+                                    const raw = cleanDecimalInput(e.target.value);
                                     setPreviewDrafts((prev) => ({ ...prev, [fatDraftKey]: raw }));
                                     const v = Number(raw);
                                     if (raw !== '' && !raw.endsWith('.') && Number.isFinite(v) && v > 0) {
@@ -3335,20 +3488,21 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                                       return next;
                                     });
                                   }}
-                                  className="w-full h-8 px-1 text-center font-extrabold text-sm sm:text-base text-amber-950 bg-amber-50/70 focus:bg-white border border-amber-300 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-600"
+                                  className="w-full h-8 px-0.5 text-center font-extrabold text-xs sm:text-sm text-amber-950 bg-amber-50/70 focus:bg-white border border-amber-300 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-600"
                                 />
                               </td>
 
                               {/* Col 3: SNF */}
-                              <td className="p-1.5 border border-slate-300 text-center align-middle">
+                              <td className="p-1 border border-slate-300 text-center align-middle">
                                 <input
                                   data-testid={`preview-row-snf-input-${idx}`}
                                   type="text"
                                   inputMode="decimal"
                                   aria-label={`Row ${idx + 1} SNF`}
                                   value={previewDrafts[snfDraftKey] ?? String(en.snf)}
+                                  onFocus={(e) => e.currentTarget.select()}
                                   onChange={(e) => {
-                                    const raw = e.target.value.replace(/[^0-9.]/g, '');
+                                    const raw = cleanDecimalInput(e.target.value);
                                     setPreviewDrafts((prev) => ({ ...prev, [snfDraftKey]: raw }));
                                     const v = Number(raw);
                                     if (raw !== '' && !raw.endsWith('.') && Number.isFinite(v) && v > 0) {
@@ -3362,20 +3516,21 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                                       return next;
                                     });
                                   }}
-                                  className="w-full h-8 px-1 text-center font-extrabold text-sm sm:text-base text-indigo-950 bg-indigo-50/70 focus:bg-white border border-indigo-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-600"
+                                  className="w-full h-8 px-0.5 text-center font-extrabold text-xs sm:text-sm text-indigo-950 bg-indigo-50/70 focus:bg-white border border-indigo-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-600"
                                 />
                               </td>
 
                               {/* Col 4: Rate */}
-                              <td className="p-1.5 border border-slate-300 text-center align-middle">
+                              <td className="p-1 border border-slate-300 text-center align-middle">
                                 <input
                                   data-testid={`preview-row-rate-input-${idx}`}
                                   type="text"
                                   inputMode="decimal"
                                   aria-label={`Row ${idx + 1} Rate`}
                                   value={previewDrafts[rateDraftKey] ?? String(en.rate)}
+                                  onFocus={(e) => e.currentTarget.select()}
                                   onChange={(e) => {
-                                    const raw = e.target.value.replace(/[^0-9.]/g, '');
+                                    const raw = cleanDecimalInput(e.target.value);
                                     setPreviewDrafts((prev) => ({ ...prev, [rateDraftKey]: raw }));
                                     const v = Number(raw);
                                     if (raw !== '' && !raw.endsWith('.') && Number.isFinite(v) && v > 0) {
@@ -3389,7 +3544,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                                       return next;
                                     });
                                   }}
-                                  className="w-full h-8 px-1 text-center font-extrabold text-sm sm:text-base text-blue-900 bg-slate-50 focus:bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                  className="w-full h-8 px-0.5 text-center font-extrabold text-xs sm:text-sm text-blue-900 bg-slate-50 focus:bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-600"
                                 />
                               </td>
 
@@ -3413,31 +3568,45 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 {/* Preview Summary & Primary Confirm Save Button */}
                 {(() => {
                   const savable = photoPreviewItems.filter((p) => !p.isDuplicate);
+                  const effectiveTarget = savable.length > 0 ? savable : photoPreviewItems;
                   const duplicateCount = photoPreviewItems.length - savable.length;
                   const totalPreviewLiters = round3(
-                    savable.reduce((s, p) => s + p.entry.liters, 0)
+                    effectiveTarget.reduce((s, p) => s + p.entry.liters, 0)
                   );
                   const totalPreviewAmount = truncatePurchaseAmount(
-                    savable.reduce((s, p) => s + truncatePurchaseAmount(p.entry.totalAmount), 0)
+                    effectiveTarget.reduce(
+                      (s, p) => s + truncatePurchaseAmount(p.entry.totalAmount),
+                      0
+                    )
                   );
                   return (
                     <div className="bg-white border border-emerald-300 rounded-xl p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                       <div className="text-xs font-extrabold text-slate-900 tabular-nums">
                         {lang === 'hi' ? (
                           <>
-                            सेव होने योग्य: <span className="text-emerald-700">{savable.length} एंट्री</span>
-                            {duplicateCount > 0 && (
+                            सेव होने योग्य:{' '}
+                            <span className="text-emerald-700">
+                              {effectiveTarget.length} एंट्री
+                            </span>
+                            {duplicateCount > 0 && savable.length > 0 && (
                               <span className="text-red-600 ml-1.5">
                                 (पहले से मौजूद: {duplicateCount})
                               </span>
                             )}{' '}
-                            · कुल दूध: <span className="text-blue-900">{formatNumber(totalPreviewLiters, 2)} L</span> · कुल रकम:{' '}
-                            <span className="text-emerald-700 text-sm">{formatWholeCurrency(totalPreviewAmount)}</span>
+                            · कुल दूध:{' '}
+                            <span className="text-blue-900">
+                              {formatNumber(totalPreviewLiters, 2)} L
+                            </span>{' '}
+                            · कुल रकम:{' '}
+                            <span className="text-emerald-700 text-sm">
+                              {formatWholeCurrency(totalPreviewAmount)}
+                            </span>
                           </>
                         ) : (
                           <>
-                            Ready: {savable.length} · Duplicates: {duplicateCount} · Total:{' '}
-                            {formatNumber(totalPreviewLiters, 2)} L ({formatWholeCurrency(totalPreviewAmount)})
+                            Ready: {effectiveTarget.length} · Duplicates: {duplicateCount} · Total:{' '}
+                            {formatNumber(totalPreviewLiters, 2)} L (
+                            {formatWholeCurrency(totalPreviewAmount)})
                           </>
                         )}
                       </div>
@@ -3445,15 +3614,17 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                       <button
                         type="button"
                         data-testid="confirm-photo-preview-save-btn"
-                        disabled={savable.length === 0}
-                        onClick={handleConfirmSavePhotoPreview}
+                        disabled={photoPreviewItems.length === 0}
+                        onClick={() => handleConfirmSavePhotoPreview(false)}
                         className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:text-slate-600 text-white text-xs sm:text-sm font-extrabold rounded-xl shadow-sm flex items-center justify-center gap-2"
                       >
                         <CheckCircle2 className="w-4 h-4 shrink-0" />
                         <span>
                           {lang === 'hi'
-                            ? `प्रिव्यू कन्फर्म करें और सेव करें (${savable.length} एंट्री)`
-                            : `Confirm Preview & Save (${savable.length})`}
+                            ? savable.length > 0
+                              ? `एक बार में ही एंट्री सेव करें (${savable.length} एंट्री)`
+                              : `एक बार में सभी एंट्री अपडेट व सेव करें (${photoPreviewItems.length} एंट्री)`
+                            : `Confirm Preview & Save (${effectiveTarget.length})`}
                         </span>
                       </button>
                     </div>
@@ -3952,7 +4123,7 @@ export const CollectionView: React.FC<CollectionViewProps> = ({
                 data-testid="camera-slip-text-save-btn"
                 onClick={() => {
                   setCameraError(null);
-                  const rows = parseMilkSlipTextToRows(slipManualText, date, shift);
+                  const rows = parseMilkSlipTextToRows(slipManualText, photoQuickDate || date, photoQuickShift || shift, state.farmers);
                   stageScannedRowsForPreview(
                     rows,
                     photoQuickFarmerId || farmerId || scheduledForShiftFarmers[0]?.id || state.farmers[0]?.id
