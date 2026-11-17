@@ -161,6 +161,11 @@ export interface TenDayBill {
   previousBalance: number;
   netPayable: number;
   billPayableBeforePayment?: number;
+  remainingToPayInCurrentCycle?: number;
+  nextCycleCarryForward?: number;
+  advanceAdjustedInCurrentCycle?: number;
+  excessAdvanceForNextCycle?: number;
+  hasPaymentInPeriod?: boolean;
   previousCycleLabelHi?: string;
   previousBillPayableBeforePayment?: number;
   previousBillPaidAmount?: number;

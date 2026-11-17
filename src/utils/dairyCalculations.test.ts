@@ -39,6 +39,9 @@ import {
   sortCollectionsByFarmerCode,
   sortSalesByCustomerCode,
   buildAllFarmersTenDayBillRows,
+  calculateTenDayCyclePaymentSummary,
+  getDefaultBillingCycleForDate,
+  formatBulkSaleQuantity,
 } from './dairyCalculations';
 import {
   createInitialEmptyState,
@@ -2352,3 +2355,104 @@ test("Photo Entry: Header/spaced Date extraction, zero 2-3 duplicate entries per
   assert.equal(editedBuilt.previewItems[0].entry.liters, 2.5);
 });
 
+test("NEW FEATURE: 10-Day Cycle Paid vs Remaining (Unpaid Farmers Only), Advance <= vs > 10-Day Bill Carry-Forward, 17th Date Previous Cycle Default, and Bulk Sale Quantity No Auto-Dot", () => {
+  // 1. 17th-date previous-cycle default rule:
+  // On 11th, 15th, 16th, 17th of the month, default billing cycle MUST remain Cycle 1 (1 से 10 तारीख — पिछला बिल)
+  assert.deepEqual(getDefaultBillingCycleForDate("2026-11-11"), {
+    yearMonth: "2026-11",
+    cycle: 1,
+    isPreviousCycleGraceWindow: true,
+  });
+  assert.deepEqual(getDefaultBillingCycleForDate("2026-11-15"), {
+    yearMonth: "2026-11",
+    cycle: 1,
+    isPreviousCycleGraceWindow: true,
+  });
+  assert.deepEqual(getDefaultBillingCycleForDate("2026-11-16"), {
+    yearMonth: "2026-11",
+    cycle: 1,
+    isPreviousCycleGraceWindow: true,
+  });
+  assert.deepEqual(getDefaultBillingCycleForDate("2026-11-17"), {
+    yearMonth: "2026-11",
+    cycle: 1,
+    isPreviousCycleGraceWindow: true,
+  });
+  // From 18th to 20th, switches to Cycle 2 (11 से 20 तारीख)
+  assert.deepEqual(getDefaultBillingCycleForDate("2026-11-18"), {
+    yearMonth: "2026-11",
+    cycle: 2,
+    isPreviousCycleGraceWindow: false,
+  });
+
+  // 2. Bulk Milk Sale Quantity Formatter: must NEVER auto-insert a decimal point on multi-digit integers
+  assert.equal(formatBulkSaleQuantity("50"), "50");
+  assert.equal(formatBulkSaleQuantity("125"), "125");
+  assert.equal(formatBulkSaleQuantity("5258"), "5258");
+  assert.equal(formatBulkSaleQuantity("125.5"), "125.5");
+
+  // 3. 10-Day Cycle Payment, Pending (Unpaid Only), and Advance Carry-Forward Rules:
+  const farmers: Farmer[] = [
+    { id: "f1", code: "1", name: "किसान 1 (अवैतनिक)", mobile: "", village: "", shiftSchedule: "both", openingBalance: 0, notes: "", active: true, createdAt: "" },
+    { id: "f2", code: "2", name: "किसान 2 (कम एडवांस, अवैतनिक)", mobile: "", village: "", shiftSchedule: "both", openingBalance: 0, notes: "", active: true, createdAt: "" },
+    { id: "f3", code: "3", name: "किसान 3 (ज्यादा एडवांस)", mobile: "", village: "", shiftSchedule: "both", openingBalance: 0, notes: "", active: true, createdAt: "" },
+    { id: "f4", code: "4", name: "किसान 4 (भुगतान हो गया - कम दिया)", mobile: "", village: "", shiftSchedule: "both", openingBalance: 0, notes: "", active: true, createdAt: "" },
+    { id: "f5", code: "5", name: "किसान 5 (भुगतान हो गया - ज्यादा दिया)", mobile: "", village: "", shiftSchedule: "both", openingBalance: 0, notes: "", active: true, createdAt: "" },
+  ];
+
+  const collections: MilkCollectionEntry[] = [
+    // Cycle 1 (1–10 Nov):
+    { id: "c1", date: "2026-11-05", time: "07:00", shift: "morning", farmerId: "f1", farmerCode: "1", farmerName: "किसान 1", milkType: "cow", liters: 50, fat: 4.5, snf: 8.5, rate: 60, totalAmount: 3000, deduction: 0, netPayable: 3000, notes: "", createdAt: "" },
+    { id: "c2", date: "2026-11-05", time: "07:00", shift: "morning", farmerId: "f2", farmerCode: "2", farmerName: "किसान 2", milkType: "cow", liters: 50, fat: 4.5, snf: 8.5, rate: 50, totalAmount: 2500, deduction: 0, netPayable: 2500, notes: "", createdAt: "" },
+    { id: "c3", date: "2026-11-05", time: "07:00", shift: "morning", farmerId: "f3", farmerCode: "3", farmerName: "किसान 3", milkType: "cow", liters: 40, fat: 4.5, snf: 8.5, rate: 50, totalAmount: 2000, deduction: 0, netPayable: 2000, notes: "", createdAt: "" },
+    { id: "c4", date: "2026-11-05", time: "07:00", shift: "morning", farmerId: "f4", farmerCode: "4", farmerName: "किसान 4", milkType: "cow", liters: 80, fat: 4.5, snf: 8.5, rate: 50, totalAmount: 4000, deduction: 0, netPayable: 4000, notes: "", createdAt: "" },
+    { id: "c5", date: "2026-11-05", time: "07:00", shift: "morning", farmerId: "f5", farmerCode: "5", farmerName: "किसान 5", milkType: "cow", liters: 30, fat: 4.5, snf: 8.5, rate: 50, totalAmount: 1500, deduction: 0, netPayable: 1500, notes: "", createdAt: "" },
+    // Cycle 2 (11–20 Nov) entries to verify carry-forward into next cycle:
+    { id: "c3_next", date: "2026-11-15", time: "07:00", shift: "morning", farmerId: "f3", farmerCode: "3", farmerName: "किसान 3", milkType: "cow", liters: 30, fat: 4.5, snf: 8.5, rate: 50, totalAmount: 1500, deduction: 0, netPayable: 1500, notes: "", createdAt: "" },
+    { id: "c4_next", date: "2026-11-15", time: "07:00", shift: "morning", farmerId: "f4", farmerCode: "4", farmerName: "किसान 4", milkType: "cow", liters: 30, fat: 4.5, snf: 8.5, rate: 50, totalAmount: 1500, deduction: 0, netPayable: 1500, notes: "", createdAt: "" },
+    { id: "c5_next", date: "2026-11-15", time: "07:00", shift: "morning", farmerId: "f5", farmerCode: "5", farmerName: "किसान 5", milkType: "cow", liters: 30, fat: 4.5, snf: 8.5, rate: 50, totalAmount: 1500, deduction: 0, netPayable: 1500, notes: "", createdAt: "" },
+  ];
+
+  const advancesAndPayments: AdvancePaymentEntry[] = [
+    // Farmer 2: Advance ₹500 (< ₹2500 milk amount -> adjusted in Cycle 1 itself, ₹2000 remaining to pay)
+    { id: "adv2", txnCode: "ADV-2", date: "2026-11-04", farmerId: "f2", farmerName: "किसान 2", type: "advance", amount: 500, paymentMethod: "cash", billingYearMonth: "2026-11", billingCycle: 1, notes: "", createdAt: "" },
+    // Farmer 3: Advance ₹2600 (> ₹2000 milk amount -> ₹0 remaining to pay in Cycle 1, excess ₹600 deducted from Cycle 2)
+    { id: "adv3", txnCode: "ADV-3", date: "2026-11-04", farmerId: "f3", farmerName: "किसान 3", type: "advance", amount: 2600, paymentMethod: "cash", billingYearMonth: "2026-11", billingCycle: 1, notes: "", createdAt: "" },
+    // Farmer 4: Paid ₹3800 for ₹4000 bill -> payment done! Remaining to pay in Cycle 1 MUST be ₹0, and +₹200 carries to Cycle 2!
+    { id: "pay4", txnCode: "PAY-4", date: "2026-11-15", farmerId: "f4", farmerName: "किसान 4", type: "payment", amount: 3800, paymentMethod: "cash", billingYearMonth: "2026-11", billingCycle: 1, notes: "", createdAt: "" },
+    // Farmer 5: Paid ₹1700 for ₹1500 bill -> payment done! Remaining to pay in Cycle 1 MUST be ₹0, and -₹200 carries to Cycle 2!
+    { id: "pay5", txnCode: "PAY-5", date: "2026-11-16", farmerId: "f5", farmerName: "किसान 5", type: "payment", amount: 1700, paymentMethod: "cash", billingYearMonth: "2026-11", billingCycle: 1, notes: "", createdAt: "" },
+  ];
+
+  const summaryC1 = calculateTenDayCyclePaymentSummary(
+    farmers,
+    "2026-11",
+    1,
+    collections,
+    advancesAndPayments,
+    []
+  );
+
+  // Only Farmer 1 (₹3000) and Farmer 2 (₹2500 - ₹500 = ₹2000) are unpaid in Cycle 1 -> totalRemainingToPayInCycle = ₹5000!
+  // Farmer 4's ₹200 short payment is NOT in totalRemainingToPayInCycle!
+  assert.equal(summaryC1.totalRemainingToPayInCycle, 5000);
+  assert.equal(summaryC1.unpaidFarmerCount, 2);
+  assert.equal(summaryC1.totalPaymentsMade, 5500); // 3800 + 1700
+  assert.equal(summaryC1.totalAdvancesAdjustedInCycle, 2500); // 500 (Farmer 2) + 2000 (Farmer 3)
+  assert.equal(summaryC1.totalAlreadyPaidInCycle, 8000); // 5500 + 2500
+  assert.equal(summaryC1.nextCycleAddTotal, 200); // Farmer 4's +₹200 short payment
+  assert.equal(summaryC1.nextCycleSubtractTotal, 800); // Farmer 3's -₹600 excess advance + Farmer 5's -₹200 overpayment
+
+  // Verify Cycle 2 bills automatically apply the carry-forwards:
+  const f3Cycle2Bill = generateTenDayBillData(farmers[2], "2026-11", 2, collections, advancesAndPayments, []);
+  assert.equal(f3Cycle2Bill.previousBalance, -600); // ₹600 excess advance subtracted from Cycle 2!
+  assert.equal(f3Cycle2Bill.billPayableBeforePayment, 900); // 1500 - 600 = 900
+
+  const f4Cycle2Bill = generateTenDayBillData(farmers[3], "2026-11", 2, collections, advancesAndPayments, []);
+  assert.equal(f4Cycle2Bill.previousBalance, 200); // ₹200 short payment added to Cycle 2!
+  assert.equal(f4Cycle2Bill.billPayableBeforePayment, 1700); // 1500 + 200 = 1700
+
+  const f5Cycle2Bill = generateTenDayBillData(farmers[4], "2026-11", 2, collections, advancesAndPayments, []);
+  assert.equal(f5Cycle2Bill.previousBalance, -200); // ₹200 overpayment subtracted from Cycle 2!
+  assert.equal(f5Cycle2Bill.billPayableBeforePayment, 1300); // 1500 - 200 = 1300
+});

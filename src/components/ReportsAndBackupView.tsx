@@ -35,6 +35,7 @@ import {
   formatNumber,
   formatWholeCurrency,
   generateTenDaySaleBillData,
+  getDefaultBillingCycleForDate,
   getTenDayCycleDates,
   round2,
   round3,
@@ -217,11 +218,10 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
   const [tenDayReportMode, setTenDayReportMode] = useState<'collection' | 'sale'>('collection');
   const [saleCustomerFilter, setSaleCustomerFilter] = useState<string>('all');
   const [saleReportCycle, setSaleReportCycle] = useState<1 | 2 | 3 | 'custom'>(() => {
-    const dy = Number(state.selectedDate.slice(8, 10)) || 1;
-    return dy <= 10 ? 1 : dy <= 20 ? 2 : 3;
+    return getDefaultBillingCycleForDate(state.selectedDate, state.sales).cycle;
   });
   const [saleReportMonth, setSaleReportMonth] = useState<string>(() =>
-    state.selectedDate.slice(0, 7)
+    getDefaultBillingCycleForDate(state.selectedDate, state.sales).yearMonth
   );
   const [saleWaModal, setSaleWaModal] = useState<{ open: boolean; phone: string; message: string }>({
     open: false,
@@ -310,7 +310,15 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
         return;
       }
 
-      const relRes = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=1`);
+      const [relRes, runsRes] = await Promise.all([
+        fetch(`https://api.github.com/repos/${repo}/releases?per_page=1`),
+        fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=1`),
+      ]);
+
+      let latestApkUrl: string | null = null;
+      let latestTagName = '';
+      let latestReleaseName = '';
+
       if (relRes.ok) {
         const relList = await relRes.json();
         const relData = Array.isArray(relList) ? relList[0] : relList;
@@ -320,19 +328,12 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
             )
           : null;
         if (apkAsset?.browser_download_url) {
-          setGithubCheckState({
-            checking: false,
-            repoExists: true,
-            releaseReady: true,
-            apkDownloadUrl: apkAsset.browser_download_url,
-            messageHi: `APK तैयार है! (${relData.tag_name || 'Latest'} · ${relData.name || ''}) — आप नीचे से सीधा Ujalaa-Dairy-debug.apk डाउनलोड कर सकते हैं।`,
-            messageEn: `APK is ready! (${relData.tag_name || 'Latest'} · ${relData.name || ''}) — You can download Ujalaa-Dairy-debug.apk directly below.`,
-          });
-          return;
+          latestApkUrl = apkAsset.browser_download_url;
+          latestTagName = relData.tag_name || 'Latest';
+          latestReleaseName = relData.name || '';
         }
       }
 
-      const runsRes = await fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=1`);
       if (runsRes.ok) {
         const runsData = await runsRes.json();
         const latestRun = runsData?.workflow_runs?.[0];
@@ -341,25 +342,41 @@ export const ReportsAndBackupView: React.FC<ReportsAndBackupViewProps> = ({
             setGithubCheckState({
               checking: false,
               repoExists: true,
-              releaseReady: false,
-              apkDownloadUrl: null,
-              messageHi: `GitHub Actions पर अभी APK बिल्ड चल रहा है (Run #${latestRun.run_number} — ${latestRun.status})। कृपया 1-2 मिनट बाद "APK स्टेटस अभी जाँचें" दबाएँ।`,
-              messageEn: `GitHub Actions APK build is currently running (Run #${latestRun.run_number}). Please check again in 1-2 minutes.`,
+              releaseReady: Boolean(latestApkUrl),
+              apkDownloadUrl: latestApkUrl,
+              messageHi: latestApkUrl
+                ? `नया APK बिल्ड (Run #${latestRun.run_number}) अभी चल रहा है (1-2 मिनट रुकें)। पिछला तैयार वर्ज़न (${latestTagName}) नीचे उपलब्ध है।`
+                : `GitHub Actions पर अभी APK बिल्ड चल रहा है (Run #${latestRun.run_number} — ${latestRun.status})। कृपया 1-2 मिनट बाद "APK स्टेटस अभी जाँचें" दबाएँ।`,
+              messageEn: latestApkUrl
+                ? `New APK build (Run #${latestRun.run_number}) is in progress. Previous release (${latestTagName}) is available below.`
+                : `GitHub Actions APK build is currently running (Run #${latestRun.run_number}). Please check again in 1-2 minutes.`,
             });
             return;
           }
-          if (latestRun.conclusion === 'failure') {
+          if (!latestApkUrl && latestRun.conclusion === 'failure') {
             setGithubCheckState({
               checking: false,
               repoExists: true,
               releaseReady: false,
               apkDownloadUrl: null,
-              messageHi: `पिछला GitHub Actions बिल्ड (Run #${latestRun.run_number}) पुराने Android SDK स्टेप के कारण रुका था। हमने इस प्रोजेक्ट में .github/workflows/build-apk.yml को ठीक कर दिया है! अब ऊपर AI Studio के GitHub आइकन से एक बार दोबारा GitHub पर Sync/Push करें — इस बार APK 100% बन जाएगी!`,
-              messageEn: `Previous GitHub Actions Run #${latestRun.run_number} failed on the old Android SDK step. We have fixed .github/workflows/build-apk.yml! Please push/sync to GitHub once more from AI Studio.`,
+              messageHi: `पिछला GitHub Actions बिल्ड (Run #${latestRun.run_number}) रुका था। कृपया ऊपर AI Studio के GitHub आइकन से एक बार दोबारा GitHub पर Sync/Push करें।`,
+              messageEn: `Previous GitHub Actions Run #${latestRun.run_number} failed. Please push/sync to GitHub once more from AI Studio.`,
             });
             return;
           }
         }
+      }
+
+      if (latestApkUrl) {
+        setGithubCheckState({
+          checking: false,
+          repoExists: true,
+          releaseReady: true,
+          apkDownloadUrl: latestApkUrl,
+          messageHi: `APK तैयार है! (${latestTagName} · ${latestReleaseName}) — आप नीचे से सीधा Ujalaa-Dairy-debug.apk डाउनलोड कर सकते हैं।`,
+          messageEn: `APK is ready! (${latestTagName} · ${latestReleaseName}) — You can download Ujalaa-Dairy-debug.apk directly below.`,
+        });
+        return;
       }
 
       setGithubCheckState({

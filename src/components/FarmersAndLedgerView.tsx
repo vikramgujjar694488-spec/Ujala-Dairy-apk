@@ -49,6 +49,8 @@ import {
   getTenDayCycleDates,
   normalizeFarmerShiftSchedule,
   buildAllFarmersTenDayBillRows,
+  calculateTenDayCyclePaymentSummary,
+  getDefaultBillingCycleForDate,
   round2,
   round3,
   sortFarmersByCode,
@@ -111,16 +113,21 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
   );
   const [ledgerShiftFilter, setLedgerShiftFilter] = useState<'all' | 'morning' | 'evening'>('all');
 
+  const defaultBillingPeriod = getDefaultBillingCycleForDate(
+    state.selectedDate,
+    state.collections
+  );
+
   // 3. Advance / Payment Form State
   const [editingAdvId, setEditingAdvId] = useState<string | null>(null);
   const [advDate, setAdvDate] = useState<string>(state.selectedDate);
   const [advFarmerId, setAdvFarmerId] = useState<string>('');
   const [advType, setAdvType] = useState<'advance' | 'payment'>('payment');
   const [advBillingYearMonth, setAdvBillingYearMonth] = useState<string>(
-    state.selectedDate.slice(0, 7)
+    defaultBillingPeriod.yearMonth
   );
   const [advBillingCycle, setAdvBillingCycle] = useState<1 | 2 | 3>(
-    getCycleFromDate(state.selectedDate).cycle
+    defaultBillingPeriod.cycle
   );
   const [advTxnCode, setAdvTxnCode] = useState<string>('');
   const [advAmount, setAdvAmount] = useState<string>('');
@@ -143,11 +150,21 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
 
   // 5. 10-Day Billing & Clean Reports State (Only 4 Reports: सुबह, शाम, 10-दिन सुबह-शाम, लाभ-हानि)
   const [billFarmerId, setBillFarmerId] = useState<string>(state.farmers[0]?.id || '');
-  const [billYearMonth, setBillYearMonth] = useState<string>(state.selectedDate.slice(0, 7));
+  const [billYearMonth, setBillYearMonth] = useState<string>(defaultBillingPeriod.yearMonth);
   const [billCycle, setBillCycle] = useState<1 | 2 | 3>(
-    getCycleFromDate(state.selectedDate).cycle
+    defaultBillingPeriod.cycle
   );
   const [activeBill, setActiveBill] = useState<TenDayBill | null>(null);
+
+  // Sync default 10-day billing period when top global selectedDate changes (e.g. up to 17th shows previous cycle!)
+  React.useEffect(() => {
+    const nextPeriod = getDefaultBillingCycleForDate(state.selectedDate, state.collections);
+    setBillYearMonth(nextPeriod.yearMonth);
+    setBillCycle(nextPeriod.cycle);
+    setAdvDate(state.selectedDate);
+    setAdvBillingYearMonth(nextPeriod.yearMonth);
+    setAdvBillingCycle(nextPeriod.cycle);
+  }, [state.selectedDate]);
   const [quickBillPayAmount, setQuickBillPayAmount] = useState<string>('');
   const [quickBillPayMethod, setQuickBillPayMethod] = useState<PaymentMethod>('cash');
   const [quickBillPayNotes, setQuickBillPayNotes] = useState<string>('');
@@ -493,12 +510,18 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
         : bill.previousBalance < 0
         ? `पिछली अवधि का ज्यादा भुगतान समायोजन (-): -${formatWholeCurrency(Math.abs(bill.previousBalance))}`
         : `पिछला बकाया / समायोजन: ₹0`;
-    const carryForwardLine =
-      bill.netPayable > 0
-        ? `*शेष देय राशि (अगली अवधि में जुड़ेगा): ${formatWholeCurrency(bill.netPayable)}*`
+    const hasPaid = (bill.paymentsInPeriod || 0) > 0;
+    const remInCycle =
+      bill.remainingToPayInCurrentCycle ?? (hasPaid ? 0 : Math.max(0, payableBeforePayment));
+    const carryForwardLine = hasPaid
+      ? bill.netPayable > 0
+        ? `*इस साइकिल में देना बाकी: ₹0 (भुगतान हो चुका)*\n*कम भुगतान बकाया (अगली साइकिल में जुड़ेगा): +${formatWholeCurrency(bill.netPayable)}*`
         : bill.netPayable < 0
-        ? `*अतिरिक्त/ज्यादा भुगतान (अगली अवधि से कटेगा): -${formatWholeCurrency(Math.abs(bill.netPayable))}*`
-        : `*अंतिम देय राशि: ₹0 (चुकता)*`;
+        ? `*इस साइकिल में देना बाकी: ₹0 (भुगतान हो चुका)*\n*ज्यादा भुगतान (अगली साइकिल से घटेगा): -${formatWholeCurrency(Math.abs(bill.netPayable))}*`
+        : `*इस साइकिल में देना बाकी: ₹0 (पूरा चुकता)*`
+      : payableBeforePayment < 0
+      ? `*इस साइकिल में देना बाकी: ₹0 (एडवांस से समायोजित)*\n*अतिरिक्त एडवांस (अगली साइकिल से घटेगा): -${formatWholeCurrency(Math.abs(payableBeforePayment))}*`
+      : `*इस साइकिल में देना बाकी: ${formatWholeCurrency(remInCycle)}*`;
 
     const shiftLines: string[] = [];
     if (bill.morningLiters > 0 || bill.eveningLiters === 0) {
@@ -1184,7 +1207,10 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       const val = e.target.value;
                       setAdvDate(val);
                       if (val && val.length >= 10) {
-                        const info = getCycleFromDate(val);
+                        const info =
+                          advType === 'payment'
+                            ? getDefaultBillingCycleForDate(val, state.collections)
+                            : getCycleFromDate(val);
                         setAdvBillingYearMonth(info.yearMonth);
                         setAdvBillingCycle(info.cycle);
                       }
@@ -1217,7 +1243,18 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                   <select
                     data-testid="adv-type-select"
                     value={advType}
-                    onChange={(e) => setAdvType(e.target.value as 'advance' | 'payment')}
+                    onChange={(e) => {
+                      const nextType = e.target.value as 'advance' | 'payment';
+                      setAdvType(nextType);
+                      if (advDate && advDate.length >= 10) {
+                        const info =
+                          nextType === 'payment'
+                            ? getDefaultBillingCycleForDate(advDate, state.collections)
+                            : getCycleFromDate(advDate);
+                        setAdvBillingYearMonth(info.yearMonth);
+                        setAdvBillingCycle(info.cycle);
+                      }
+                    }}
                     className="w-full min-h-[44px] px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl"
                   >
                     <option value="payment">
@@ -1811,6 +1848,130 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
               </button>
             </div>
 
+            {/* 10-DAY CYCLE PAYMENT & REMAINING SUMMARY BANNER (कितने पैसे दे चुका हूँ · कितने देने बाकी हैं · अगली साइकिल समायोजन) */}
+            {(() => {
+              const cyclePaymentSummary = calculateTenDayCyclePaymentSummary(
+                sortedFarmers,
+                billYearMonth,
+                billCycle,
+                state.collections,
+                state.advancesAndPayments,
+                state.cattleFeed
+              );
+              const defCycleCheck = getDefaultBillingCycleForDate(
+                state.selectedDate,
+                state.collections
+              );
+              const showingPreviousCycleGrace =
+                defCycleCheck.isPreviousCycleGraceWindow &&
+                defCycleCheck.yearMonth === billYearMonth &&
+                defCycleCheck.cycle === billCycle;
+
+              return (
+                <div
+                  data-testid="ten-day-cycle-payment-summary-card"
+                  className="bg-slate-900 text-white rounded-2xl p-3 sm:p-4 space-y-2.5 border-2 border-blue-500 shadow-xs tabular-nums"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full bg-blue-600 text-white text-[11px] font-extrabold">
+                        10-दिन साइकिल भुगतान हिसाब: {getCycleLabelHi(billCycle, billYearMonth)}
+                      </span>
+                      {showingPreviousCycleGrace && (
+                        <span
+                          data-testid="previous-cycle-grace-badge"
+                          className="px-2 py-0.5 rounded-full bg-amber-400/20 border border-amber-400/50 text-amber-200 text-[10px] font-bold"
+                        >
+                          17 तारीख तक पिछला बिल सक्रिय ({formatDateDMY(cyclePaymentSummary.fromDate)} से {formatDateDMY(cyclePaymentSummary.toDate)})
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-300 font-semibold">
+                      नियम: भुगतान हो चुके किसानों का कम/ज्यादा अंतर अगली साइकिल में जुड़ेगा/घटेगा
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    {/* Box 1: कितने पैसे दे चुका हूँ (Already Paid in this 10-day Cycle) */}
+                    <div
+                      data-testid="cycle-already-paid-box"
+                      className="p-2.5 rounded-xl bg-emerald-950/90 border border-emerald-500/60"
+                    >
+                      <span className="text-[10px] sm:text-[11px] font-bold text-emerald-200 block">
+                        1. इस साइकिल में दे चुका हूँ (Paid)
+                      </span>
+                      <strong
+                        data-testid="cycle-already-paid-amount"
+                        className="text-base sm:text-lg font-black text-emerald-300 block mt-0.5"
+                      >
+                        {formatWholeCurrency(cyclePaymentSummary.totalAlreadyPaidInCycle)}
+                      </strong>
+                      <span className="text-[10px] text-emerald-200/90 block leading-tight mt-0.5">
+                        भुगतान: {formatWholeCurrency(cyclePaymentSummary.totalPaymentsMade)} + समायोजित एडवांस: {formatWholeCurrency(cyclePaymentSummary.totalAdvancesAdjustedInCycle)} ({cyclePaymentSummary.paidFarmerCount} किसान)
+                      </span>
+                    </div>
+
+                    {/* Box 2: कितने पैसे देने बाकी हैं (ONLY Unpaid Farmers in this Period) */}
+                    <div
+                      data-testid="cycle-remaining-to-pay-box"
+                      className="p-2.5 rounded-xl bg-amber-950/90 border border-amber-400/70"
+                    >
+                      <span className="text-[10px] sm:text-[11px] font-bold text-amber-200 block">
+                        2. अभी देने बाकी हैं (केवल अपूर्ण भुगतान)
+                      </span>
+                      <strong
+                        data-testid="cycle-remaining-to-pay-amount"
+                        className="text-base sm:text-lg font-black text-amber-300 block mt-0.5"
+                      >
+                        {formatWholeCurrency(cyclePaymentSummary.totalRemainingToPayInCycle)}
+                      </strong>
+                      <span className="text-[10px] text-amber-200/90 block leading-tight mt-0.5">
+                        केवल {cyclePaymentSummary.unpaidFarmerCount} किसान जिनका इस अवधि में भुगतान नहीं हुआ है
+                      </span>
+                    </div>
+
+                    {/* Box 3: कम भुगतान — अगली साइकिल में जोड़ना है */}
+                    <div
+                      data-testid="cycle-next-add-box"
+                      className="p-2.5 rounded-xl bg-slate-800/90 border border-slate-600"
+                    >
+                      <span className="text-[10px] sm:text-[11px] font-bold text-cyan-200 block">
+                        3. अगली साइकिल में जुड़ेगा (+)
+                      </span>
+                      <strong
+                        data-testid="cycle-next-add-amount"
+                        className="text-sm sm:text-base font-black text-cyan-300 block mt-0.5"
+                      >
+                        +{formatWholeCurrency(cyclePaymentSummary.nextCycleAddTotal)}
+                      </strong>
+                      <span className="text-[10px] text-slate-300 block leading-tight mt-0.5">
+                        भुगतान के बाद कम दिए गए पैसे (यहां बाकी में शामिल नहीं)
+                      </span>
+                    </div>
+
+                    {/* Box 4: ज्यादा भुगतान या ज्यादा एडवांस — अगली साइकिल से घटाना है */}
+                    <div
+                      data-testid="cycle-next-subtract-box"
+                      className="p-2.5 rounded-xl bg-indigo-950/90 border border-indigo-400/60"
+                    >
+                      <span className="text-[10px] sm:text-[11px] font-bold text-indigo-200 block">
+                        4. अगली साइकिल से घटेगा (-)
+                      </span>
+                      <strong
+                        data-testid="cycle-next-subtract-amount"
+                        className="text-sm sm:text-base font-black text-indigo-300 block mt-0.5"
+                      >
+                        -{formatWholeCurrency(cyclePaymentSummary.nextCycleSubtractTotal)}
+                      </strong>
+                      <span className="text-[10px] text-indigo-200/90 block leading-tight mt-0.5">
+                        ज्यादा भुगतान या 10-दिन बिल से अधिक एडवांस ({formatWholeCurrency(cyclePaymentSummary.totalExcessAdvanceForNextCycle)})
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* REPORT 1 & 2: सुबह के 10 दिन का बिल (10-Day Morning Bill) & शाम के 10 दिन का बिल (10-Day Evening Bill) */}
             {(activeCleanReport === 'morning' || activeCleanReport === 'evening') &&
               (() => {
@@ -1861,12 +2022,12 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">
-                          {lang === 'hi' ? '10-दिन की अवधि' : '10-Day Period'}
+                          {lang === 'hi' ? '10-दिन की अवधि (17 तक पिछला बिल)' : '10-Day Period'}
                         </label>
                         <select
                           value={billCycle}
                           onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
-                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl font-bold"
                         >
                           <option value={1}>1 से 10 तारीख (Cycle 1)</option>
                           <option value={2}>11 से 20 तारीख (Cycle 2)</option>
@@ -2239,12 +2400,13 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </div>
                       <div>
                         <label className="block text-xs font-bold text-slate-700 mb-1">
-                          {lang === 'hi' ? '10-दिन की अवधि' : '10-Day Period'}
+                          {lang === 'hi' ? '10-दिन की अवधि (17 तारीख तक पिछला बिल)' : '10-Day Period'}
                         </label>
                         <select
+                          data-testid="tenday-report-cycle-select"
                           value={billCycle}
                           onChange={(e) => setBillCycle(Number(e.target.value) as 1 | 2 | 3)}
-                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl"
+                          className="w-full min-h-[40px] px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-xl font-bold"
                         >
                           <option value={1}>1 से 10 तारीख (Cycle 1)</option>
                           <option value={2}>11 से 20 तारीख (Cycle 2)</option>
@@ -2757,6 +2919,187 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                       </>
                     )}
 
+                     {/* FARMER-WISE 10-DAY CYCLE PAYMENT & REMAINING STATUS TABLE (केवल उन्हीं किसानों का बाकी जिनका इस अवधि में भुगतान नहीं हुआ हो) */}
+                    {reportFarmerFilter === 'all' &&
+                      (() => {
+                        const cycleSummary = calculateTenDayCyclePaymentSummary(
+                          sortedFarmers,
+                          billYearMonth,
+                          billCycle,
+                          state.collections,
+                          state.advancesAndPayments,
+                          state.cattleFeed
+                        );
+                        if (cycleSummary.farmerRows.length === 0) return null;
+                        return (
+                          <div
+                            data-testid="cycle-farmer-settlement-table-card"
+                            className="bg-white border-2 border-blue-300 rounded-2xl overflow-hidden"
+                          >
+                            <div className="bg-blue-950 text-white px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <h4 className="text-xs sm:text-sm font-extrabold">
+                                  💰 10-दिन साइकिल किसान-वार भुगतान व बाकी हिसाब ({formatDateDMY(fromDate)} से {formatDateDMY(toDate)})
+                                </h4>
+                                <p className="text-[10px] sm:text-xs text-blue-200">
+                                  कम एडवांस इसी साइकिल में जुड़ा है · ज्यादा एडवांस व भुगतान के बाद कम/ज्यादा अगली साइकिल में समायोजित होगा
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 text-xs font-extrabold tabular-nums">
+                                <span className="px-2 py-0.5 rounded bg-emerald-800 text-emerald-100 border border-emerald-500">
+                                  दे चुके: {formatWholeCurrency(cycleSummary.totalAlreadyPaidInCycle)}
+                                </span>
+                                <span className="px-2 py-0.5 rounded bg-amber-700 text-amber-100 border border-amber-400">
+                                  देने बाकी: {formatWholeCurrency(cycleSummary.totalRemainingToPayInCycle)}
+                                </span>
+                              </div>
+                            </div>
+
+                            <table
+                              data-testid="cycle-farmer-settlement-table"
+                              className="w-full text-[10.5px] sm:text-xs border-collapse tabular-nums"
+                            >
+                              <thead>
+                                <tr className="bg-slate-100 text-slate-900 font-extrabold border-b border-slate-300">
+                                  <th className="py-1.5 px-1 sm:px-2 text-left border border-slate-300">
+                                    किसान (कोड व नाम)
+                                  </th>
+                                  <th className="py-1.5 px-1 text-right border border-slate-300">
+                                    10-दिन कुल बिल
+                                  </th>
+                                  <th className="py-1.5 px-1 text-right border border-slate-300">
+                                    एडवांस (इस साइकिल में)
+                                  </th>
+                                  <th className="py-1.5 px-1 text-right border border-slate-300 bg-emerald-50 text-emerald-950">
+                                    भुगतान दिया
+                                  </th>
+                                  <th className="py-1.5 px-1 text-right border border-slate-300 bg-amber-50 text-amber-950">
+                                    अभी देना बाकी
+                                  </th>
+                                  <th className="py-1.5 px-1 sm:px-2 text-right border border-slate-300">
+                                    अगली साइकिल में जोड़/घटाव
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {cycleSummary.farmerRows.map((row) => (
+                                  <tr key={row.farmerId} className="hover:bg-slate-50">
+                                    <td className="py-1.5 px-1 sm:px-2 border border-slate-300 font-bold text-slate-900">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setBillFarmerId(row.farmerId);
+                                          setQuickBillPayAmount(
+                                            row.remainingToPayInCurrentCycle > 0
+                                              ? String(row.remainingToPayInCurrentCycle)
+                                              : ''
+                                          );
+                                        }}
+                                        className="text-left hover:text-blue-700 font-extrabold block leading-tight"
+                                      >
+                                        {row.farmerCode} — {row.farmerName}
+                                      </button>
+                                      {row.previousBalance !== 0 && (
+                                        <span className="text-[9.5px] text-slate-500 block">
+                                          पिछला: {row.previousBalance > 0 ? `+${formatWholeCurrency(row.previousBalance)}` : `-${formatWholeCurrency(Math.abs(row.previousBalance))}`}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-1.5 px-1 text-right font-bold text-slate-900 border border-slate-300">
+                                      {formatWholeCurrency(row.grossCycleAmount)}
+                                    </td>
+                                    <td className="py-1.5 px-1 text-right border border-slate-300">
+                                      {row.advancesInPeriod > 0 ? (
+                                        <div>
+                                          <span className="font-bold text-amber-800 block">
+                                            -{formatWholeCurrency(row.advanceAdjustedInCurrentCycle)}
+                                          </span>
+                                          {row.excessAdvanceForNextCycle > 0 && (
+                                            <span className="text-[9.5px] font-bold text-indigo-700 block">
+                                              अतिरिक्त -{formatWholeCurrency(row.excessAdvanceForNextCycle)} (अगली साइकिल)
+                                            </span>
+                                          )}
+                                        </div>
+                                      ) : (
+                                        <span className="text-slate-400">₹0</span>
+                                      )}
+                                    </td>
+                                    <td className="py-1.5 px-1 text-right font-extrabold text-emerald-800 bg-emerald-50/40 border border-slate-300">
+                                      {row.paymentsInPeriod > 0
+                                        ? formatWholeCurrency(row.paymentsInPeriod)
+                                        : '₹0'}
+                                    </td>
+                                    <td
+                                      data-testid={`farmer-cycle-remaining-${row.farmerCode}`}
+                                      className="py-1.5 px-1 text-right font-black bg-amber-50/50 border border-slate-300"
+                                    >
+                                      {row.hasPaymentInPeriod ? (
+                                        <span className="text-emerald-700 text-[10px] font-extrabold">
+                                          ₹0 (भुगतान हो गया)
+                                        </span>
+                                      ) : row.status === 'advance_excess' ? (
+                                        <span className="text-indigo-700 text-[10px] font-extrabold">
+                                          ₹0 (एडवांस से चुकता)
+                                        </span>
+                                      ) : (
+                                        <span className="text-amber-900">
+                                          {formatWholeCurrency(row.remainingToPayInCurrentCycle)}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td
+                                      data-testid={`farmer-cycle-next-carry-${row.farmerCode}`}
+                                      className="py-1.5 px-1 sm:px-2 text-right font-bold border border-slate-300"
+                                    >
+                                      {row.nextCycleCarryForward > 0 ? (
+                                        <span className="text-amber-800 font-extrabold">
+                                          +{formatWholeCurrency(row.nextCycleCarryForward)} (जुड़ेगा)
+                                        </span>
+                                      ) : row.nextCycleCarryForward < 0 ? (
+                                        <span className="text-indigo-700 font-extrabold">
+                                          -{formatWholeCurrency(Math.abs(row.nextCycleCarryForward))} (घटेगा)
+                                        </span>
+                                      ) : (
+                                        <span className="text-slate-400">₹0</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                              <tfoot>
+                                <tr className="bg-slate-900 text-white font-extrabold">
+                                  <td className="py-2 px-1 sm:px-2 border border-slate-700">
+                                    कुल ({cycleSummary.farmerRows.length} किसान)
+                                  </td>
+                                  <td className="py-2 px-1 text-right border border-slate-700">
+                                    {formatWholeCurrency(cycleSummary.totalGrossCycleAmount)}
+                                  </td>
+                                  <td className="py-2 px-1 text-right text-amber-200 border border-slate-700">
+                                    -{formatWholeCurrency(cycleSummary.totalAdvancesAdjustedInCycle)}
+                                  </td>
+                                  <td className="py-2 px-1 text-right text-emerald-300 border border-slate-700">
+                                    {formatWholeCurrency(cycleSummary.totalPaymentsMade)}
+                                  </td>
+                                  <td
+                                    data-testid="cycle-table-total-remaining"
+                                    className="py-2 px-1 text-right text-amber-300 border border-slate-700"
+                                  >
+                                    {formatWholeCurrency(cycleSummary.totalRemainingToPayInCycle)}
+                                  </td>
+                                  <td className="py-2 px-1 sm:px-2 text-right border border-slate-700">
+                                    {cycleSummary.nextCycleNetCarryForward > 0
+                                      ? `+${formatWholeCurrency(cycleSummary.nextCycleNetCarryForward)}`
+                                      : cycleSummary.nextCycleNetCarryForward < 0
+                                      ? `-${formatWholeCurrency(Math.abs(cycleSummary.nextCycleNetCarryForward))}`
+                                      : '₹0'}
+                                  </td>
+                                </tr>
+                              </tfoot>
+                            </table>
+                          </div>
+                        );
+                      })()}
+
                     {/* COMBINED MORNING + EVENING TOTAL + ADVANCE/BALANCE ADJUSTMENT + INLINE PAYMENT */}
                     <div
                       data-testid="tenday-combined-accounting-card"
@@ -2869,12 +3212,18 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
 
                             <div className="px-3 py-2 flex items-center justify-between gap-2">
                               <span className="font-semibold text-slate-700">
-                                एडवांस और दाना/पशु-आहार रकम का घटाव (-)
+                                एडवांस (इस साइकिल में समायोजित) और दाना/पशु-आहार घटाव (-)
+                                {(liveFarmerBillData.excessAdvanceForNextCycle || 0) > 0 && (
+                                  <span className="block text-[11px] font-bold text-indigo-700">
+                                    (कुल एडवांस {formatWholeCurrency(liveFarmerBillData.advancesInPeriod)} में से {formatWholeCurrency(liveFarmerBillData.excessAdvanceForNextCycle)} अगली साइकिल से घटेगा)
+                                  </span>
+                                )}
                               </span>
                               <span className="font-extrabold text-red-600">
                                 -
                                 {formatWholeCurrency(
-                                  liveFarmerBillData.advancesInPeriod +
+                                  (liveFarmerBillData.advanceAdjustedInCurrentCycle ??
+                                    liveFarmerBillData.advancesInPeriod) +
                                     liveFarmerBillData.feedDeductionsInPeriod +
                                     liveFarmerBillData.inlineDeductions
                                 )}
@@ -2909,16 +3258,40 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                               </span>
                             </div>
 
+                            <div className="px-3 py-2.5 flex items-center justify-between gap-2 bg-amber-50/80">
+                              <span className="font-extrabold text-amber-950 text-xs sm:text-sm">
+                                इस साइकिल में अभी देना बाकी (केवल अपूर्ण भुगतान होने पर)
+                              </span>
+                              <span
+                                data-testid="bill-remaining-in-cycle"
+                                className="font-extrabold text-amber-900 text-sm sm:text-base"
+                              >
+                                {liveFarmerBillData.hasPaymentInPeriod
+                                  ? '₹0 (भुगतान हो चुका)'
+                                  : formatWholeCurrency(
+                                      liveFarmerBillData.remainingToPayInCurrentCycle ??
+                                        Math.max(0, liveFarmerBillData.netPayable)
+                                    )}
+                              </span>
+                            </div>
+
                             <div className="px-3 py-2.5 flex items-center justify-between gap-2 bg-emerald-50">
                               <span className="font-extrabold text-emerald-950 text-xs sm:text-sm">
-                                अंतिम शेष देय / बकाया रकम
+                                {liveFarmerBillData.hasPaymentInPeriod
+                                  ? 'भुगतान के बाद अगली साइकिल में जोड़/घटाव'
+                                  : (liveFarmerBillData.excessAdvanceForNextCycle || 0) > 0
+                                  ? 'अतिरिक्त एडवांस (अगली साइकिल से घटेगा)'
+                                  : 'अंतिम शेष देय / बकाया रकम'}
                               </span>
                               <span
                                 data-testid="bill-net-payable"
                                 className="font-extrabold text-emerald-800 text-base sm:text-lg"
                               >
                                 {liveFarmerBillData.netPayable < 0
-                                  ? `-${formatWholeCurrency(Math.abs(liveFarmerBillData.netPayable))}`
+                                  ? `-${formatWholeCurrency(Math.abs(liveFarmerBillData.netPayable))} (अगली साइकिल से घटेगा)`
+                                  : liveFarmerBillData.hasPaymentInPeriod &&
+                                    liveFarmerBillData.netPayable > 0
+                                  ? `+${formatWholeCurrency(liveFarmerBillData.netPayable)} (अगली साइकिल में जुड़ेगा)`
                                   : formatWholeCurrency(liveFarmerBillData.netPayable)}
                               </span>
                             </div>
@@ -2947,15 +3320,26 @@ export const FarmersAndLedgerView: React.FC<FarmersAndLedgerViewProps> = ({
                                 <span className="text-xs font-extrabold text-blue-950">
                                   💳 यहीं पर भुगतान करें ({accountingFarmer.code} — {accountingFarmer.name})
                                 </span>
-                                {liveFarmerBillData.netPayable > 0 && (
+                                {(liveFarmerBillData.remainingToPayInCurrentCycle ??
+                                  liveFarmerBillData.netPayable) > 0 && (
                                   <button
                                     type="button"
                                     onClick={() =>
-                                      setQuickBillPayAmount(String(liveFarmerBillData.netPayable))
+                                      setQuickBillPayAmount(
+                                        String(
+                                          liveFarmerBillData.remainingToPayInCurrentCycle ??
+                                            liveFarmerBillData.netPayable
+                                        )
+                                      )
                                     }
                                     className="px-2.5 py-1 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-[11px] font-extrabold"
                                   >
-                                    पूरा बकाया भरें ({formatWholeCurrency(liveFarmerBillData.netPayable)})
+                                    पूरा बकाया भरें (
+                                    {formatWholeCurrency(
+                                      liveFarmerBillData.remainingToPayInCurrentCycle ??
+                                        liveFarmerBillData.netPayable
+                                    )}
+                                    )
                                   </button>
                                 )}
                               </div>

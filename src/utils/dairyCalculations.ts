@@ -1302,15 +1302,38 @@ export function generateTenDayBillData(
       .reduce((s, f) => s + truncatePurchaseAmount(f.totalAmount), 0)
   );
 
-  const billPayableBeforePayment = truncatePurchaseAmount(
+  const grossCycleAmount = truncatePurchaseAmount(
     previousBalance +
       periodSummary.totalAmount -
       periodSummary.totalDeductions -
-      periodAdvances -
       periodFeed
   );
 
+  const billPayableBeforePayment = truncatePurchaseAmount(
+    grossCycleAmount - periodAdvances
+  );
+
   const netPayable = truncatePurchaseAmount(billPayableBeforePayment - periodPayments);
+
+  const hasPaymentInPeriod = periodPayments > 0;
+  const positiveGross = Math.max(0, grossCycleAmount);
+  const advanceAdjustedInCurrentCycle = truncatePurchaseAmount(
+    Math.min(periodAdvances, positiveGross)
+  );
+  const excessAdvanceForNextCycle = truncatePurchaseAmount(
+    Math.max(0, periodAdvances - positiveGross)
+  );
+  // Remaining to pay in THIS cycle:
+  // Only for farmers who have NOT been paid in this period AND whose bill after advance is > 0.
+  // Once paid (hasPaymentInPeriod === true), any underpayment or overpayment goes to the next cycle!
+  const remainingToPayInCurrentCycle = hasPaymentInPeriod
+    ? 0
+    : Math.max(0, billPayableBeforePayment);
+  const nextCycleCarryForward = hasPaymentInPeriod
+    ? netPayable
+    : billPayableBeforePayment < 0
+    ? billPayableBeforePayment
+    : 0;
 
   const snapshotHash = computeBillSnapshotHash(
     farmer,
@@ -1344,6 +1367,11 @@ export function generateTenDayBillData(
     previousBalance,
     netPayable,
     billPayableBeforePayment,
+    remainingToPayInCurrentCycle,
+    nextCycleCarryForward,
+    advanceAdjustedInCurrentCycle,
+    excessAdvanceForNextCycle,
+    hasPaymentInPeriod,
     previousCycleLabelHi,
     previousBillPayableBeforePayment,
     previousBillPaidAmount: prevCyclePaidAmount,
@@ -5667,5 +5695,377 @@ export function buildAllFarmersTenDayBillRows(
   };
 }
 
+/**
+ * Bulk Milk Sale Quantity Formatter:
+ * Does NOT auto-insert a decimal point (unlike collection's 5258 -> 5.258) because wholesale milk is sold in bulk (e.g., 50, 120, 250 L).
+ * Still allows manual decimal entry (e.g. "125.5") if the user explicitly types a dot.
+ */
+export function formatBulkSaleQuantity(raw: string): string {
+  const cleaned = String(raw || '').replace(/[^0-9.]/g, '');
+  if (!cleaned) return '';
+  const parts = cleaned.split('.');
+  if (parts.length === 1) {
+    return parts[0];
+  }
+  return `${parts[0]}.${parts.slice(1).join('').slice(0, 3)}`;
+}
 
+/**
+ * Default 10-Day Billing Cycle Selector with 17th-Date Previous-Cycle Grace Window:
+ * - On days 11 to 17 (11 से 17 तारीख तक): Defaults to Cycle 1 (1 से 10 तारीख — पिछला बिल)
+ *   because the dairy owner settles and pays the 1–10 bill up until the 15th, 16th, 17th!
+ * - On days 18 to 20: Defaults to Cycle 2 (11 से 20 तारीख).
+ * - On days 21 to 27 (21 से 27 तारीख तक): Defaults to Cycle 2 (11 से 20 तारीख — पिछला बिल),
+ *   unless entries are provided and Cycle 2 has 0 entries while Cycle 3 already has entries.
+ * - On days 28 to 31: Defaults to Cycle 3 (21 से महीने के अंत तक).
+ * - On days 1 to 7: Defaults to previous month's Cycle 3 (21 से अंत तक) if no entries are provided
+ *   or if previous month's Cycle 3 has entries (and if only current month Cycle 1 has entries, shows Cycle 1).
+ */
+export function getDefaultBillingCycleForDate(
+  dateStr: string,
+  entries?: Array<{ date: string }>
+): { yearMonth: string; cycle: 1 | 2 | 3; isPreviousCycleGraceWindow: boolean } {
+  const safeDate =
+    dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+      ? dateStr
+      : new Date().toISOString().slice(0, 10);
+  const yearMonth = safeDate.slice(0, 7);
+  const day = Number(safeDate.slice(8, 10)) || 1;
 
+  if (day >= 11 && day <= 17) {
+    return {
+      yearMonth,
+      cycle: 1,
+      isPreviousCycleGraceWindow: true,
+    };
+  }
+
+  if (day >= 18 && day <= 20) {
+    return {
+      yearMonth,
+      cycle: 2,
+      isPreviousCycleGraceWindow: false,
+    };
+  }
+
+  if (day >= 21 && day <= 27) {
+    if (entries && entries.length > 0) {
+      const c2Range = getTenDayCycleDates(yearMonth, 2);
+      const c3Range = getTenDayCycleDates(yearMonth, 3);
+      const hasC2 = entries.some((e) => e.date >= c2Range.fromDate && e.date <= c2Range.toDate);
+      const hasC3 = entries.some((e) => e.date >= c3Range.fromDate && e.date <= c3Range.toDate);
+      if (!hasC2 && hasC3) {
+        return {
+          yearMonth,
+          cycle: 3,
+          isPreviousCycleGraceWindow: false,
+        };
+      }
+    }
+    return {
+      yearMonth,
+      cycle: 2,
+      isPreviousCycleGraceWindow: true,
+    };
+  }
+
+  if (day >= 28) {
+    return {
+      yearMonth,
+      cycle: 3,
+      isPreviousCycleGraceWindow: false,
+    };
+  }
+
+  if (day >= 1 && day <= 7) {
+    const prev = getPreviousTenDayCycle(yearMonth, 1);
+    if (entries && entries.length > 0) {
+      const prevRange = getTenDayCycleDates(prev.yearMonth, prev.cycle);
+      const c1Range = getTenDayCycleDates(yearMonth, 1);
+      const hasPrev = entries.some(
+        (e) => e.date >= prevRange.fromDate && e.date <= prevRange.toDate
+      );
+      const hasC1 = entries.some((e) => e.date >= c1Range.fromDate && e.date <= c1Range.toDate);
+      if (hasC1 && !hasPrev) {
+        return {
+          yearMonth,
+          cycle: 1,
+          isPreviousCycleGraceWindow: false,
+        };
+      }
+      if (hasPrev) {
+        return {
+          yearMonth: prev.yearMonth,
+          cycle: prev.cycle,
+          isPreviousCycleGraceWindow: true,
+        };
+      }
+      return {
+        yearMonth,
+        cycle: 1,
+        isPreviousCycleGraceWindow: false,
+      };
+    }
+    return {
+      yearMonth: prev.yearMonth,
+      cycle: prev.cycle,
+      isPreviousCycleGraceWindow: true,
+    };
+  }
+
+  return {
+    yearMonth,
+    cycle: 1,
+    isPreviousCycleGraceWindow: false,
+  };
+}
+
+export interface FarmerCycleSettlementRow {
+  farmerId: string;
+  farmerCode: string;
+  farmerName: string;
+  farmerMobile: string;
+  totalLiters: number;
+  totalMilkAmount: number;
+  previousBalance: number;
+  inlineDeductions: number;
+  feedDeductionsInPeriod: number;
+  grossCycleAmount: number;
+  advancesInPeriod: number;
+  advanceAdjustedInCurrentCycle: number;
+  excessAdvanceForNextCycle: number;
+  billPayableBeforePayment: number;
+  payableInCurrentCycleBeforePayment: number;
+  paymentsInPeriod: number;
+  hasPaymentInPeriod: boolean;
+  remainingToPayInCurrentCycle: number;
+  nextCycleCarryForward: number;
+  status: 'unpaid' | 'paid_exact' | 'paid_under' | 'paid_over' | 'advance_excess' | 'no_dues';
+}
+
+export interface TenDayCyclePaymentSummary {
+  yearMonth: string;
+  cycle: 1 | 2 | 3;
+  fromDate: string;
+  toDate: string;
+  farmerRows: FarmerCycleSettlementRow[];
+  totalMilkAmount: number;
+  totalGrossCycleAmount: number;
+  totalAdvancesInPeriod: number;
+  totalAdvancesAdjustedInCycle: number;
+  totalExcessAdvanceForNextCycle: number;
+  totalPaymentsMade: number;
+  totalAlreadyPaidInCycle: number;
+  totalRemainingToPayInCycle: number;
+  unpaidFarmerCount: number;
+  paidFarmerCount: number;
+  nextCycleAddTotal: number;
+  nextCycleSubtractTotal: number;
+  nextCycleNetCarryForward: number;
+}
+
+/**
+ * Calculates the 10-Day Cycle Payment & Pending Summary across all farmers:
+ * 1. "कितने पैसे दे चुका हूँ" (totalAlreadyPaidInCycle = totalPaymentsMade + totalAdvancesAdjustedInCycle)
+ * 2. "कितने पैसे देने बाकी हैं" (totalRemainingToPayInCycle):
+ *    - ONLY includes farmers who have NOT been paid in this period (hasPaymentInPeriod === false)
+ *      and whose net payable after advance is > 0.
+ *    - Once a farmer is paid in this period, their underpayment (+ve) or overpayment (-ve) is NOT included
+ *      in "देने बाकी" of this cycle — instead it goes to nextCycleCarryForward (अगले साइकिल में जुड़ेगा/घटेगा).
+ * 3. Advance Rule:
+ *    - If a farmer's advance <= their 10-day cycle amount, the advance is adjusted in this cycle itself.
+ *    - If a farmer's advance > their 10-day cycle amount, remainingToPayInCurrentCycle is 0 in this cycle,
+ *      and the excess advance is subtracted from the NEXT cycle (nextCycleCarryForward < 0).
+ */
+export function calculateTenDayCyclePaymentSummary(
+  farmers: Farmer[],
+  yearMonth: string,
+  cycle: 1 | 2 | 3,
+  collections: MilkCollectionEntry[],
+  advancesAndPayments: AdvancePaymentEntry[],
+  cattleFeed: CattleFeedEntry[]
+): TenDayCyclePaymentSummary {
+  const { fromDate, toDate } = getTenDayCycleDates(yearMonth, cycle);
+
+  const farmerMap = new Map<string, Farmer>();
+  for (const f of farmers) {
+    farmerMap.set(f.id, f);
+  }
+  for (const c of collections) {
+    if (c.date <= toDate && !farmerMap.has(c.farmerId)) {
+      farmerMap.set(c.farmerId, {
+        id: c.farmerId,
+        code: c.farmerCode || '',
+        name: c.farmerName || '',
+        mobile: '',
+        village: '',
+        shiftSchedule: 'both',
+        openingBalance: 0,
+        notes: '',
+        active: true,
+        createdAt: '',
+      });
+    }
+  }
+  for (const ap of advancesAndPayments) {
+    if (!farmerMap.has(ap.farmerId)) {
+      farmerMap.set(ap.farmerId, {
+        id: ap.farmerId,
+        code: '',
+        name: ap.farmerName || '',
+        mobile: '',
+        village: '',
+        shiftSchedule: 'both',
+        openingBalance: 0,
+        notes: '',
+        active: true,
+        createdAt: '',
+      });
+    }
+  }
+
+  const sortedFarmers = sortFarmersByCode(Array.from(farmerMap.values()));
+  const farmerRows: FarmerCycleSettlementRow[] = [];
+
+  let totalMilkAmount = 0;
+  let totalGrossCycleAmount = 0;
+  let totalAdvancesInPeriod = 0;
+  let totalAdvancesAdjustedInCycle = 0;
+  let totalExcessAdvanceForNextCycle = 0;
+  let totalPaymentsMade = 0;
+  let totalRemainingToPayInCycle = 0;
+  let unpaidFarmerCount = 0;
+  let paidFarmerCount = 0;
+  let nextCycleAddTotal = 0;
+  let nextCycleSubtractTotal = 0;
+
+  for (const farmer of sortedFarmers) {
+    const bill = generateTenDayBillData(
+      farmer,
+      yearMonth,
+      cycle,
+      collections,
+      advancesAndPayments,
+      cattleFeed
+    );
+
+    const grossCycleAmount = truncatePurchaseAmount(
+      bill.previousBalance +
+        bill.totalMilkAmount -
+        bill.inlineDeductions -
+        bill.feedDeductionsInPeriod
+    );
+    const hasActivity =
+      bill.totalLiters > 0 ||
+      bill.totalMilkAmount > 0 ||
+      bill.previousBalance !== 0 ||
+      bill.advancesInPeriod > 0 ||
+      bill.feedDeductionsInPeriod > 0 ||
+      bill.paymentsInPeriod > 0;
+
+    if (!hasActivity) continue;
+
+    const positiveGross = Math.max(0, grossCycleAmount);
+    const advanceAdjustedInCurrentCycle = truncatePurchaseAmount(
+      Math.min(bill.advancesInPeriod, positiveGross)
+    );
+    const excessAdvanceForNextCycle = truncatePurchaseAmount(
+      Math.max(0, bill.advancesInPeriod - positiveGross)
+    );
+    const billPayableBeforePayment = truncatePurchaseAmount(
+      grossCycleAmount - bill.advancesInPeriod
+    );
+    const payableInCurrentCycleBeforePayment = Math.max(0, billPayableBeforePayment);
+    const hasPaymentInPeriod = bill.paymentsInPeriod > 0;
+
+    const remainingToPayInCurrentCycle = hasPaymentInPeriod
+      ? 0
+      : Math.max(0, billPayableBeforePayment);
+
+    const nextCycleCarryForward = hasPaymentInPeriod
+      ? truncatePurchaseAmount(billPayableBeforePayment - bill.paymentsInPeriod)
+      : billPayableBeforePayment < 0
+      ? billPayableBeforePayment
+      : 0;
+
+    let status: FarmerCycleSettlementRow['status'] = 'no_dues';
+    if (hasPaymentInPeriod) {
+      if (nextCycleCarryForward > 0) status = 'paid_under';
+      else if (nextCycleCarryForward < 0) status = 'paid_over';
+      else status = 'paid_exact';
+    } else if (billPayableBeforePayment < 0) {
+      status = 'advance_excess';
+    } else if (remainingToPayInCurrentCycle > 0) {
+      status = 'unpaid';
+    }
+
+    if (remainingToPayInCurrentCycle > 0) {
+      unpaidFarmerCount += 1;
+    }
+    if (hasPaymentInPeriod || status === 'advance_excess') {
+      paidFarmerCount += 1;
+    }
+
+    totalMilkAmount += bill.totalMilkAmount;
+    totalGrossCycleAmount += grossCycleAmount;
+    totalAdvancesInPeriod += bill.advancesInPeriod;
+    totalAdvancesAdjustedInCycle += advanceAdjustedInCurrentCycle;
+    totalExcessAdvanceForNextCycle += excessAdvanceForNextCycle;
+    totalPaymentsMade += bill.paymentsInPeriod;
+    totalRemainingToPayInCycle += remainingToPayInCurrentCycle;
+
+    if (nextCycleCarryForward > 0) {
+      nextCycleAddTotal += nextCycleCarryForward;
+    } else if (nextCycleCarryForward < 0) {
+      nextCycleSubtractTotal += Math.abs(nextCycleCarryForward);
+    }
+
+    farmerRows.push({
+      farmerId: farmer.id,
+      farmerCode: farmer.code,
+      farmerName: farmer.name,
+      farmerMobile: farmer.mobile,
+      totalLiters: bill.totalLiters,
+      totalMilkAmount: bill.totalMilkAmount,
+      previousBalance: bill.previousBalance,
+      inlineDeductions: bill.inlineDeductions,
+      feedDeductionsInPeriod: bill.feedDeductionsInPeriod,
+      grossCycleAmount,
+      advancesInPeriod: bill.advancesInPeriod,
+      advanceAdjustedInCurrentCycle,
+      excessAdvanceForNextCycle,
+      billPayableBeforePayment,
+      payableInCurrentCycleBeforePayment,
+      paymentsInPeriod: bill.paymentsInPeriod,
+      hasPaymentInPeriod,
+      remainingToPayInCurrentCycle,
+      nextCycleCarryForward,
+      status,
+    });
+  }
+
+  const totalAlreadyPaidInCycle = truncatePurchaseAmount(
+    totalPaymentsMade + totalAdvancesAdjustedInCycle
+  );
+
+  return {
+    yearMonth,
+    cycle,
+    fromDate,
+    toDate,
+    farmerRows,
+    totalMilkAmount: truncatePurchaseAmount(totalMilkAmount),
+    totalGrossCycleAmount: truncatePurchaseAmount(totalGrossCycleAmount),
+    totalAdvancesInPeriod: truncatePurchaseAmount(totalAdvancesInPeriod),
+    totalAdvancesAdjustedInCycle: truncatePurchaseAmount(totalAdvancesAdjustedInCycle),
+    totalExcessAdvanceForNextCycle: truncatePurchaseAmount(totalExcessAdvanceForNextCycle),
+    totalPaymentsMade: truncatePurchaseAmount(totalPaymentsMade),
+    totalAlreadyPaidInCycle,
+    totalRemainingToPayInCycle: truncatePurchaseAmount(totalRemainingToPayInCycle),
+    unpaidFarmerCount,
+    paidFarmerCount,
+    nextCycleAddTotal: truncatePurchaseAmount(nextCycleAddTotal),
+    nextCycleSubtractTotal: truncatePurchaseAmount(nextCycleSubtractTotal),
+    nextCycleNetCarryForward: truncatePurchaseAmount(nextCycleAddTotal - nextCycleSubtractTotal),
+  };
+}
